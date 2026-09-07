@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- P1.4 play level: `SimulationWorld::build_play_level` (floor, walls, platforms, mesa, sand dunes, water reservoir, contained rain pocket with diggable sand plug) plus `play_level_spawn`; deterministic content covered by `test_play_level_layout`.
+- Player avatar in the Godot host: top-down kinematic movement (WASD/arrows) colliding against native stone via new `AshfallWorld` queries `is_solid_cell`/`can_move_to_box`; red marker overlay, live position HUD, letterbox-correct world/display mapping (also fixes brush painting on non-square panels).
+- Avatar world interaction: dig sand/water (`E`) and place held material (`F`) in a 3x3 around the avatar; stone is undiggable, placement only fills air.
+- P1.5 persistence: `AshfallWorld::save_to_bytes`/`load_from_bytes` plus controller save file (`user://ashfall_save.bin`: version, avatar position/material, sim bytes) with Save/Load buttons and `F5`/`F9`; headless `tests/godot_p1_verify.gd` covers level, collision, and save/load identity.
 - Phased task documentation in `docs/tasks/README.md` and `docs/tasks/P0_FOUNDATION.md`.
 - Public chunk snapshot and query methods on `ashfall::SimulationWorld` (`read_chunk`, `has_chunk`, `active_chunks`, `copy_rect`).
 - Deterministic simulation tests for chunk and rect buffer extraction in `tests/simulation_tests.cpp`.

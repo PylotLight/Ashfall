@@ -444,6 +444,31 @@ bool SimulationWorld::is_solid(CellPosition position) const {
     return it->second.solid;
 }
 
+void SimulationWorld::build_play_level() {
+    reset();
+    // Floor and side walls.
+    fill_rect({0, 240}, {255, 255}, kStone);
+    fill_rect({0, 40}, {8, 239}, kStone);
+    fill_rect({247, 40}, {255, 239}, kStone);
+    // Staggered stone platforms (left) and a central mesa.
+    fill_rect({20, 200}, {70, 205}, kStone);
+    fill_rect({40, 160}, {90, 165}, kStone);
+    fill_rect({100, 180}, {155, 186}, kStone);
+    // Sand dunes resting on the floor.
+    fill_rect({15, 220}, {55, 239}, kSand);
+    fill_rect({150, 225}, {185, 239}, kSand);
+    // Water reservoir (right): stone divider wall + pooled water.
+    fill_rect({190, 200}, {196, 239}, kStone);
+    fill_rect({197, 215}, {246, 239}, kWater);
+    // Overhead rain pocket with a diggable sand plug on its left half.
+    // Stone cheeks contain the slump so the pocket only releases when dug.
+    fill_rect({145, 126}, {210, 131}, kStone);
+    fill_rect({145, 100}, {149, 131}, kStone);
+    fill_rect({206, 100}, {210, 131}, kStone);
+    fill_rect({150, 106}, {172, 125}, kSand);
+    fill_rect({173, 106}, {205, 125}, kWater);
+}
+
 bool SimulationWorld::can_move_to(CellPosition min_pos, CellPosition max_pos) const {
     const int min_x = std::min(min_pos.x, max_pos.x);
     const int max_x = std::max(min_pos.x, max_pos.x);

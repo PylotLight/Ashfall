@@ -5,6 +5,7 @@
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 
 #include "ashfall/simulation.hpp"
 
@@ -65,6 +66,13 @@ public:
     PackedVector2Array get_dirty_chunks() const;
     void clear_dirty_chunks();
     void setup_reference_world();
+    void setup_play_level();
+    Vector2i get_player_spawn() const;
+
+    bool is_solid_cell(int p_x, int p_y) const;
+    bool can_move_to_box(int p_x1, int p_y1, int p_x2, int p_y2) const;
+    PackedByteArray save_to_bytes() const;
+    bool load_from_bytes(const PackedByteArray &p_bytes);
 
     void set_auto_step(bool p_auto);
     bool is_auto_step() const;

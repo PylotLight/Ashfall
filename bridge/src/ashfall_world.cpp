@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <span>
 #include <vector>
 
 #include <godot_cpp/core/class_db.hpp>
@@ -20,6 +22,12 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_dirty_chunks"), &AshfallWorld::get_dirty_chunks);
     ClassDB::bind_method(D_METHOD("clear_dirty_chunks"), &AshfallWorld::clear_dirty_chunks);
     ClassDB::bind_method(D_METHOD("setup_reference_world"), &AshfallWorld::setup_reference_world);
+    ClassDB::bind_method(D_METHOD("setup_play_level"), &AshfallWorld::setup_play_level);
+    ClassDB::bind_method(D_METHOD("get_player_spawn"), &AshfallWorld::get_player_spawn);
+    ClassDB::bind_method(D_METHOD("is_solid_cell", "x", "y"), &AshfallWorld::is_solid_cell);
+    ClassDB::bind_method(D_METHOD("can_move_to_box", "x1", "y1", "x2", "y2"), &AshfallWorld::can_move_to_box);
+    ClassDB::bind_method(D_METHOD("save_to_bytes"), &AshfallWorld::save_to_bytes);
+    ClassDB::bind_method(D_METHOD("load_from_bytes", "bytes"), &AshfallWorld::load_from_bytes);
 
     ClassDB::bind_method(D_METHOD("set_auto_step", "auto_step"), &AshfallWorld::set_auto_step);
     ClassDB::bind_method(D_METHOD("is_auto_step"), &AshfallWorld::is_auto_step);
@@ -189,6 +197,44 @@ void AshfallWorld::setup_reference_world() {
     world_.fill_rect({165, 50}, {215, 100}, ashfall::kWater);
 
     update_world_texture();
+}
+
+void AshfallWorld::setup_play_level() {
+    world_.reset();
+    world_.build_play_level();
+    update_world_texture();
+}
+
+Vector2i AshfallWorld::get_player_spawn() const {
+    const ashfall::CellPosition spawn = ashfall::SimulationWorld::play_level_spawn();
+    return Vector2i(spawn.x, spawn.y);
+}
+
+bool AshfallWorld::is_solid_cell(int p_x, int p_y) const {
+    return world_.is_solid({p_x, p_y});
+}
+
+bool AshfallWorld::can_move_to_box(int p_x1, int p_y1, int p_x2, int p_y2) const {
+    return world_.can_move_to({p_x1, p_y1}, {p_x2, p_y2});
+}
+
+PackedByteArray AshfallWorld::save_to_bytes() const {
+    const std::vector<std::uint8_t> saved = world_.save();
+    PackedByteArray bytes;
+    bytes.resize(static_cast<int64_t>(saved.size()));
+    if (!saved.empty()) {
+        std::memcpy(bytes.ptrw(), saved.data(), saved.size());
+    }
+    return bytes;
+}
+
+bool AshfallWorld::load_from_bytes(const PackedByteArray &p_bytes) {
+    if (p_bytes.is_empty()) return false;
+    const std::span<const std::uint8_t> span(
+        reinterpret_cast<const std::uint8_t *>(p_bytes.ptr()), static_cast<std::size_t>(p_bytes.size()));
+    const bool ok = world_.load(span);
+    if (ok) update_world_texture();
+    return ok;
 }
 
 Ref<ImageTexture> AshfallWorld::update_world_texture() {

@@ -68,6 +68,12 @@ public:
     void clear_dirty_chunks();
     void mark_chunk_dirty(CellPosition chunk_position);
 
+    /// Hand-authored P1 play level: floor, walls, platforms, sand dunes and a
+    /// water reservoir. Resets the world first; deterministic content.
+    void build_play_level();
+    /// Player spawn for the play level, in cell units (feet position).
+    [[nodiscard]] static CellPosition play_level_spawn() noexcept { return {128, 240}; }
+
 private:
     // Unordered for O(1) step/edit lookups. Serialization sorts explicitly,
     // and step order is fixed by sorting dynamic cells, so determinism holds.
