@@ -21,10 +21,57 @@ void test_sand_falls_and_stops() {
 
 void test_water_spreads_when_supported() {
     ashfall::SimulationWorld world;
-    world.fill_rect({-2, 2}, {2, 2}, ashfall::kStone);
-    world.set_cell({0, 1}, ashfall::kWater);
+    world.fill_rect({-3, 2}, {3, 2}, ashfall::kStone);
+    world.fill_rect({-2, 1}, {2, 1}, ashfall::kWater); // supported row resting on stone
+    world.fill_rect({0, 0}, {1, 0}, ashfall::kWater);  // ponded pair on top of water
     world.step();
-    expect(world.cell({-1, 1}) == ashfall::kWater || world.cell({1, 1}) == ashfall::kWater, "water spreads sideways when supported");
+    expect(world.cell({-1, 0}) == ashfall::kWater || world.cell({2, 0}) == ashfall::kWater,
+        "ponded water with wet neighbors disperses laterally over its supporting water");
+}
+
+void test_water_surfer_drains_off_flat_layer() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.fill_rect({5, 9}, {15, 9}, ashfall::kWater);
+    world.set_cell({10, 8}, ashfall::kWater); // lone cell riding the layer
+    for (int i = 0; i < 100; ++i) world.step();
+    expect(world.cell({10, 8}) == ashfall::kAir, "surfer drains away instead of parking as a bump");
+    expect(world.occupied_cell_count() == 21 + 11 + 1, "surfer scenario conserves mass");
+}
+
+void test_water_surface_flattens_in_basin() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({20, 0}, {20, 10}, ashfall::kStone);
+    world.fill_rect({1, 9}, {19, 9}, ashfall::kWater); // full bottom layer
+    for (int x = 2; x <= 17; x += 3) world.set_cell({x, 8}, ashfall::kWater); // sparse dotted top row
+
+    std::vector<std::uint8_t> previous = world.save();
+    for (int i = 0; i < 300; ++i) world.step();
+    // NOTE: a partial top row has no sink, so individual cells may still trade
+    // places (gentle surface shimmer, smoothed out by the water renderer).
+    // The visual guarantees are mass conservation and a level surface, which
+    // hold regardless of arrangement. Full pools go bit-steady; that property
+    // is covered by test_water_reaches_steady_state.
+
+    // Surface must be level: water column heights differ by at most one.
+    int min_height = 99, max_height = 0, total_water = 0;
+    for (int x = 1; x <= 19; ++x) {
+        int height = 0;
+        for (int y = 0; y <= 9; ++y) {
+            if (world.cell({x, y}) == ashfall::kWater) {
+                ++height;
+                ++total_water;
+            }
+        }
+        if (height > 0) {
+            min_height = std::min(min_height, height);
+            max_height = std::max(max_height, height);
+        }
+    }
+    expect(total_water == 19 + 6, "flattening conserves mass");
+    expect(max_height - min_height <= 1, "settled surface is level within one cell");
 }
 
 void test_chunks_work_across_negative_boundary() {
@@ -220,6 +267,50 @@ void test_water_reaches_steady_state() {
     expect(reached_steady_state, "water reaches steady state in a basin");
 }
 
+void test_lone_water_droplet_rests() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.set_cell({10, 9}, ashfall::kWater);
+    for (int i = 0; i < 50; ++i) {
+        world.step();
+        expect(world.cell({10, 9}) == ashfall::kWater, "lone droplet does not vibrate off its cell");
+    }
+    expect(world.occupied_cell_count() == 22, "droplet plus floor conserved while resting");
+}
+
+void test_thin_water_film_stays_connected() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.fill_rect({5, 9}, {15, 9}, ashfall::kWater);
+    for (int i = 0; i < 50; ++i) world.step();
+    for (int x = 5; x <= 15; ++x) {
+        expect(world.cell({x, 9}) == ashfall::kWater, "thin film neither splits nor drifts");
+    }
+    expect(world.occupied_cell_count() == 21 + 11, "film mass conserved");
+}
+
+void test_water_mound_levels_quickly() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 20}, {30, 20}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 20}, ashfall::kStone);
+    world.fill_rect({30, 0}, {30, 20}, ashfall::kStone);
+    // Tall narrow column: 3 wide x 12 tall.
+    world.fill_rect({14, 8}, {16, 19}, ashfall::kWater);
+    for (int i = 0; i < 120; ++i) world.step();
+    std::size_t high_water = 0;
+    std::size_t total_water = 0;
+    for (int y = 0; y <= 19; ++y) {
+        for (int x = 1; x <= 29; ++x) {
+            if (world.cell({x, y}) == ashfall::kWater) {
+                ++total_water;
+                if (y <= 16) ++high_water;
+            }
+        }
+    }
+    expect(total_water == 36, "mound mass conserved while leveling");
+    expect(high_water == 0, "12-tall mound levels to the bottom rows within 120 ticks");
+}
+
 void test_chunk_boundaries_crossing() {
     ashfall::SimulationWorld world;
     world.fill_rect({60, 70}, {70, 70}, ashfall::kStone);
@@ -409,6 +500,11 @@ int main() {
     test_sand_sinks_through_water();
     test_settling_reaches_steady_state();
     test_water_reaches_steady_state();
+    test_lone_water_droplet_rests();
+    test_thin_water_film_stays_connected();
+    test_water_surfer_drains_off_flat_layer();
+    test_water_surface_flattens_in_basin();
+    test_water_mound_levels_quickly();
     test_chunk_boundaries_crossing();
     test_command_replay();
     test_step_marks_dirty_chunks();

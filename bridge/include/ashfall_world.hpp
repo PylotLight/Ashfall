@@ -29,12 +29,21 @@ private:
     int world_height_ = 256;
     std::vector<ashfall::MaterialId> cell_buffer_;
     PackedByteArray pixel_bytes_;
+    // Water-only layer: shaded RGB + coverage alpha, everything else
+    // transparent. Sampled with linear filtering + a smoothing shader so the
+    // liquid surface reads as rounded blobs instead of hard squares, while
+    // solids stay nearest-crisp on the base layer.
+    PackedByteArray water_pixel_bytes_;
+    Ref<Image> water_image_;
+    Ref<ImageTexture> water_texture_;
+    // Wall-clock cost of the last step() (sim + present), for the perf HUD.
+    double last_step_ms_ = 0.0;
     bool auto_step_ = false;
     // Fixed-rate simulation pacing: accumulate physics delta and step at
     // sim_rate_hz_ (default 30Hz), at most max_steps_per_physics_frame_ steps
     // per callback. Excess backlog is dropped to avoid spiral of death.
     double step_accumulator_ = 0.0;
-    double sim_rate_hz_ = 30.0;
+    double sim_rate_hz_ = 60.0;
     int max_steps_per_physics_frame_ = 2;
 
 protected:
@@ -67,6 +76,9 @@ public:
     Ref<ImageTexture> update_world_texture();
     Ref<ImageTexture> get_world_texture() const;
     Ref<Image> get_world_image() const;
+    Ref<ImageTexture> get_water_texture() const;
+    Ref<Image> get_water_image() const;
+    double get_last_step_ms() const { return last_step_ms_; }
     int get_world_width() const { return world_width_; }
     int get_world_height() const { return world_height_; }
 };

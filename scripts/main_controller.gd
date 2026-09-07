@@ -5,29 +5,38 @@ extends Control
 # No simulation rules or world state are implemented here.
 
 @onready var world: AshfallWorld = $AshfallWorld
-@onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldTexture
+@onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
+@onready var water_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WaterOverlay
 @onready var tick_label: Label = $MainLayout/Sidebar/InfoBox/TickValue
 @onready var cells_label: Label = $MainLayout/Sidebar/InfoBox/CellsValue
 @onready var status_label: Label = $MainLayout/Sidebar/InfoBox/StatusValue
 @onready var material_label: Label = $MainLayout/Sidebar/InfoBox/MaterialValue
+@onready var fps_label: Label = $MainLayout/Sidebar/InfoBox/FpsValue
+@onready var frame_label: Label = $MainLayout/Sidebar/InfoBox/FrameValue
+@onready var sim_label: Label = $MainLayout/Sidebar/InfoBox/SimValue
 
 var current_material: int = AshfallWorld.MATERIAL_SAND
 var brush_size: int = 2
 var is_drawing: bool = false
 var draw_material: int = AshfallWorld.MATERIAL_SAND
 var _hud_cooldown: float = 0.0
+var _frame_ms_ema: float = 16.0
 const HUD_REFRESH_INTERVAL: float = 0.25
 
 func _ready() -> void:
 	# Populate the authoritative 256x256 reference world in C++
 	world.setup_reference_world()
 	world.auto_step = false
-	world.set_sim_rate_hz(30.0)
+	world.set_sim_rate_hz(60.0)
 	world.set_max_steps_per_physics_frame(2)
 	texture_display.texture = world.get_world_texture()
+	water_display.texture = world.get_water_texture()
 	_update_hud()
 
 func _process(delta: float) -> void:
+	# Frame-time EMA for the perf HUD (cheap, every frame).
+	if delta > 0.0:
+		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
 	if not world.auto_step:
 		return
 	# Throttled HUD: occupied-cell query is now O(1) but GDScript label churn
@@ -44,6 +53,9 @@ func _update_hud() -> void:
 	tick_label.text = str(world.get_tick())
 	cells_label.text = str(world.get_occupied_cell_count())
 	status_label.text = "RUNNING" if world.is_auto_step() else "PAUSED"
+	fps_label.text = "%d fps" % Engine.get_frames_per_second()
+	frame_label.text = "%.2f ms" % _frame_ms_ema
+	sim_label.text = "%.2f ms" % world.get_last_step_ms()
 	match current_material:
 		AshfallWorld.MATERIAL_SAND:
 			material_label.text = "Sand"

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <unordered_set>
 
 namespace ashfall {
 namespace {
@@ -160,6 +161,13 @@ void SimulationWorld::step() {
     next.reserve(current.size() + 16);
     std::vector<std::pair<CellPosition, MaterialId>> dynamic_cells;
     dynamic_cells.reserve(current.size());
+    // Homes of cells that stayed put this tick. Sand may only displace water
+    // at a settled home (owner relocates to the swap source, which is safe);
+    // overwriting an in-flight arrival would destroy a cell and break mass
+    // conservation. Down/diag targets live a row below, so in bottom-up order
+    // their owners are always decided already.
+    std::unordered_set<CellPosition, CellPositionHash> stayed;
+    stayed.reserve(current.size());
 
     for (const auto& [position, material_id] : current) {
         if (material(material_id).movement == Movement::Static) {
@@ -194,15 +202,24 @@ void SimulationWorld::step() {
             };
 
             bool moved = false;
-            if (get_density_in_next(down) < mat_def.density) {
-                auto it = next.find(down);
-                if (it != next.end() && it->second != kAir) {
+            // Claim a powder target mass-safely: empty cells are taken;
+            // settled occupants are swapped (owner relocates to source);
+            // in-flight arrivals block (stealing them destroys mass).
+            auto try_powder_target = [&](CellPosition dest) -> bool {
+                if (get_density_in_next(dest) >= mat_def.density) return false;
+                auto it = next.find(dest);
+                if (it == next.end()) {
+                    next[dest] = material_id;
+                } else if (it->second != kAir && stayed.contains(dest)) {
                     MaterialId displaced = it->second;
-                    next[down] = material_id;
+                    next[dest] = material_id;
                     next[source] = displaced;
                 } else {
-                    next[down] = material_id;
+                    return false;
                 }
+                return true;
+            };
+            if (try_powder_target(down)) {
                 moved = true;
             } else {
                 for (CellPosition diag : diags) {
@@ -211,15 +228,7 @@ void SimulationWorld::step() {
                     if (is_solid(horiz) && is_solid(down)) {
                         continue;
                     }
-                    if (get_density_in_next(diag) < mat_def.density) {
-                        auto it = next.find(diag);
-                        if (it != next.end() && it->second != kAir) {
-                            MaterialId displaced = it->second;
-                            next[diag] = material_id;
-                            next[source] = displaced;
-                        } else {
-                            next[diag] = material_id;
-                        }
+                    if (try_powder_target(diag)) {
                         moved = true;
                         break;
                     }
@@ -227,6 +236,7 @@ void SimulationWorld::step() {
             }
             if (!moved) {
                 next[source] = material_id;
+                stayed.insert(source);
             }
         } else if (mat_def.movement == Movement::Liquid) {
             const CellPosition down{source.x, source.y + 1};
@@ -247,10 +257,6 @@ void SimulationWorld::step() {
                 return !next.contains(p);
             };
 
-            auto is_empty_side = [&](CellPosition p) -> bool {
-                return !next.contains(p) && !current.contains(p);
-            };
-
             bool moved = false;
             if (is_empty_down(down)) {
                 next[down] = material_id;
@@ -269,18 +275,48 @@ void SimulationWorld::step() {
                     }
                 }
                 if (!moved) {
-                    for (CellPosition side : sides) {
-                        if (is_solid(side)) continue;
-                        if (is_empty_side(side)) {
-                            next[side] = material_id;
-                            moved = true;
-                            break;
+                    // Lateral flow with pressure gating: only water resting on
+                    // water spreads. Thin films and lone droplets on solid
+                    // rest instead of vibrating, and dispersion (up to 4
+                    // cells, preferred direction first) levels pools quickly.
+                    // Targets owned by a cell this tick (present in current)
+                    // are skipped, never stolen: that race destroys mass.
+                    // Stone walls stop the scan.
+                    constexpr int kDispersion = 4;
+                    const auto below_it = next.find(down);
+                    const bool deep = below_it != next.end() && below_it->second == kWater;
+                    if (deep) {
+                        // A cell embedded in a complete surface row (wet on
+                        // both sides) rests, so flat surfaces stay flat. A
+                        // cell with a dry side flows toward the gap, so bumps
+                        // drain and sparse rows level instead of freezing into
+                        // permanent single-pixel dots.
+                        auto wet_at = [&](CellPosition p) -> bool {
+                            const auto it = next.find(p);
+                            return it != next.end() && it->second == kWater;
+                        };
+                        if (!(wet_at(side_l) && wet_at(side_r))) {
+                            for (CellPosition side : sides) {
+                                const int step_x = side.x - source.x;
+                                for (int dist = 1; dist <= kDispersion; ++dist) {
+                                    const CellPosition target{source.x + step_x * dist, source.y};
+                                    if (is_solid(target)) break;
+                                    if (current.contains(target)) continue;
+                                    if (!next.contains(target)) {
+                                        next[target] = material_id;
+                                        moved = true;
+                                        break;
+                                    }
+                                }
+                                if (moved) break;
+                            }
                         }
                     }
                 }
             }
             if (!moved) {
                 next[source] = material_id;
+                stayed.insert(source);
             }
         }
     }

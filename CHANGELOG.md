@@ -21,4 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Improved
 - Simulation performance: hash-based cell storage with deterministic sorted saves, incremental `set_cell`/`fill_rect` (O(area) not O(world)), O(1) occupied-cell count; bridge fixed-rate pacing (30 Hz, backlog dropped) and throttled HUD; Release (`-O3`) build. Bridge tick cost on the reference world dropped from ~38 ms to ~2.3 ms.
+- Water behavior: pressure-gated lateral dispersion (up to 4 cells over supporting water) levels pools quickly; mass-safe sand/water swaps via settled-home ownership tracking; surface tension — cells embedded in a complete surface row rest while bumps drain, so no permanent single-pixel dots and settled surfaces level within one cell.
+- Water rendering: dual-layer presentation — opaque base (background, stone, sand, nearest-crisp) plus a water-only layer (depth ramp, surface highlight, coverage alpha) sampled linearly under `shaders/water_fx.gdshader` (coverage closing + smoothstep, foam shoreline, animated shimmer, hash dither). No hard squares; isolated droplets read as soft beads. Dual paint keeps bridge tick at ~2.7 ms on the reference world.
+- Perf HUD: sidebar now shows live FPS, frame time (EMA), and last sim-step time (ms, measured in `AshfallWorld::step`).
 

@@ -1,6 +1,7 @@
 #include "ashfall_world.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include <godot_cpp/core/class_db.hpp>
@@ -31,6 +32,9 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("update_world_texture"), &AshfallWorld::update_world_texture);
     ClassDB::bind_method(D_METHOD("get_world_texture"), &AshfallWorld::get_world_texture);
     ClassDB::bind_method(D_METHOD("get_world_image"), &AshfallWorld::get_world_image);
+    ClassDB::bind_method(D_METHOD("get_water_texture"), &AshfallWorld::get_water_texture);
+    ClassDB::bind_method(D_METHOD("get_water_image"), &AshfallWorld::get_water_image);
+    ClassDB::bind_method(D_METHOD("get_last_step_ms"), &AshfallWorld::get_last_step_ms);
     ClassDB::bind_method(D_METHOD("get_world_width"), &AshfallWorld::get_world_width);
     ClassDB::bind_method(D_METHOD("get_world_height"), &AshfallWorld::get_world_height);
 
@@ -89,15 +93,29 @@ void AshfallWorld::init_world(int p_width, int p_height) {
         w[i * 4 + 3] = 255;
     }
 
+    water_pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
+    uint8_t *ww = water_pixel_bytes_.ptrw();
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        ww[i * 4 + 0] = 0;
+        ww[i * 4 + 1] = 0;
+        ww[i * 4 + 2] = 0;
+        ww[i * 4 + 3] = 0;
+    }
+
     world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     world_texture_ = ImageTexture::create_from_image(world_image_);
+    water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    water_texture_ = ImageTexture::create_from_image(water_image_);
     world_.clear_dirty_chunks();
     step_accumulator_ = 0.0;
 }
 
 void AshfallWorld::step() {
+    const auto t0 = std::chrono::steady_clock::now();
     world_.step();
     update_world_texture();
+    const auto t1 = std::chrono::steady_clock::now();
+    last_step_ms_ = std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
 void AshfallWorld::set_cell(int p_x, int p_y, int p_material_id) {
@@ -179,35 +197,71 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
     }
 
     const std::vector<ashfall::CellPosition> dirty = world_.dirty_chunks();
-    const std::size_t total_cells = static_cast<std::size_t>(world_width_ * world_height_);
 
-    auto paint_material = [](ashfall::MaterialId mat, uint8_t &r, uint8_t &g, uint8_t &b) {
-        r = 18;
-        g = 20;
-        b = 24;
+    // Deterministic per-pixel grain, stable across frames (no shimmer).
+    auto grain = [](int x, int y) -> int {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 0x9E3779B1u;
+        h ^= static_cast<std::uint32_t>(y) * 0x85EBCA77u + 0x9E3779B9u + (h << 6) + (h >> 2);
+        h ^= h >> 13;
+        return static_cast<int>(h % 13u) - 6; // -6..+6
+    };
+    auto clamp_channel = [](int v) -> uint8_t {
+        return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    };
+
+    // Noita-style water: depth ramp (light surface to deep teal) plus a
+    // highlight on the surface skin, translucent so it reads as liquid
+    // rather than plastic. Sand/stone get subtle grain to break banding.
+    // Paints BOTH layers: base gets opaque solids over background (water
+    // leaves background showing through the translucent overlay), water layer
+    // gets shaded RGB + coverage alpha and is transparent elsewhere.
+    auto paint_cell = [&](int x, int y, ashfall::MaterialId mat, int depth_below, ashfall::MaterialId above_mat,
+                          uint8_t *dst, uint8_t *water_dst) {
+        const int gr = grain(x, y);
+        int r = 18, g = 20, b = 24, a = 255;
+        int wr = 0, wg = 0, wb = 0, wa = 0;
         switch (mat) {
             case ashfall::kStone:
-                r = 128;
-                g = 133;
-                b = 138;
+                r = 128 + gr;
+                g = 133 + gr;
+                b = 138 + gr;
                 break;
-            case ashfall::kSand:
-                r = 230;
-                g = 175;
-                b = 50;
+            case ashfall::kSand: {
+                const int j = gr * 2;
+                r = 230 + j;
+                g = 175 + j;
+                b = 50 + j;
                 break;
-            case ashfall::kWater:
-                r = 52;
-                g = 152;
-                b = 219;
+            }
+            case ashfall::kWater: {
+                const float t = depth_below >= 5 ? 1.0f : static_cast<float>(depth_below) / 5.0f;
+                wr = static_cast<int>(86.0f + (26.0f - 86.0f) * t) + gr;
+                wg = static_cast<int>(178.0f + (88.0f - 178.0f) * t) + gr;
+                wb = static_cast<int>(214.0f + (118.0f - 214.0f) * t) + gr;
+                if (above_mat != ashfall::kWater) { // surface skin highlight
+                    wr += 22;
+                    wg += 22;
+                    wb += 22;
+                }
+                wa = 205;
                 break;
+            }
             case ashfall::kAir:
             default:
                 break;
         }
+        dst[0] = clamp_channel(r);
+        dst[1] = clamp_channel(g);
+        dst[2] = clamp_channel(b);
+        dst[3] = clamp_channel(a);
+        water_dst[0] = clamp_channel(wr);
+        water_dst[1] = clamp_channel(wg);
+        water_dst[2] = clamp_channel(wb);
+        water_dst[3] = clamp_channel(wa);
     };
 
     uint8_t *w = pixel_bytes_.ptrw();
+    uint8_t *water_w = water_pixel_bytes_.ptrw();
 
     // Partial CPU-side path: repaint only dirty 64x64 chunks intersecting the
     // presentation window. The single ImageTexture still requires a full GPU
@@ -220,14 +274,21 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
 
     if (!use_partial) {
         world_.copy_rect({0, 0}, {world_width_ - 1, world_height_ - 1}, cell_buffer_);
-        for (std::size_t i = 0; i < total_cells; ++i) {
-            uint8_t r, g, b;
-            paint_material(cell_buffer_[i], r, g, b);
-            const std::size_t offset = i * 4;
-            w[offset + 0] = r;
-            w[offset + 1] = g;
-            w[offset + 2] = b;
-            w[offset + 3] = 255;
+        for (int y = 0; y < world_height_; ++y) {
+            for (int x = 0; x < world_width_; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+                const ashfall::MaterialId mat = cell_buffer_[i];
+                int depth = 0;
+                ashfall::MaterialId above = ashfall::kAir;
+                if (y > 0) above = cell_buffer_[i - static_cast<std::size_t>(world_width_)];
+                if (mat == ashfall::kWater) {
+                    while (depth < 5 && y + 1 + depth < world_height_ &&
+                           cell_buffer_[i + static_cast<std::size_t>((1 + depth) * world_width_)] == ashfall::kWater) {
+                        ++depth;
+                    }
+                }
+                paint_cell(x, y, mat, depth, above, w + i * 4, water_w + i * 4);
+            }
         }
     } else {
         for (const ashfall::CellPosition chunk : dirty) {
@@ -240,13 +301,16 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
             for (int y = start_y; y <= end_y; ++y) {
                 for (int x = start_x; x <= end_x; ++x) {
                     const ashfall::MaterialId mat = world_.cell({x, y});
-                    uint8_t r, g, b;
-                    paint_material(mat, r, g, b);
+                    int depth = 0;
+                    ashfall::MaterialId above = y > 0 ? world_.cell({x, y - 1}) : ashfall::kAir;
+                    if (mat == ashfall::kWater) {
+                        while (depth < 5 && y + 1 + depth < world_height_ &&
+                               world_.cell({x, y + 1 + depth}) == ashfall::kWater) {
+                            ++depth;
+                        }
+                    }
                     const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
-                    w[offset + 0] = r;
-                    w[offset + 1] = g;
-                    w[offset + 2] = b;
-                    w[offset + 3] = 255;
+                    paint_cell(x, y, mat, depth, above, w + offset, water_w + offset);
                 }
             }
         }
@@ -254,6 +318,8 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
 
     world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     world_texture_->update(world_image_);
+    water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    water_texture_->update(water_image_);
     // Presentation consumed the dirty set.
     world_.clear_dirty_chunks();
 
@@ -266,6 +332,14 @@ Ref<ImageTexture> AshfallWorld::get_world_texture() const {
 
 Ref<Image> AshfallWorld::get_world_image() const {
     return world_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_water_texture() const {
+    return water_texture_;
+}
+
+Ref<Image> AshfallWorld::get_water_image() const {
+    return water_image_;
 }
 
 } // namespace godot
