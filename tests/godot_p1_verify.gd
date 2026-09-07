@@ -26,4 +26,38 @@ func _init() -> void:
 
 	print("P1 verification passed; occupied=", world.get_occupied_cell_count())
 	world.free()
+	_run_scene_checks.call_deferred()
+
+# Scene level: avatar collision, avatar edits, save/load identity. Deferred
+# so the instantiated scene completes _ready before we drive it.
+func _run_scene_checks() -> void:
+	var scene: PackedScene = load("res://main.tscn")
+	var main = scene.instantiate()
+	root.add_child(main)
+	await process_frame
+	await process_frame
+	assert(main.player_pos == Vector2(128.0, 240.0), "avatar spawns at play-level spawn")
+	assert(not main._box_passable(8.0, 200.0), "stone wall blocks avatar box")
+	assert(main._box_passable(20.0, 200.0), "open air admits avatar box")
+
+	main.player_pos = Vector2(30.0, 220.0)
+	var before: int = main.world.get_occupied_cell_count()
+	main._dig_at_player()
+	assert(main.world.get_occupied_cell_count() < before, "avatar dig removes sand")
+	main.current_material = AshfallWorld.MATERIAL_WATER
+	main._place_at_player()
+	assert(main.world.get_occupied_cell_count() > 0, "avatar place adds water")
+
+	main.player_pos = Vector2(100.0, 150.0)
+	main._save_game()
+	main.player_pos = Vector2(10.0, 10.0)
+	main.world.set_cell(100, 100, AshfallWorld.MATERIAL_STONE)
+	main._load_game()
+	assert(main.player_pos == Vector2(100.0, 150.0), "load restores avatar position")
+	assert(main.current_material == AshfallWorld.MATERIAL_WATER, "load restores held material")
+	assert(main.world.get_cell(100, 100) != AshfallWorld.MATERIAL_STONE, "load restores exact world")
+	if FileAccess.file_exists("user://ashfall_save.bin"):
+		DirAccess.remove_absolute("user://ashfall_save.bin")
+
+	print("P1 scene verification passed")
 	quit(0)

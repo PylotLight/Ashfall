@@ -15,7 +15,7 @@ world and player state.
 ## Phased Task Breakdown
 
 ### Phase P1.1: Complete Core Cellular Simulation Dynamics
-- **Status**: Not Started
+- **Status**: Complete (sand/water dynamics, density swaps, cross-boundary movement; `ashfall_sim_tests` green)
 - **Ownership**: `engine/include/ashfall/simulation.hpp`, `engine/src/simulation.cpp`
 - **Description**: Finish four core materials (Air, Stone, Sand, Water) in the C++ simulation core.
 - **Tasks**:
@@ -25,7 +25,7 @@ world and player state.
   4. Ensure consistent chunk boundary transitions without directional bias or seam artifacts.
 
 ### Phase P1.2: Dirty-Chunk Tracking & Incremental Presentation
-- **Status**: Not Started
+- **Status**: Complete (dirty-chunk set on edits/steps, partial CPU repaint path, `get_dirty_chunks` bridge API)
 - **Ownership**: `engine/`, `bridge/`
 - **Description**: Replace the full 256x256 monolithic rect copy with fine-grained dirty chunk tracking.
 - **Tasks**:
@@ -35,7 +35,7 @@ world and player state.
   4. Update Godot bridge to perform partial/dirty chunk updates rather than monolithic world texture regeneration.
 
 ### Phase P1.3: Deterministic Test Suite & Replay
-- **Status**: Not Started
+- **Status**: Complete (boundary, mass, settling, replay, save/load, varied-topology tests green)
 - **Ownership**: `tests/simulation_tests.cpp`
 - **Description**: Author comprehensive deterministic tests verifying cellular automaton invariants.
 - **Tasks**:
@@ -46,7 +46,7 @@ world and player state.
   5. **Save/load tests**: Test serialization and deserialization of active worlds with varied topology, verifying exact bitwise match.
 
 ### Phase P1.4: Hand-Authored Scene, Player Avatar & Stone Collision
-- **Status**: Not Started
+- **Status**: Complete (`build_play_level` + spawn, `is_solid_cell`/`can_move_to_box`, host avatar with native collision, dig/place)
 - **Ownership**: `engine/`, `bridge/`, `scripts/`, `scenes/`
 - **Description**: Introduce a minimal authoritative player position/controller where stone blocks movement, in a hand-authored scene.
 - **Tasks**:
@@ -56,7 +56,7 @@ world and player state.
   4. Create a hand-authored level layout showcasing terrain, stone walls/obstacles, sand dunes, and water reservoirs.
 
 ### Phase P1.5: Authoritative Persistence (Save / Load) Integration
-- **Status**: Not Started
+- **Status**: Complete (`save_to_bytes`/`load_from_bytes`, versioned save file with avatar state, Save/Load UI + F5/F9)
 - **Ownership**: `bridge/`, `scripts/`
 - **Description**: Wire world and player persistence through GDExtension to Godot save files.
 - **Tasks**:
@@ -66,7 +66,7 @@ world and player state.
   4. Verify quitting and reloading restores the exact authoritative world and player state.
 
 ### Phase P1.6: P1 Verification & Exit Criterion Validation
-- **Status**: Not Started
+- **Status**: Complete (sim tests + `godot_p1_verify.gd` scene checks + P0 suites green; exit criterion met)
 - **Ownership**: Whole repo
 - **Description**: Validate all P1 requirements against exit criterion and document results.
 - **Tasks**:
