@@ -15,17 +15,30 @@ var current_material: int = AshfallWorld.MATERIAL_SAND
 var brush_size: int = 2
 var is_drawing: bool = false
 var draw_material: int = AshfallWorld.MATERIAL_SAND
+var _hud_cooldown: float = 0.0
+const HUD_REFRESH_INTERVAL: float = 0.25
 
 func _ready() -> void:
 	# Populate the authoritative 256x256 reference world in C++
 	world.setup_reference_world()
 	world.auto_step = false
+	world.set_sim_rate_hz(30.0)
+	world.set_max_steps_per_physics_frame(2)
 	texture_display.texture = world.get_world_texture()
 	_update_hud()
 
-func _process(_delta: float) -> void:
-	if world.auto_step:
+func _process(delta: float) -> void:
+	if not world.auto_step:
+		return
+	# Throttled HUD: occupied-cell query is now O(1) but GDScript label churn
+	# every frame is still wasteful. Refresh at 4Hz while running.
+	_hud_cooldown -= delta
+	if _hud_cooldown <= 0.0:
+		_hud_cooldown = HUD_REFRESH_INTERVAL
 		_update_hud()
+	else:
+		# Cheap tick-only refresh keeps the counter live without cell query.
+		tick_label.text = str(world.get_tick())
 
 func _update_hud() -> void:
 	tick_label.text = str(world.get_tick())

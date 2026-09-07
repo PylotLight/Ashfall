@@ -1,7 +1,9 @@
 #include "ashfall/simulation.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 namespace {
 void expect(bool condition, const char* message) {
@@ -31,6 +33,30 @@ void test_chunks_work_across_negative_boundary() {
     world.set_cell({-64, 0}, ashfall::kSand);
     world.step();
     expect(world.cell({-64, 1}) == ashfall::kSand, "negative chunk coordinates preserve placement");
+}
+
+void test_materials_cross_chunk_boundaries() {
+    auto crosses_right = [](ashfall::MaterialId material) {
+        ashfall::SimulationWorld world;
+        world.set_cell({63, 0}, material);
+        world.set_cell({63, 1}, ashfall::kStone);
+        world.set_cell({62, 1}, ashfall::kStone);
+        world.step();
+        return world.cell({64, 1}) == material;
+    };
+    auto crosses_negative = [](ashfall::MaterialId material) {
+        ashfall::SimulationWorld world;
+        world.set_cell({-65, 0}, material);
+        world.set_cell({-65, 1}, ashfall::kStone);
+        world.set_cell({-66, 1}, ashfall::kStone);
+        world.step();
+        return world.cell({-64, 1}) == material;
+    };
+
+    expect(crosses_right(ashfall::kSand), "sand crosses a positive chunk boundary");
+    expect(crosses_negative(ashfall::kSand), "sand crosses a negative chunk boundary");
+    expect(crosses_right(ashfall::kWater), "water crosses a positive chunk boundary");
+    expect(crosses_negative(ashfall::kWater), "water crosses a negative chunk boundary");
 }
 
 void test_save_load_is_exact() {
@@ -74,13 +100,320 @@ void test_chunk_and_rect_reading() {
         expect(rect_buffer[i] == ashfall::kStone, "rect cells contain stone");
     }
 }
+
+void test_mass_conservation() {
+    ashfall::SimulationWorld world;
+    // Enclosed basin
+    world.fill_rect({0, 30}, {30, 30}, ashfall::kStone); // floor
+    world.fill_rect({0, 0}, {0, 30}, ashfall::kStone);   // left wall
+    world.fill_rect({30, 0}, {30, 30}, ashfall::kStone); // right wall
+
+    // Add sand and water
+    world.fill_rect({5, 5}, {15, 10}, ashfall::kSand);  // 11 * 6 = 66 sand cells
+    world.fill_rect({16, 5}, {25, 10}, ashfall::kWater); // 10 * 6 = 60 water cells
+
+    const std::size_t expected_sand = 66;
+    const std::size_t expected_water = 60;
+
+    auto count_materials = [&](const ashfall::SimulationWorld& w) {
+        std::size_t sand = 0, water = 0;
+        std::vector<ashfall::MaterialId> buf(31 * 31);
+        w.copy_rect({0, 0}, {30, 30}, buf);
+        for (auto m : buf) {
+            if (m == ashfall::kSand) ++sand;
+            else if (m == ashfall::kWater) ++water;
+        }
+        return std::make_pair(sand, water);
+    };
+
+    auto [init_sand, init_water] = count_materials(world);
+    expect(init_sand == expected_sand, "initial sand count matches");
+    expect(init_water == expected_water, "initial water count matches");
+
+    for (int step = 1; step <= 100; ++step) {
+        world.step();
+        auto [cur_sand, cur_water] = count_materials(world);
+        expect(cur_sand == expected_sand, "sand count conserved every tick");
+        expect(cur_water == expected_water, "water count conserved every tick");
+    }
+}
+
+void test_sand_sinks_through_water() {
+    ashfall::SimulationWorld world;
+    // Narrow tube
+    world.fill_rect({2, 10}, {6, 10}, ashfall::kStone); // floor
+    world.fill_rect({2, 0}, {2, 10}, ashfall::kStone);  // left wall
+    world.fill_rect({6, 0}, {6, 10}, ashfall::kStone);  // right wall
+
+    // Water layer at y=7..9 (3 wide * 3 high = 9 water cells)
+    world.fill_rect({3, 7}, {5, 9}, ashfall::kWater);
+    // Sand layer above at y=3..4 (3 wide * 2 high = 6 sand cells)
+    world.fill_rect({3, 3}, {5, 4}, ashfall::kSand);
+
+    for (int i = 0; i < 40; ++i) {
+        world.step();
+    }
+
+    // Sand should be at the bottom (y=8 and y=9)
+    for (int y = 8; y <= 9; ++y) {
+        for (int x = 3; x <= 5; ++x) {
+            expect(world.cell({x, y}) == ashfall::kSand, "sand has sunk to the bottom");
+        }
+    }
+
+    // Water should be displaced above sand (y=5 to y=7)
+    std::size_t water_above = 0;
+    for (int y = 5; y <= 7; ++y) {
+        for (int x = 3; x <= 5; ++x) {
+            if (world.cell({x, y}) == ashfall::kWater) ++water_above;
+        }
+    }
+    expect(water_above == 9, "all 9 water cells displaced above sand");
+}
+
+void test_settling_reaches_steady_state() {
+    ashfall::SimulationWorld world;
+    // Basin with sand only — sand settles deterministically without lateral oscillation
+    world.fill_rect({0, 20}, {20, 20}, ashfall::kStone); // floor
+    world.fill_rect({0, 0}, {0, 20}, ashfall::kStone);   // left wall
+    world.fill_rect({20, 0}, {20, 20}, ashfall::kStone);  // right wall
+
+    // Drop a pile of sand from mid-height
+    world.fill_rect({8, 2}, {12, 6}, ashfall::kSand);
+
+    bool reached_steady_state = false;
+    std::vector<std::uint8_t> prev_save = world.save();
+
+    for (int i = 0; i < 200; ++i) {
+        world.step();
+        std::vector<std::uint8_t> cur_save = world.save();
+        // Compare cell payload (ignoring 8-byte tick at offset 8..15)
+        if (cur_save.size() == prev_save.size() &&
+            std::equal(cur_save.begin() + 16, cur_save.end(), prev_save.begin() + 16)) {
+            reached_steady_state = true;
+            break;
+        }
+        prev_save = cur_save;
+    }
+    expect(reached_steady_state, "sand reaches steady state / quiescence in basin");
+}
+
+void test_water_reaches_steady_state() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {8, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({8, 0}, {8, 10}, ashfall::kStone);
+    world.fill_rect({4, 1}, {4, 7}, ashfall::kWater);
+
+    std::vector<std::uint8_t> previous = world.save();
+    bool reached_steady_state = false;
+    for (int i = 0; i < 200; ++i) {
+        world.step();
+        const std::vector<std::uint8_t> current = world.save();
+        if (current.size() == previous.size() &&
+            std::equal(current.begin() + 16, current.end(), previous.begin() + 16)) {
+            reached_steady_state = true;
+            break;
+        }
+        previous = current;
+    }
+    expect(reached_steady_state, "water reaches steady state in a basin");
+}
+
+void test_chunk_boundaries_crossing() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({60, 70}, {70, 70}, ashfall::kStone);
+
+    // Sand at chunk boundary x=63 -> x=64, y=63 -> y=64
+    world.set_cell({63, 60}, ashfall::kSand);
+    for (int i = 0; i < 15; ++i) {
+        world.step();
+    }
+    // Sand must cross into chunk {0, 1} at y=69
+    expect(world.cell({63, 69}) == ashfall::kSand, "sand crossed vertical chunk boundary");
+}
+
+void test_command_replay() {
+    auto run_scenario = []() {
+        ashfall::SimulationWorld world;
+        world.fill_rect({0, 20}, {20, 20}, ashfall::kStone);
+        world.set_cell({10, 5}, ashfall::kSand);
+        world.step();
+        world.set_cell({11, 5}, ashfall::kWater);
+        world.step();
+        world.fill_rect({5, 2}, {8, 4}, ashfall::kSand);
+        for (int i = 0; i < 20; ++i) world.step();
+        return world.save();
+    };
+
+    const auto run1 = run_scenario();
+    const auto run2 = run_scenario();
+    expect(run1 == run2, "command replay produces bitwise identical state");
+}
+
+void test_step_marks_dirty_chunks() {
+    auto contains = [](const std::vector<ashfall::CellPosition>& chunks, ashfall::CellPosition want) {
+        return std::find(chunks.begin(), chunks.end(), want) != chunks.end();
+    };
+
+    // Same-chunk movement: sand falls within chunk {0, 0}.
+    {
+        ashfall::SimulationWorld world;
+        world.fill_rect({10, 12}, {12, 12}, ashfall::kStone);
+        world.set_cell({11, 10}, ashfall::kSand);
+        world.clear_dirty_chunks();
+        expect(world.dirty_chunks().empty(), "dirty starts empty before step");
+        world.step();
+        const auto dirty = world.dirty_chunks();
+        expect(!dirty.empty(), "step marks dirty chunks");
+        expect(contains(dirty, {0, 0}), "falling sand dirties its chunk");
+        expect(world.cell({11, 11}) == ashfall::kSand, "sand fell one cell");
+        world.clear_dirty_chunks();
+        expect(world.dirty_chunks().empty(), "clear after step works");
+    }
+
+    // Cross-chunk movement: sand falls from y=63 to y=64, touching {0,0} and {0,1}.
+    {
+        ashfall::SimulationWorld world;
+        world.set_cell({5, 63}, ashfall::kSand);
+        world.clear_dirty_chunks();
+        world.step();
+        const auto dirty = world.dirty_chunks();
+        expect(world.cell({5, 64}) == ashfall::kSand, "sand crossed horizontal chunk boundary");
+        expect(contains(dirty, {0, 0}) && contains(dirty, {0, 1}), "cross-chunk step dirties both chunks");
+    }
+}
+
+void test_save_load_rejects_malformed() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
+    world.set_cell({5, 5}, ashfall::kSand);
+    world.step();
+    const auto valid = world.save();
+    const auto snapshot = valid;
+    const std::size_t occupied_before = world.occupied_cell_count();
+    const std::uint64_t tick_before = world.tick();
+
+    auto expect_rejected = [&](std::vector<std::uint8_t> bytes, const char* message) {
+        expect(!world.load(bytes), message);
+        expect(world.occupied_cell_count() == occupied_before, "failed load preserves cell count");
+        expect(world.tick() == tick_before, "failed load preserves tick");
+        expect(world.save() == snapshot, "failed load preserves exact state");
+    };
+
+    expect_rejected({}, "empty payload is rejected");
+    {
+        auto bad_magic = valid;
+        bad_magic[0] ^= 0xFF;
+        expect_rejected(bad_magic, "bad magic is rejected");
+    }
+    {
+        auto truncated = valid;
+        truncated.pop_back();
+        expect_rejected(truncated, "truncated payload is rejected");
+    }
+    {
+        auto extra = valid;
+        extra.push_back(0x00);
+        expect_rejected(extra, "trailing byte (count mismatch) is rejected");
+    }
+    {
+        auto bad_material = valid;
+        bad_material.back() = 99;
+        expect_rejected(bad_material, "unknown material is rejected");
+    }
+    {
+        auto air_material = valid;
+        air_material.back() = ashfall::kAir;
+        expect_rejected(air_material, "air material entry is rejected");
+    }
+}
+
+void test_save_load_varied_topology() {
+    ashfall::SimulationWorld world;
+    // Spread across negative, origin, and far-positive chunks.
+    world.set_cell({-130, -65}, ashfall::kSand);
+    world.set_cell({-1, -1}, ashfall::kWater);
+    world.set_cell({5, 10}, ashfall::kStone);
+    world.set_cell({130, 0}, ashfall::kWater);
+    world.fill_rect({200, 200}, {201, 201}, ashfall::kSand);
+    for (int i = 0; i < 5; ++i) world.step();
+    const auto saved = world.save();
+    const std::uint64_t tick = world.tick();
+    const auto chunks_before = world.active_chunks();
+
+    ashfall::SimulationWorld restored;
+    expect(restored.load(saved), "varied topology save loads");
+    expect(restored.save() == saved, "varied topology round-trips exactly");
+    expect(restored.tick() == tick, "tick preserved across varied topology load");
+    expect(restored.active_chunks().size() == chunks_before.size(), "chunk count preserved");
+    expect(restored.cell({5, 10}) == ashfall::kStone, "stone cell preserved");
+    expect(restored.cell({130, 5}) == ashfall::kWater, "unsupported water fell 5 cells and round-tripped");
+    expect(restored.cell({-130, -60}) == ashfall::kSand, "unsupported sand fell 5 cells and round-tripped");
+
+    // Empty world round-trip clears prior state.
+    ashfall::SimulationWorld empty_source;
+    const auto empty_save = empty_source.save();
+    ashfall::SimulationWorld holder;
+    holder.set_cell({0, 0}, ashfall::kSand);
+    expect(holder.load(empty_save), "empty save loads");
+    expect(holder.occupied_cell_count() == 0, "empty load clears cells");
+    expect(holder.save() == empty_save, "empty round-trip is exact");
+}
+
+void test_player_collision_and_dirty_tracking() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({10, 0}, {10, 20}, ashfall::kStone);
+
+    expect(world.is_solid({10, 5}), "stone is solid");
+    expect(!world.is_solid({9, 5}), "air is not solid");
+    world.set_cell({9, 5}, ashfall::kWater);
+    expect(!world.is_solid({9, 5}), "water is not solid");
+    world.set_cell({9, 6}, ashfall::kSand);
+    expect(!world.is_solid({9, 6}), "sand is not solid");
+
+    // Collision box checks
+    expect(!world.can_move_to({8, 5}, {10, 5}), "box touching stone wall is blocked");
+    expect(world.can_move_to({7, 4}, {9, 5}), "box in air/water/sand can move");
+
+    // Dirty chunks tracking
+    world.clear_dirty_chunks();
+    expect(world.dirty_chunks().empty(), "clear_dirty_chunks clears set");
+    world.set_cell({5, 5}, ashfall::kSand);
+    const auto dirty = world.dirty_chunks();
+    expect(!dirty.empty() && dirty[0].x == 0 && dirty[0].y == 0, "chunk {0, 0} marked dirty");
+
+    world.clear_dirty_chunks();
+    ashfall::SimulationWorld saved_world;
+    saved_world.set_cell({128, 0}, ashfall::kStone);
+    expect(world.load(saved_world.save()), "load succeeds");
+    const auto loaded_dirty = world.dirty_chunks();
+    expect(loaded_dirty.size() == 2, "load marks removed and added chunks dirty");
+    expect(loaded_dirty[0] == ashfall::CellPosition{0, 0} && loaded_dirty[1] == ashfall::CellPosition{2, 0},
+           "load dirty chunks include old and new positions");
+
+    world.reset();
+    expect(world.tick() == 0 && world.occupied_cell_count() == 0, "reset clears world state and tick");
+    expect(world.dirty_chunks().size() == 2, "reset marks removed chunks dirty");
+}
 } // namespace
 
 int main() {
     test_sand_falls_and_stops();
     test_water_spreads_when_supported();
     test_chunks_work_across_negative_boundary();
+    test_materials_cross_chunk_boundaries();
     test_save_load_is_exact();
     test_chunk_and_rect_reading();
+    test_mass_conservation();
+    test_sand_sinks_through_water();
+    test_settling_reaches_steady_state();
+    test_water_reaches_steady_state();
+    test_chunk_boundaries_crossing();
+    test_command_replay();
+    test_step_marks_dirty_chunks();
+    test_save_load_rejects_malformed();
+    test_save_load_varied_topology();
+    test_player_collision_and_dirty_tracking();
     std::cout << "All simulation tests passed.\n";
 }
