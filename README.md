@@ -12,7 +12,8 @@ simulation:
 
 Godot will provide rendering, input, tools, and UI. The C++ core owns world
 state, simulation ticks, and save data. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for the boundary and build sequence.
+for the boundary, [docs/DESIGN.md](docs/DESIGN.md) for the complete technical
+direction, and [docs/ROADMAP.md](docs/ROADMAP.md) for ordered milestones.
 
 ## Build and test
 
