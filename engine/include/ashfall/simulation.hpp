@@ -41,6 +41,10 @@ public:
 
     [[nodiscard]] std::size_t occupied_cell_count() const;
     [[nodiscard]] std::uint64_t tick() const noexcept { return tick_; }
+    [[nodiscard]] bool has_chunk(CellPosition chunk_position) const;
+    [[nodiscard]] std::vector<CellPosition> active_chunks() const;
+    bool read_chunk(CellPosition chunk_position, std::span<MaterialId> out_buffer) const;
+    void copy_rect(CellPosition first, CellPosition last, std::span<MaterialId> out_buffer) const;
     [[nodiscard]] std::vector<std::uint8_t> save() const;
     [[nodiscard]] bool load(std::span<const std::uint8_t> bytes);
 

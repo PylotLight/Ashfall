@@ -1,3 +1,171 @@
-[gd_scene format=3]
+[gd_scene load_steps=2 format=3 uid="uid://b00g456789abc"]
 
-[node name="Ashfall" type="Node"]
+[ext_resource type="Script" path="res://scripts/main_controller.gd" id="1_controller"]
+
+[node name="Main" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_controller")
+
+[node name="AshfallWorld" type="AshfallWorld" parent="."]
+
+[node name="MainLayout" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = -16.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 16
+
+[node name="ViewportContainer" type="PanelContainer" parent="MainLayout"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="WorldTexture" type="TextureRect" parent="MainLayout/ViewportContainer"]
+texture_filter = 1
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Sidebar" type="VBoxContainer" parent="MainLayout"]
+custom_minimum_size = Vector2(260, 0)
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="MainLayout/Sidebar"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Ashfall P0 Reference"
+horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="MainLayout/Sidebar"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+theme_override_font_sizes/font_size = 12
+text = "256x256 Native Simulation"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="MainLayout/Sidebar"]
+layout_mode = 2
+
+[node name="InfoBox" type="GridContainer" parent="MainLayout/Sidebar"]
+layout_mode = 2
+columns = 2
+
+[node name="TickLabel" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Tick:"
+
+[node name="TickValue" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+text = "0"
+horizontal_alignment = 2
+
+[node name="CellsLabel" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Occupied Cells:"
+
+[node name="CellsValue" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+text = "0"
+horizontal_alignment = 2
+
+[node name="StatusLabel" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Simulation:"
+
+[node name="StatusValue" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+text = "PAUSED"
+horizontal_alignment = 2
+
+[node name="MaterialLabel" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Tool:"
+
+[node name="MaterialValue" type="Label" parent="MainLayout/Sidebar/InfoBox"]
+layout_mode = 2
+text = "Sand"
+horizontal_alignment = 2
+
+[node name="HSeparator2" type="HSeparator" parent="MainLayout/Sidebar"]
+layout_mode = 2
+
+[node name="MaterialsHeader" type="Label" parent="MainLayout/Sidebar"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = "Material Palette:"
+
+[node name="SandBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[1] Sand (Powder)"
+
+[node name="WaterBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[2] Water (Liquid)"
+
+[node name="StoneBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[3] Stone (Static)"
+
+[node name="EraserBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[4] Air (Eraser)"
+
+[node name="HSeparator3" type="HSeparator" parent="MainLayout/Sidebar"]
+layout_mode = 2
+
+[node name="ActionsHeader" type="Label" parent="MainLayout/Sidebar"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = "Simulation Control:"
+
+[node name="PlayBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[Space] Play / Pause"
+
+[node name="StepBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[S] Single Step"
+
+[node name="ResetBtn" type="Button" parent="MainLayout/Sidebar"]
+layout_mode = 2
+text = "[R] Reset Reference World"
+
+[node name="HelpText" type="Label" parent="MainLayout/Sidebar"]
+layout_mode = 2
+size_flags_vertical = 10
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+theme_override_font_sizes/font_size = 11
+text = "Controls:
+• Left Click/Drag: Paint material
+• Right Click: Erase cells
+• Space: Toggle simulation
+• S: Step single tick
+• R: Reset world"
+autowrap_mode = 2
+
+[connection signal="gui_input" from="MainLayout/ViewportContainer/WorldTexture" to="." method="_on_world_texture_gui_input"]
+[connection signal="pressed" from="MainLayout/Sidebar/SandBtn" to="." method="_on_sand_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/WaterBtn" to="." method="_on_water_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/StoneBtn" to="." method="_on_stone_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/EraserBtn" to="." method="_on_eraser_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/PlayBtn" to="." method="_on_play_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/StepBtn" to="." method="_on_step_btn_pressed"]
+[connection signal="pressed" from="MainLayout/Sidebar/ResetBtn" to="." method="_on_reset_btn_pressed"]

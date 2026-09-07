@@ -20,3 +20,24 @@ if(ASHFALL_BUILD_TESTS)
     target_link_libraries(ashfall_sim_tests PRIVATE ashfall_sim)
     add_test(NAME ashfall_sim_tests COMMAND ashfall_sim_tests)
 endif()
+
+# GDExtension bridge using godot-cpp
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp/CMakeLists.txt")
+    set(GODOTCPP_API_VERSION "4.7" CACHE STRING "Godot API version" FORCE)
+    add_subdirectory(godot-cpp)
+
+    add_library(ashfall_extension SHARED
+        bridge/src/register_types.cpp
+        bridge/src/ashfall_world.cpp
+    )
+    target_include_directories(ashfall_extension PRIVATE bridge/include)
+    target_link_libraries(ashfall_extension PRIVATE godot::cpp ashfall_sim)
+    target_compile_features(ashfall_extension PUBLIC cxx_std_20)
+
+    set_target_properties(ashfall_extension PROPERTIES
+        PREFIX "lib"
+        OUTPUT_NAME "ashfall"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
+    )
+endif()

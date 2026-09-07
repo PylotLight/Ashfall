@@ -1,3 +1,4 @@
 .godot/
 build/
+bin/
 .DS_Store

@@ -45,6 +45,35 @@ void test_save_load_is_exact() {
     expect(restored.save() == saved, "save/load preserves exact state");
     expect(!restored.load({}), "invalid save is rejected");
 }
+
+void test_chunk_and_rect_reading() {
+    ashfall::SimulationWorld world;
+    expect(!world.has_chunk({0, 0}), "unallocated chunk returns false");
+    expect(world.active_chunks().empty(), "initially no active chunks");
+
+    world.set_cell({5, 10}, ashfall::kSand);
+    expect(world.has_chunk({0, 0}), "allocated chunk is recognized");
+    const auto active = world.active_chunks();
+    expect(active.size() == 1 && active[0].x == 0 && active[0].y == 0, "active chunks lists chunk {0, 0}");
+
+    std::vector<ashfall::MaterialId> chunk_buffer(ashfall::kChunkSize * ashfall::kChunkSize, ashfall::kWater);
+    expect(world.read_chunk({0, 0}, chunk_buffer), "read_chunk succeeds");
+    expect(chunk_buffer[10 * ashfall::kChunkSize + 5] == ashfall::kSand, "cell value read in chunk buffer");
+    expect(chunk_buffer[0] == ashfall::kAir, "unmodified cells in chunk are air");
+
+    // Reading unallocated chunk fills buffer with air
+    std::vector<ashfall::MaterialId> empty_chunk(ashfall::kChunkSize * ashfall::kChunkSize, ashfall::kSand);
+    expect(world.read_chunk({1, 1}, empty_chunk), "read unallocated chunk succeeds");
+    expect(empty_chunk[0] == ashfall::kAir, "unallocated chunk filled with air");
+
+    // copy_rect test across a 4x4 area
+    std::vector<ashfall::MaterialId> rect_buffer(16, ashfall::kAir);
+    world.fill_rect({0, 0}, {3, 3}, ashfall::kStone);
+    world.copy_rect({0, 0}, {3, 3}, rect_buffer);
+    for (std::size_t i = 0; i < 16; ++i) {
+        expect(rect_buffer[i] == ashfall::kStone, "rect cells contain stone");
+    }
+}
 } // namespace
 
 int main() {
@@ -52,5 +81,6 @@ int main() {
     test_water_spreads_when_supported();
     test_chunks_work_across_negative_boundary();
     test_save_load_is_exact();
+    test_chunk_and_rect_reading();
     std::cout << "All simulation tests passed.\n";
 }

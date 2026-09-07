@@ -104,6 +104,49 @@ void SimulationWorld::step() {
 
 std::size_t SimulationWorld::occupied_cell_count() const { return collect_cells().size(); }
 
+bool SimulationWorld::has_chunk(CellPosition chunk_position) const {
+    return chunks_.contains(chunk_position);
+}
+
+std::vector<CellPosition> SimulationWorld::active_chunks() const {
+    std::vector<CellPosition> positions;
+    positions.reserve(chunks_.size());
+    for (const auto& [pos, _] : chunks_) {
+        positions.push_back(pos);
+    }
+    return positions;
+}
+
+bool SimulationWorld::read_chunk(CellPosition chunk_position, std::span<MaterialId> out_buffer) const {
+    constexpr std::size_t kCellsPerChunk = static_cast<std::size_t>(kChunkSize * kChunkSize);
+    if (out_buffer.size() < kCellsPerChunk) return false;
+    const auto it = chunks_.find(chunk_position);
+    if (it != chunks_.end()) {
+        std::copy_n(it->second.data(), kCellsPerChunk, out_buffer.data());
+    } else {
+        std::fill_n(out_buffer.data(), kCellsPerChunk, kAir);
+    }
+    return true;
+}
+
+void SimulationWorld::copy_rect(CellPosition first, CellPosition last, std::span<MaterialId> out_buffer) const {
+    const int min_x = std::min(first.x, last.x);
+    const int max_x = std::max(first.x, last.x);
+    const int min_y = std::min(first.y, last.y);
+    const int max_y = std::max(first.y, last.y);
+    const int width = max_x - min_x + 1;
+    const int height = max_y - min_y + 1;
+    const std::size_t total_cells = static_cast<std::size_t>(width * height);
+    if (out_buffer.size() < total_cells) return;
+
+    std::size_t index = 0;
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            out_buffer[index++] = cell({x, y});
+        }
+    }
+}
+
 std::vector<std::uint8_t> SimulationWorld::save() const {
     const CellMap cells = collect_cells();
     std::vector<std::uint8_t> bytes;

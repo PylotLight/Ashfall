@@ -1,0 +1,15 @@
+[configuration]
+entry_symbol = "ashfall_library_init"
+compatibility_minimum = "4.1"
+
+[libraries]
+macos.debug = "res://bin/libashfall.dylib"
+macos.release = "res://bin/libashfall.dylib"
+macos.editor = "res://bin/libashfall.dylib"
+macos.debug.arm64 = "res://bin/libashfall.dylib"
+macos.release.arm64 = "res://bin/libashfall.dylib"
+macos.editor.arm64 = "res://bin/libashfall.dylib"
+windows.debug.x86_64 = "res://bin/libashfall.dll"
+windows.release.x86_64 = "res://bin/libashfall.dll"
+linux.debug.x86_64 = "res://bin/libashfall.so"
+linux.release.x86_64 = "res://bin/libashfall.so"
