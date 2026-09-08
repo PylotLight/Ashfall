@@ -48,9 +48,15 @@ func _run_scene_checks() -> void:
 	assert(not main._box_passable(8.0, 400.0), "stone wall blocks avatar box")
 	assert(main._box_passable(200.0, 300.0), "open air admits avatar box")
 
-	# Presentation layers must stay pixel-aligned: the water overlay is a
-	# second view of the same grid, so any rect drift renders water offset
-	# from the cells the brush actually edits.
+	# UI fits the base window: the sidebar must scroll instead of forcing the
+	# layout taller than the 720px canvas (regression: min-height 979 pushed
+	# the sidebar outside the screen).
+	var layout: Control = main.get_node("MainLayout")
+	assert(layout.get_minimum_size().y <= 720.0, "layout fits base window height")
+	var scroll: Control = main.get_node("MainLayout/SidebarScroll")
+	assert(scroll.get_rect().end.y <= 720.0, "sidebar stays on screen")
+	# Water overlay is a second view of the same grid: any rect drift renders
+	# water offset from the cells the brush edits.
 	var base_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WorldTexture")
 	var water_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WaterOverlay")
 	assert(water_tex.get_rect() == base_tex.get_rect(), "water overlay aligned with base layer")

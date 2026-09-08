@@ -8,14 +8,14 @@ extends Control
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
 @onready var water_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WaterOverlay
 @onready var player_marker: ColorRect = $MainLayout/ViewportContainer/WorldStack/PlayerMarker
-@onready var tick_label: Label = $MainLayout/Sidebar/InfoBox/TickValue
-@onready var cells_label: Label = $MainLayout/Sidebar/InfoBox/CellsValue
-@onready var status_label: Label = $MainLayout/Sidebar/InfoBox/StatusValue
-@onready var material_label: Label = $MainLayout/Sidebar/InfoBox/MaterialValue
-@onready var player_label: Label = $MainLayout/Sidebar/InfoBox/PlayerValue
-@onready var fps_label: Label = $MainLayout/Sidebar/InfoBox/FpsValue
-@onready var frame_label: Label = $MainLayout/Sidebar/InfoBox/FrameValue
-@onready var sim_label: Label = $MainLayout/Sidebar/InfoBox/SimValue
+@onready var tick_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/TickValue
+@onready var cells_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/CellsValue
+@onready var status_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/StatusValue
+@onready var material_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/MaterialValue
+@onready var player_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/PlayerValue
+@onready var fps_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/FpsValue
+@onready var frame_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/FrameValue
+@onready var sim_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/SimValue
 
 var current_material: int = AshfallWorld.MATERIAL_SAND
 var brush_size: int = 4

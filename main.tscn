@@ -78,164 +78,169 @@ layout_mode = 1
 mouse_filter = 2
 color = Color(1, 0.32, 0.28, 1)
 
-[node name="Sidebar" type="VBoxContainer" parent="MainLayout" unique_id=1312325439]
-custom_minimum_size = Vector2(260, 0)
+[node name="SidebarScroll" type="ScrollContainer" parent="MainLayout"]
 layout_mode = 2
+custom_minimum_size = Vector2(260, 0)
+horizontal_scroll_mode = 0
+
+[node name="Sidebar" type="VBoxContainer" parent="MainLayout/SidebarScroll" unique_id=1312325439]
+layout_mode = 2
+size_flags_horizontal = 3
 theme_override_constants/separation = 12
 
-[node name="Title" type="Label" parent="MainLayout/Sidebar" unique_id=1785802327]
+[node name="Title" type="Label" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1785802327]
 layout_mode = 2
 theme_override_font_sizes/font_size = 20
 text = "Ashfall P1 Playground"
 horizontal_alignment = 1
 
-[node name="Subtitle" type="Label" parent="MainLayout/Sidebar" unique_id=1746298941]
+[node name="Subtitle" type="Label" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1746298941]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
 theme_override_font_sizes/font_size = 12
 text = "512x512 Native Simulation"
 horizontal_alignment = 1
 
-[node name="HSeparator" type="HSeparator" parent="MainLayout/Sidebar" unique_id=1104034388]
+[node name="HSeparator" type="HSeparator" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1104034388]
 layout_mode = 2
 
-[node name="InfoBox" type="GridContainer" parent="MainLayout/Sidebar" unique_id=3466315]
+[node name="InfoBox" type="GridContainer" parent="MainLayout/SidebarScroll/Sidebar" unique_id=3466315]
 layout_mode = 2
 columns = 2
 
-[node name="TickLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=566672388]
+[node name="TickLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=566672388]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Tick:"
 
-[node name="TickValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1989308404]
+[node name="TickValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1989308404]
 layout_mode = 2
 text = "0"
 horizontal_alignment = 2
 
-[node name="CellsLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=523422682]
+[node name="CellsLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=523422682]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Occupied Cells:"
 
-[node name="CellsValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1228276570]
+[node name="CellsValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1228276570]
 layout_mode = 2
 text = "0"
 horizontal_alignment = 2
 
-[node name="StatusLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1088921850]
+[node name="StatusLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1088921850]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Simulation:"
 
-[node name="StatusValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=87057823]
+[node name="StatusValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=87057823]
 layout_mode = 2
 text = "PAUSED"
 horizontal_alignment = 2
 
-[node name="MaterialLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1179733109]
+[node name="MaterialLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1179733109]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Tool:"
 
-[node name="MaterialValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=298807863]
+[node name="MaterialValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=298807863]
 layout_mode = 2
 text = "Sand"
 horizontal_alignment = 2
 
-[node name="FpsLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=386311660]
+[node name="FpsLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=386311660]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "FPS:"
 
-[node name="FpsValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1958179687]
+[node name="FpsValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1958179687]
 layout_mode = 2
 text = "-"
 horizontal_alignment = 2
 
-[node name="FrameLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1176325741]
+[node name="FrameLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1176325741]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Frame:"
 
-[node name="FrameValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=598808161]
+[node name="FrameValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=598808161]
 layout_mode = 2
 text = "-"
 horizontal_alignment = 2
 
-[node name="SimLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=1570795589]
+[node name="SimLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=1570795589]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Sim Step:"
 
-[node name="SimValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=298294262]
+[node name="SimValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=298294262]
 layout_mode = 2
 text = "-"
 horizontal_alignment = 2
 
-[node name="PlayerLabel" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=201793328]
+[node name="PlayerLabel" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=201793328]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Player:"
 
-[node name="PlayerValue" type="Label" parent="MainLayout/Sidebar/InfoBox" unique_id=631032662]
+[node name="PlayerValue" type="Label" parent="MainLayout/SidebarScroll/Sidebar/InfoBox" unique_id=631032662]
 layout_mode = 2
 text = "-"
 horizontal_alignment = 2
 
-[node name="HSeparator2" type="HSeparator" parent="MainLayout/Sidebar" unique_id=192890961]
+[node name="HSeparator2" type="HSeparator" parent="MainLayout/SidebarScroll/Sidebar" unique_id=192890961]
 layout_mode = 2
 
-[node name="MaterialsHeader" type="Label" parent="MainLayout/Sidebar" unique_id=1424765346]
+[node name="MaterialsHeader" type="Label" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1424765346]
 layout_mode = 2
 theme_override_font_sizes/font_size = 14
 text = "Material Palette:"
 
-[node name="SandBtn" type="Button" parent="MainLayout/Sidebar" unique_id=674678877]
+[node name="SandBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=674678877]
 layout_mode = 2
 text = "[1] Sand (Powder)"
 
-[node name="WaterBtn" type="Button" parent="MainLayout/Sidebar" unique_id=2121446087]
+[node name="WaterBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=2121446087]
 layout_mode = 2
 text = "[2] Water (Liquid)"
 
-[node name="StoneBtn" type="Button" parent="MainLayout/Sidebar" unique_id=674220850]
+[node name="StoneBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=674220850]
 layout_mode = 2
 text = "[3] Stone (Static)"
 
-[node name="EraserBtn" type="Button" parent="MainLayout/Sidebar" unique_id=1614910097]
+[node name="EraserBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1614910097]
 layout_mode = 2
 text = "[4] Air (Eraser)"
 
-[node name="HSeparator3" type="HSeparator" parent="MainLayout/Sidebar" unique_id=1251431050]
+[node name="HSeparator3" type="HSeparator" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1251431050]
 layout_mode = 2
 
-[node name="ActionsHeader" type="Label" parent="MainLayout/Sidebar" unique_id=797940047]
+[node name="ActionsHeader" type="Label" parent="MainLayout/SidebarScroll/Sidebar" unique_id=797940047]
 layout_mode = 2
 theme_override_font_sizes/font_size = 14
 text = "Simulation Control:"
 
-[node name="PlayBtn" type="Button" parent="MainLayout/Sidebar" unique_id=1129308062]
+[node name="PlayBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1129308062]
 layout_mode = 2
 text = "[Space] Play / Pause"
 
-[node name="StepBtn" type="Button" parent="MainLayout/Sidebar" unique_id=265157028]
+[node name="StepBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=265157028]
 layout_mode = 2
 text = "[S] Single Step"
 
-[node name="ResetBtn" type="Button" parent="MainLayout/Sidebar" unique_id=417403402]
+[node name="ResetBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=417403402]
 layout_mode = 2
 text = "[R] Reset Play Level"
 
-[node name="SaveBtn" type="Button" parent="MainLayout/Sidebar" unique_id=951738563]
+[node name="SaveBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=951738563]
 layout_mode = 2
 text = "[F5] Save Game"
 
-[node name="LoadBtn" type="Button" parent="MainLayout/Sidebar" unique_id=29794395]
+[node name="LoadBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=29794395]
 layout_mode = 2
 text = "[F9] Load Game"
 
-[node name="HelpText" type="Label" parent="MainLayout/Sidebar" unique_id=142174319]
+[node name="HelpText" type="Label" parent="MainLayout/SidebarScroll/Sidebar" unique_id=142174319]
 layout_mode = 2
 size_flags_vertical = 10
 theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
@@ -253,12 +258,12 @@ text = "Controls:
 autowrap_mode = 2
 
 [connection signal="gui_input" from="MainLayout/ViewportContainer/WorldStack/WorldTexture" to="." method="_on_world_texture_gui_input"]
-[connection signal="pressed" from="MainLayout/Sidebar/SandBtn" to="." method="_on_sand_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/WaterBtn" to="." method="_on_water_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/StoneBtn" to="." method="_on_stone_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/EraserBtn" to="." method="_on_eraser_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/PlayBtn" to="." method="_on_play_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/StepBtn" to="." method="_on_step_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/ResetBtn" to="." method="_on_reset_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/SaveBtn" to="." method="_on_save_btn_pressed"]
-[connection signal="pressed" from="MainLayout/Sidebar/LoadBtn" to="." method="_on_load_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/SandBtn" to="." method="_on_sand_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/WaterBtn" to="." method="_on_water_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/StoneBtn" to="." method="_on_stone_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/EraserBtn" to="." method="_on_eraser_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/PlayBtn" to="." method="_on_play_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/StepBtn" to="." method="_on_step_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/ResetBtn" to="." method="_on_reset_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/SaveBtn" to="." method="_on_save_btn_pressed"]
+[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/LoadBtn" to="." method="_on_load_btn_pressed"]

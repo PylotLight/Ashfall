@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Floating-water shading regression check in `tests/godot_visual_simulation.gd` (column top never darker than middle).
 
 ### Fixed
+- Sidebar ran outside the screen on short windows: its content min-height (~979 px) forced the whole layout taller than the 720 px canvas. Sidebar now lives in a `ScrollContainer` (no horizontal scroll) so it fits any height; layout fit is asserted in P1 scene verification.
 - Water rendered offset from its cells (painting "missed" visible water): `WaterOverlay` carried a stray 128.5 px vertical offset from an editor nudge, shifting the whole water layer down while the brush edited correct cells. Overlay offsets removed; layer alignment is now asserted in P1 scene verification.
 - Boot showed raw authored rectangles (floating water/sand blocks). `setup_play_level` now settles 200 ticks deterministically (~0.8 s), so first paint is dunes-at-repose with flat pools; dune2 shifted right to keep the settled spawn box clear. Pocket containment is now a permanent P1 assert.
 - Water depth shading inverted on floating blobs and falling streams (dark-on-top). Depth is now min(water-below, water-above): only genuinely enclosed deep water goes dark teal.
