@@ -4,7 +4,7 @@ project(ashfall LANGUAGES CXX)
 
 option(ASHFALL_BUILD_TESTS "Build deterministic simulation tests" ON)
 
-add_library(ashfall_sim engine/src/simulation.cpp)
+add_library(ashfall_sim engine/src/simulation.cpp engine/src/material_data.cpp)
 target_include_directories(ashfall_sim PUBLIC engine/include)
 target_compile_features(ashfall_sim PUBLIC cxx_std_20)
 

@@ -1,6 +1,8 @@
 #include "ashfall/simulation.hpp"
+#include "ashfall/material_data.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -576,6 +578,85 @@ void test_player_collision_and_dirty_tracking() {
     expect(world.tick() == 0 && world.occupied_cell_count() == 0, "reset clears world state and tick");
     expect(world.dirty_chunks().size() == 2, "reset marks removed chunks dirty");
 }
+void test_material_data_parses_table() {
+    const char* kJson = R"JSON({
+  "version": 1,
+  "materials": [
+    {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
+    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 99, "color": [128, 133, 138]},
+    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]},
+    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 1, "color": [86, 178, 214]}
+  ]
+})JSON";
+    ashfall::MaterialTable table;
+    std::string error;
+    expect(ashfall::parse_material_data(kJson, table, error), "valid material data parses");
+    expect(table.version == 1, "table version preserved");
+    expect(table.materials.size() == 4, "table holds four materials");
+    expect(table.materials[2].id == 2 && table.materials[2].name == "sand", "sand spec intact");
+    expect(table.materials[2].movement == ashfall::Movement::Powder, "sand is powder");
+    expect(table.materials[2].density == 2 && !table.materials[2].solid, "sand density/solidity intact");
+    expect(table.materials[3].color[0] == 86 && table.materials[3].color[1] == 178 &&
+            table.materials[3].color[2] == 214,
+        "water color intact");
+    ashfall::Movement movement = ashfall::Movement::Static;
+    expect(ashfall::movement_from_string("liquid", movement) && movement == ashfall::Movement::Liquid,
+        "movement name resolves");
+    expect(!ashfall::movement_from_string("gas", movement), "gas rejected until P2.5");
+}
+
+void test_material_data_rejects_bad_input() {
+    const char* kBase = R"JSON({"version": 1, "materials": [%s]})JSON";
+    const char* kAir = R"JSON({"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]})JSON";
+    const char* kSand = R"JSON({"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]})JSON";
+    auto rejects = [&](const std::string& text) {
+        ashfall::MaterialTable table;
+        std::string error;
+        if (ashfall::parse_material_data(text, table, error)) {
+            std::cerr << "ACCEPTED BAD INPUT: " << text << '\n';
+            return false;
+        }
+        return !error.empty();
+    };
+    char full[2048];
+    std::snprintf(full, sizeof(full), kBase, (std::string(kAir) + "," + kSand).c_str());
+    {
+        ashfall::MaterialTable table;
+        std::string error;
+        expect(ashfall::parse_material_data(full, table, error), "two-material table parses");
+    }
+    expect(rejects(""), "empty input rejected");
+    expect(rejects("{unterminated"), "truncated JSON rejected");
+    expect(rejects(std::string(full) + "trailing"), "trailing characters rejected");
+    char buf[2048];
+    std::snprintf(buf, sizeof(buf), kBase, kSand);
+    expect(rejects(buf), "missing air rejected");
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kAir).c_str());
+    expect(rejects(buf), "duplicate id rejected");
+    const char* kSand2 =
+        R"JSON({"id": 4, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [1, 2, 3]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kSand + "," + kSand2).c_str());
+    expect(rejects(buf), "duplicate name rejected");
+    const char* kGas =
+        R"JSON({"id": 5, "name": "smoke", "movement": "gas", "solid": false, "density": 0, "color": [1, 2, 3]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kGas).c_str());
+    expect(rejects(buf), "unknown movement rejected");
+    const char* kSolidSand =
+        R"JSON({"id": 6, "name": "brick", "movement": "powder", "solid": true, "density": 5, "color": [1, 2, 3]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kSolidSand).c_str());
+    expect(rejects(buf), "solid powder rejected");
+    const char* kDense =
+        R"JSON({"id": 7, "name": "heavy", "movement": "static", "solid": true, "density": 300, "color": [1, 2, 3]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kDense).c_str());
+    expect(rejects(buf), "density out of range rejected");
+    const char* kBadColor =
+        R"JSON({"id": 8, "name": "odd", "movement": "static", "solid": true, "density": 9, "color": [1, 2, 999]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kBadColor).c_str());
+    expect(rejects(buf), "color out of range rejected");
+    const char* kV2 = R"JSON({"version": 2, "materials": []})JSON";
+    expect(rejects(kV2), "wrong version rejected");
+}
+
 } // namespace
 
 int main() {
@@ -603,5 +684,7 @@ int main() {
     test_save_load_rejects_malformed();
     test_save_load_varied_topology();
     test_player_collision_and_dirty_tracking();
+    test_material_data_parses_table();
+    test_material_data_rejects_bad_input();
     std::cout << "All simulation tests passed.\n";
 }
