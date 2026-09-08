@@ -218,6 +218,40 @@ void test_sand_sinks_through_water() {
     expect(water_above == 9, "all 9 water cells displaced above sand");
 }
 
+void test_sand_block_sinks_through_open_water() {
+    ashfall::SimulationWorld world;
+    // Wide open basin: no walls to funnel the fall, so the block must sink
+    // through the body coherently and settle on the floor.
+    world.fill_rect({0, 20}, {20, 20}, ashfall::kStone); // floor
+    world.fill_rect({0, 0}, {0, 20}, ashfall::kStone);   // left wall
+    world.fill_rect({20, 0}, {20, 20}, ashfall::kStone); // right wall
+    world.fill_rect({1, 10}, {19, 19}, ashfall::kWater); // deep open water
+    world.fill_rect({1, 9}, {4, 9}, ashfall::kWater);    // top-up: 194 water ...
+    world.fill_rect({8, 2}, {12, 4}, ashfall::kSand);    // ... + 15 sand = 209,
+    // exactly 11 full rows when settled. NOTE: no quiescence is asserted:
+    // the last unsettled top cells keep a gentle surface shimmer by design
+    // (partial rows trade places; the water renderer smooths it out).
+    for (int i = 0; i < 400; ++i) world.step();
+
+    int sand = 0, water = 0, sand_max = -1, sand_above = 0;
+    for (int y = 0; y <= 20; ++y) {
+        for (int x = 0; x <= 20; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kSand) {
+                ++sand;
+                sand_max = std::max(sand_max, y);
+                if (y < 12) ++sand_above;
+            } else if (m == ashfall::kWater) {
+                ++water;
+            }
+        }
+    }
+    expect(sand == 15, "sinking conserves sand mass");
+    expect(water == 194, "sinking conserves water mass");
+    expect(sand_above == 0, "no sand left suspended in the water column");
+    expect(sand_max == 19, "sunken sand rests on the basin floor");
+}
+
 void test_settling_reaches_steady_state() {
     ashfall::SimulationWorld world;
     // Basin with sand only — sand settles deterministically without lateral oscillation
@@ -553,6 +587,7 @@ int main() {
     test_chunk_and_rect_reading();
     test_mass_conservation();
     test_sand_sinks_through_water();
+    test_sand_block_sinks_through_open_water();
     test_settling_reaches_steady_state();
     test_water_reaches_steady_state();
     test_lone_water_droplet_rests();

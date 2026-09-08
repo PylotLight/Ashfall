@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Open-water sinking regression test: a sand block dropped into a wide basin sinks coherently, conserves mass, leaves nothing suspended, and rests on the floor (transient mid-water clumps are normal; only partial-row surface shimmer persists by design).
 - P1.4 play level: `SimulationWorld::build_play_level` (floor, walls, platforms, mesa, sand dunes, water reservoir, contained rain pocket with diggable sand plug) plus `play_level_spawn`; deterministic content covered by `test_play_level_layout`.
 - Player avatar in the Godot host: top-down kinematic movement (WASD/arrows) colliding against native stone via new `AshfallWorld` queries `is_solid_cell`/`can_move_to_box`; red marker overlay, live position HUD, letterbox-correct world/display mapping (also fixes brush painting on non-square panels).
 - Avatar world interaction: dig sand/water (`E`) and place held material (`F`) in a 3x3 around the avatar; stone is undiggable, placement only fills air.
