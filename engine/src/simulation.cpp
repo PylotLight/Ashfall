@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <unordered_set>
 
 namespace ashfall {
@@ -45,6 +46,51 @@ CellPosition chunk_pos_of(CellPosition pos) {
     return {floor_divide(pos.x, kChunkSize), floor_divide(pos.y, kChunkSize)};
 }
 
+// Bottom-up (y desc), x asc within a row: the exact order the old full
+// std::sort produced. Counting sort by y (O(n + rows)), then sorts each
+// short row by x. Falls back to std::sort on degenerate y-spread.
+void order_dynamic_cells(std::vector<std::pair<CellPosition, MaterialId>>& cells,
+                         std::vector<std::pair<CellPosition, MaterialId>>& scratch) {
+    if (cells.size() < 2) return;
+    int min_y = cells[0].first.y;
+    int max_y = cells[0].first.y;
+    for (const auto& entry : cells) {
+        if (entry.first.y < min_y) min_y = entry.first.y;
+        if (entry.first.y > max_y) max_y = entry.first.y;
+    }
+    const auto full_sort = [&]() {
+        std::sort(cells.begin(), cells.end(), [](const auto& left, const auto& right) {
+            if (left.first.y != right.first.y) return left.first.y > right.first.y;
+            return left.first.x < right.first.x;
+        });
+    };
+    const std::int64_t span = static_cast<std::int64_t>(max_y) - static_cast<std::int64_t>(min_y) + 1;
+    if (span > 8192 || span > static_cast<std::int64_t>(cells.size()) * 8) {
+        full_sort();
+        return;
+    }
+    const std::size_t rows = static_cast<std::size_t>(span);
+    std::vector<std::size_t> row_size(rows, 0);
+    for (const auto& entry : cells) {
+        ++row_size[static_cast<std::size_t>(static_cast<std::int64_t>(max_y) - entry.first.y)];
+    }
+    std::vector<std::size_t> row_start(rows + 1, 0);
+    for (std::size_t row = 0; row < rows; ++row) row_start[row + 1] = row_start[row] + row_size[row];
+    scratch.clear();
+    scratch.resize(cells.size());
+    std::vector<std::size_t> cursor(row_start.begin(), row_start.end() - 1);
+    for (auto& entry : cells) {
+        const std::size_t row = static_cast<std::size_t>(static_cast<std::int64_t>(max_y) - entry.first.y);
+        scratch[cursor[row]++] = std::move(entry);
+    }
+    for (std::size_t row = 0; row < rows; ++row) {
+        std::sort(scratch.begin() + static_cast<std::ptrdiff_t>(row_start[row]),
+                  scratch.begin() + static_cast<std::ptrdiff_t>(row_start[row + 1]),
+                  [](const auto& left, const auto& right) { return left.first.x < right.first.x; });
+    }
+    cells = std::move(scratch);
+}
+
 } // namespace
 
 SimulationWorld::SimulationWorld() {
@@ -55,12 +101,8 @@ SimulationWorld::SimulationWorld() {
 }
 
 MaterialId SimulationWorld::cell(CellPosition position) const {
-    const CellPosition chunk_position = chunk_pos_of(position);
-    const auto chunk = chunks_.find(chunk_position);
-    if (chunk == chunks_.end()) return kAir;
-    const int x = positive_modulo(position.x, kChunkSize);
-    const int y = positive_modulo(position.y, kChunkSize);
-    return chunk->second[static_cast<std::size_t>(y * kChunkSize + x)];
+    const MaterialId* found = cells_.find(position);
+    return found == nullptr ? kAir : *found;
 }
 
 void SimulationWorld::reset() {
@@ -68,37 +110,54 @@ void SimulationWorld::reset() {
         mark_chunk_dirty(chunk_position);
     }
     chunks_.clear();
+    cells_.clear();
     tick_ = 0;
-    occupied_count_ = 0;
 }
 
-void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
-    if (!materials_.contains(material_id)) return;
+void SimulationWorld::write_chunk_cell(CellPosition position, MaterialId material_id) {
+    write_chunk_cell_deferred(position, material_id, nullptr);
+}
+
+void SimulationWorld::write_chunk_cell_deferred(
+    CellPosition position, MaterialId material_id, std::set<CellPosition>* maybe_emptied) {
     const CellPosition chunk_position = chunk_pos_of(position);
     const int local_x = positive_modulo(position.x, kChunkSize);
     const int local_y = positive_modulo(position.y, kChunkSize);
     const std::size_t index = chunk_index(local_x, local_y);
-
-    auto chunk_it = chunks_.find(chunk_position);
-    MaterialId previous = kAir;
-    if (chunk_it != chunks_.end()) previous = chunk_it->second[index];
-    if (previous == material_id) return;
-
     if (material_id == kAir) {
+        const auto chunk_it = chunks_.find(chunk_position);
         if (chunk_it == chunks_.end()) return;
         chunk_it->second[index] = kAir;
-        --occupied_count_;
-        if (chunk_storage_empty(chunk_it->second)) chunks_.erase(chunk_it);
-    } else {
-        if (chunk_it == chunks_.end()) {
-            auto [inserted_it, _] = chunks_.try_emplace(
-                chunk_position, std::vector<MaterialId>(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir));
-            chunk_it = inserted_it;
+        // O(chunk) emptiness scans are deferred in bulk paths: the caller
+        // collects touched chunks and sweeps once (see step()).
+        if (maybe_emptied != nullptr) {
+            maybe_emptied->insert(chunk_position);
+        } else if (chunk_storage_empty(chunk_it->second)) {
+            chunks_.erase(chunk_it);
         }
-        chunk_it->second[index] = material_id;
-        if (previous == kAir) ++occupied_count_;
+        return;
     }
-    mark_chunk_dirty(chunk_position);
+    auto chunk_it = chunks_.find(chunk_position);
+    if (chunk_it == chunks_.end()) {
+        auto [inserted_it, _] = chunks_.try_emplace(
+            chunk_position, std::vector<MaterialId>(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir));
+        chunk_it = inserted_it;
+    }
+    chunk_it->second[index] = material_id;
+}
+
+void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
+    if (!materials_.contains(material_id)) return;
+    const MaterialId* found = cells_.find(position);
+    const MaterialId previous = found == nullptr ? kAir : *found;
+    if (previous == material_id) return;
+    if (material_id == kAir) {
+        cells_.erase(position);
+    } else {
+        cells_.insert_or_assign(position, material_id);
+    }
+    write_chunk_cell(position, material_id);
+    mark_chunk_dirty(chunk_pos_of(position));
 }
 
 void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialId material_id) {
@@ -107,6 +166,24 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
     const int max_x = std::max(first.x, last.x);
     const int min_y = std::min(first.y, last.y);
     const int max_y = std::max(first.y, last.y);
+    if (material_id == kAir) {
+        for (int y = min_y; y <= max_y; ++y) {
+            for (int x = min_x; x <= max_x; ++x) {
+                const CellPosition position{x, y};
+                if (!cells_.contains(position)) continue;
+                cells_.erase(position);
+                write_chunk_cell(position, kAir);
+            }
+        }
+    } else {
+        for (int y = min_y; y <= max_y; ++y) {
+            for (int x = min_x; x <= max_x; ++x) {
+                const CellPosition position{x, y};
+                cells_.insert_or_assign(position, material_id);
+                write_chunk_cell(position, material_id);
+            }
+        }
+    }
     const CellPosition min_chunk = chunk_pos_of({min_x, min_y});
     const CellPosition max_chunk = chunk_pos_of({max_x, max_y});
     for (int cy = min_chunk.y; cy <= max_chunk.y; ++cy) {
@@ -114,74 +191,36 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
             mark_chunk_dirty({cx, cy});
         }
     }
-    // Incremental per-chunk writes: O(rect area), not O(world size).
-    for (int chunk_y = min_chunk.y; chunk_y <= max_chunk.y; ++chunk_y) {
-        for (int chunk_x = min_chunk.x; chunk_x <= max_chunk.x; ++chunk_x) {
-            const int cell_min_x = std::max(min_x, chunk_x * kChunkSize);
-            const int cell_max_x = std::min(max_x, chunk_x * kChunkSize + kChunkSize - 1);
-            const int cell_min_y = std::max(min_y, chunk_y * kChunkSize);
-            const int cell_max_y = std::min(max_y, chunk_y * kChunkSize + kChunkSize - 1);
-            const CellPosition chunk_position{chunk_x, chunk_y};
-            auto chunk_it = chunks_.find(chunk_position);
-            if (material_id == kAir) {
-                if (chunk_it == chunks_.end()) continue;
-                for (int y = cell_min_y; y <= cell_max_y; ++y) {
-                    for (int x = cell_min_x; x <= cell_max_x; ++x) {
-                        const std::size_t index = chunk_index(x - chunk_x * kChunkSize, y - chunk_y * kChunkSize);
-                        if (chunk_it->second[index] != kAir) {
-                            chunk_it->second[index] = kAir;
-                            --occupied_count_;
-                        }
-                    }
-                }
-                if (chunk_storage_empty(chunk_it->second)) chunks_.erase(chunk_it);
-            } else {
-                if (chunk_it == chunks_.end()) {
-                    auto [inserted_it, _] = chunks_.try_emplace(
-                        chunk_position,
-                        std::vector<MaterialId>(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir));
-                    chunk_it = inserted_it;
-                }
-                for (int y = cell_min_y; y <= cell_max_y; ++y) {
-                    for (int x = cell_min_x; x <= cell_max_x; ++x) {
-                        const std::size_t index = chunk_index(x - chunk_x * kChunkSize, y - chunk_y * kChunkSize);
-                        if (chunk_it->second[index] == kAir) ++occupied_count_;
-                        chunk_it->second[index] = material_id;
-                    }
-                }
-            }
-        }
-    }
 }
 
 
 void SimulationWorld::step() {
-    CellMap current = collect_cells();
-    CellMap next;
-    next.reserve(current.size() + 16);
-    std::vector<std::pair<CellPosition, MaterialId>> dynamic_cells;
-    dynamic_cells.reserve(current.size());
+    // cells_ IS the tick-start state: no collect copy. next replaces it.
+    const FlatCells& current = cells_;
+    FlatCells& next = next_scratch_;
+    next.clear();
+    next.reserve_for(cells_.size() + 16);
+    DynCells& dynamic_cells = dyn_scratch_;
+    dynamic_cells.clear();
+    dynamic_cells.reserve(cells_.size());
     // Homes of cells that stayed put this tick. Sand may only displace water
     // at a settled home (owner relocates to the swap source, which is safe);
     // overwriting an in-flight arrival would destroy a cell and break mass
     // conservation. Down/diag targets live a row below, so in bottom-up order
     // their owners are always decided already.
-    std::unordered_set<CellPosition, CellPositionHash> stayed;
-    stayed.reserve(current.size());
+    FlatMarks& stayed = stayed_scratch_;
+    stayed.clear();
+    stayed.reserve_for(cells_.size());
 
-    for (const auto& [position, material_id] : current) {
+    current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
         if (material(material_id).movement == Movement::Static) {
-            next[position] = material_id;
+            next.insert_or_assign(position, material_id);
         } else {
             dynamic_cells.push_back({position, material_id});
         }
-    }
-
-    std::sort(dynamic_cells.begin(), dynamic_cells.end(), [](const auto& left, const auto& right) {
-        if (left.first.y != right.first.y) return left.first.y > right.first.y;
-        return left.first.x < right.first.x;
     });
 
+    order_dynamic_cells(dynamic_cells, order_scratch_);
     for (const auto& [source, material_id] : dynamic_cells) {
         const auto& mat_def = material(material_id);
         const bool left_first = prefers_left(source, tick_);
@@ -196,9 +235,9 @@ void SimulationWorld::step() {
                 : std::array<CellPosition, 2>{diag_r, diag_l};
 
             auto get_density_in_next = [&](CellPosition p) -> int {
-                auto it = next.find(p);
-                if (it == next.end()) return 0;
-                return material(it->second).density;
+                const MaterialId* found = next.find(p);
+                if (found == nullptr) return 0;
+                return material(*found).density;
             };
 
             bool moved = false;
@@ -207,13 +246,13 @@ void SimulationWorld::step() {
             // in-flight arrivals block (stealing them destroys mass).
             auto try_powder_target = [&](CellPosition dest) -> bool {
                 if (get_density_in_next(dest) >= mat_def.density) return false;
-                auto it = next.find(dest);
-                if (it == next.end()) {
-                    next[dest] = material_id;
-                } else if (it->second != kAir && stayed.contains(dest)) {
-                    MaterialId displaced = it->second;
-                    next[dest] = material_id;
-                    next[source] = displaced;
+                MaterialId* occupant = next.find(dest);
+                if (occupant == nullptr) {
+                    next.insert_or_assign(dest, material_id);
+                } else if (*occupant != kAir && stayed.contains(dest)) {
+                    MaterialId displaced = *occupant;
+                    next.insert_or_assign(dest, material_id);
+                    next.insert_or_assign(source, displaced);
                 } else {
                     return false;
                 }
@@ -235,8 +274,8 @@ void SimulationWorld::step() {
                 }
             }
             if (!moved) {
-                next[source] = material_id;
-                stayed.insert(source);
+                next.insert_or_assign(source, material_id);
+                stayed.insert_or_assign(source, 1);
             }
         } else if (mat_def.movement == Movement::Liquid) {
             const CellPosition down{source.x, source.y + 1};
@@ -259,7 +298,7 @@ void SimulationWorld::step() {
 
             bool moved = false;
             if (is_empty_down(down)) {
-                next[down] = material_id;
+                next.insert_or_assign(down, material_id);
                 moved = true;
             } else {
                 for (CellPosition diag : diags) {
@@ -269,7 +308,7 @@ void SimulationWorld::step() {
                         continue;
                     }
                     if (is_empty_down(diag)) {
-                        next[diag] = material_id;
+                        next.insert_or_assign(diag, material_id);
                         moved = true;
                         break;
                     }
@@ -283,12 +322,12 @@ void SimulationWorld::step() {
                     // are skipped, never stolen: that race destroys mass.
                     // Stone walls stop the scan.
                     constexpr int kDispersion = 4;
-                    const auto below_it = next.find(down);
-                    const bool deep = below_it != next.end() && below_it->second == kWater;
+                    const MaterialId* below_mat = next.find(down);
+                    const bool deep = below_mat != nullptr && *below_mat == kWater;
                     // Wetness in the settled/next state (decided cells only).
                     auto wet_at = [&](CellPosition p) -> bool {
-                        const auto it = next.find(p);
-                        return it != next.end() && it->second == kWater;
+                        const MaterialId* found = next.find(p);
+                        return found != nullptr && *found == kWater;
                     };
                     if (deep) {
                         // A cell embedded in a complete surface row (wet on
@@ -304,7 +343,7 @@ void SimulationWorld::step() {
                                     if (is_solid(target)) break;
                                     if (current.contains(target)) continue;
                                     if (!next.contains(target)) {
-                                        next[target] = material_id;
+                                        next.insert_or_assign(target, material_id);
                                         moved = true;
                                         break;
                                     }
@@ -320,61 +359,72 @@ void SimulationWorld::step() {
                         // water, and water over stone are unaffected.
                         const CellPosition above{source.x, source.y - 1};
                         const bool open_above = !current.contains(above);
-                        const auto settled_it = next.find(down);
+                        const MaterialId* below_now = next.find(down);
                         // Any sand here: settled or in flight. Swapping
                         // relocates (never overwrites), so percolation is
                         // mass-safe even through a slumping dune; the source
                         // home is free in next (writers only move down or
                         // skip current-occupied laterals).
                         const bool sand_below =
-                            settled_it != next.end() && settled_it->second == kSand;
+                            below_now != nullptr && *below_now == kSand;
                         // Escape hatch: only seep when the displaced sand can
                         // roll somewhere (a diag of the source holding air or
                         // water in current). Otherwise the pair swap back and
                         // forth every tick: visible flicker, zero drainage.
                         // A dot in a fully-cupped pit stays put (a puddle).
                         auto escapable = [&](CellPosition p) -> bool {
-                            const auto it = current.find(p);
-                            return it == current.end() || it->second == kWater;
+                            const MaterialId* found = current.find(p);
+                            return found == nullptr || *found == kWater;
                         };
                         const CellPosition seep_l{source.x - 1, source.y + 1};
                         const CellPosition seep_r{source.x + 1, source.y + 1};
                         if (open_above && !wet_at(side_l) && !wet_at(side_r) && sand_below &&
                             (escapable(seep_l) || escapable(seep_r))) {
-                            next[down] = material_id;
-                            next[source] = kSand;
+                            next.insert_or_assign(down, material_id);
+                            next.insert_or_assign(source, kSand);
                             moved = true;
                         }
                     }
                 }
             }
             if (!moved) {
-                next[source] = material_id;
-                stayed.insert(source);
+                next.insert_or_assign(source, material_id);
+                stayed.insert_or_assign(source, 1);
             }
         }
     }
 
-    // Mark dirty chunks based on changes between current and next
-    for (const auto& [pos, mat] : current) {
-        auto it = next.find(pos);
-        if (it == next.end() || it->second != mat) {
+    // Patch the chunk mirror + dirty set from the tick diff (minimal writes:
+    // removals/changes in the first loop, pure additions in the second).
+    // Emptiness sweeps are deferred: one O(chunk) scan per touched chunk.
+    std::set<CellPosition> maybe_emptied;
+    cells_.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+        const MaterialId* updated = next.find(pos);
+        if (updated == nullptr) {
+            write_chunk_cell_deferred(pos, kAir, &maybe_emptied);
+            mark_chunk_dirty(chunk_pos_of(pos));
+        } else if (*updated != mat) {
+            write_chunk_cell(pos, *updated);
             mark_chunk_dirty(chunk_pos_of(pos));
         }
-    }
-    for (const auto& [pos, mat] : next) {
-        auto it = current.find(pos);
-        if (it == current.end() || it->second != mat) {
+    });
+    next.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+        if (!cells_.contains(pos)) {
+            write_chunk_cell(pos, mat);
             mark_chunk_dirty(chunk_pos_of(pos));
+        }
+    });
+    for (const CellPosition chunk_position : maybe_emptied) {
+        const auto chunk_it = chunks_.find(chunk_position);
+        if (chunk_it != chunks_.end() && chunk_storage_empty(chunk_it->second)) {
+            chunks_.erase(chunk_it);
         }
     }
 
-    rebuild_chunks(next);
+    std::swap(cells_, next);
     ++tick_;
 }
 
-
-std::size_t SimulationWorld::occupied_cell_count() const { return occupied_count_; }
 
 bool SimulationWorld::has_chunk(CellPosition chunk_position) const {
     return chunks_.contains(chunk_position);
@@ -411,18 +461,36 @@ void SimulationWorld::copy_rect(CellPosition first, CellPosition last, std::span
     const std::size_t total_cells = static_cast<std::size_t>(width * height);
     if (out_buffer.size() < total_cells) return;
 
-    std::size_t index = 0;
-    for (int y = min_y; y <= max_y; ++y) {
-        for (int x = min_x; x <= max_x; ++x) {
-            out_buffer[index++] = cell({x, y});
+    // Dense chunk-vector row copies; missing chunks are air.
+    std::fill_n(out_buffer.data(), total_cells, kAir);
+    const CellPosition min_chunk = chunk_pos_of({min_x, min_y});
+    const CellPosition max_chunk = chunk_pos_of({max_x, max_y});
+    for (int cy = min_chunk.y; cy <= max_chunk.y; ++cy) {
+        for (int cx = min_chunk.x; cx <= max_chunk.x; ++cx) {
+            const auto it = chunks_.find({cx, cy});
+            if (it == chunks_.end()) continue;
+            const int copy_min_x = std::max(min_x, cx * kChunkSize);
+            const int copy_max_x = std::min(max_x, cx * kChunkSize + kChunkSize - 1);
+            const int copy_min_y = std::max(min_y, cy * kChunkSize);
+            const int copy_max_y = std::min(max_y, cy * kChunkSize + kChunkSize - 1);
+            for (int y = copy_min_y; y <= copy_max_y; ++y) {
+                const std::size_t src = static_cast<std::size_t>((y - cy * kChunkSize) * kChunkSize +
+                                                                 (copy_min_x - cx * kChunkSize));
+                const std::size_t dst = static_cast<std::size_t>((y - min_y) * width + (copy_min_x - min_x));
+                const std::size_t run = static_cast<std::size_t>(copy_max_x - copy_min_x + 1);
+                std::memcpy(out_buffer.data() + dst, it->second.data() + src, run * sizeof(MaterialId));
+            }
         }
     }
 }
 
 std::vector<std::uint8_t> SimulationWorld::save() const {
-    const CellMap cells = collect_cells();
-    // Sort for deterministic bytes (unordered storage is O(1) but unordered).
-    std::vector<std::pair<CellPosition, MaterialId>> ordered(cells.begin(), cells.end());
+    // Sort for deterministic bytes (flat storage is O(1) but unordered).
+    std::vector<std::pair<CellPosition, MaterialId>> ordered;
+    ordered.reserve(cells_.size());
+    cells_.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+        ordered.emplace_back(position, material_id);
+    });
     std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
         if (left.first.x != right.first.x) return left.first.x < right.first.x;
         if (left.first.y != right.first.y) return left.first.y < right.first.y;
@@ -447,21 +515,22 @@ bool SimulationWorld::load(std::span<const std::uint8_t> bytes) {
     std::uint64_t saved_tick = 0;
     std::uint32_t count = 0;
     if (!read_u64(bytes, offset, saved_tick) || !read_u32(bytes, offset, count) || bytes.size() - offset != static_cast<std::size_t>(count) * 9) return false;
-    CellMap loaded;
-    loaded.reserve(static_cast<std::size_t>(count) + 16);
+    FlatCells loaded;
+    loaded.reserve_for(static_cast<std::size_t>(count) + 16);
     for (std::uint32_t index = 0; index < count; ++index) {
         std::uint32_t raw_x = 0;
         std::uint32_t raw_y = 0;
         if (!read_u32(bytes, offset, raw_x) || !read_u32(bytes, offset, raw_y) || offset >= bytes.size()) return false;
         const MaterialId material_id = bytes[offset++];
         if (material_id == kAir || !materials_.contains(material_id)) return false;
-        loaded[{static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}] = material_id;
+        loaded.insert_or_assign({static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, material_id);
     }
     std::set<CellPosition> changed_chunks;
     for (const auto& [chunk_position, _] : chunks_) {
         changed_chunks.insert(chunk_position);
     }
     rebuild_chunks(loaded);
+    cells_ = std::move(loaded);
     for (const auto& [chunk_pos, _] : chunks_) {
         changed_chunks.insert(chunk_pos);
     }
@@ -546,30 +615,16 @@ bool SimulationWorld::prefers_left(CellPosition position, std::uint64_t tick) {
 }
 
 
-SimulationWorld::CellMap SimulationWorld::collect_cells() const {
-    CellMap cells;
-    cells.reserve(occupied_count_ + 16);
-    for (const auto& [chunk_position, chunk] : chunks_) {
-        for (int y = 0; y < kChunkSize; ++y) for (int x = 0; x < kChunkSize; ++x) {
-            const MaterialId material_id = chunk[static_cast<std::size_t>(y * kChunkSize + x)];
-            if (material_id != kAir) cells[{chunk_position.x * kChunkSize + x, chunk_position.y * kChunkSize + y}] = material_id;
-        }
-    }
-    return cells;
-}
-
-void SimulationWorld::rebuild_chunks(const CellMap& cells) {
+void SimulationWorld::rebuild_chunks(const FlatCells& cells) {
     chunks_.clear();
-    occupied_count_ = cells.size();
-    if (cells.empty()) return;
-    for (const auto& [position, material_id] : cells) {
+    cells.for_each([&](const CellPosition& position, const MaterialId& material_id) {
         const CellPosition chunk_position{floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
         auto [chunk, inserted] = chunks_.try_emplace(chunk_position);
         if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
         const int x = positive_modulo(position.x, kChunkSize);
         const int y = positive_modulo(position.y, kChunkSize);
         chunk->second[static_cast<std::size_t>(y * kChunkSize + x)] = material_id;
-    }
+    });
 }
 
 } // namespace ashfall

@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ashfall/flat_cell_map.hpp"
+
 namespace ashfall {
 
 using MaterialId = std::uint8_t;
@@ -53,7 +55,7 @@ public:
     void fill_rect(CellPosition first, CellPosition last, MaterialId material);
     void step();
 
-    [[nodiscard]] std::size_t occupied_cell_count() const;
+    [[nodiscard]] std::size_t occupied_cell_count() const noexcept { return cells_.size(); }
     [[nodiscard]] std::uint64_t tick() const noexcept { return tick_; }
     [[nodiscard]] bool has_chunk(CellPosition chunk_position) const;
     [[nodiscard]] std::vector<CellPosition> active_chunks() const;
@@ -75,24 +77,38 @@ public:
     [[nodiscard]] static CellPosition play_level_spawn() noexcept { return {128, 240}; }
 
 private:
-    // Unordered for O(1) step/edit lookups. Serialization sorts explicitly,
-    // and step order is fixed by sorting dynamic cells, so determinism holds.
-    using CellMap = std::unordered_map<CellPosition, MaterialId, CellPositionHash>;
+    // Flat open-addressing storage for the hot path: step() performs ~100k
+    // inserts/lookups per tick at 512x512, where unordered_map node traffic
+    // dominates. cells_ is authoritative and persistent; the scratch tables
+    // are cleared and reused every tick (never reallocated in steady state).
+    using FlatCells = FlatMap<CellPosition, MaterialId, CellPositionHash>;
+    using FlatMarks = FlatMap<CellPosition, std::uint8_t, CellPositionHash>;
+    using DynCells = std::vector<std::pair<CellPosition, MaterialId>>;
 
     [[nodiscard]] const MaterialDefinition& material(MaterialId id) const;
     [[nodiscard]] static bool prefers_left(CellPosition position, std::uint64_t tick);
-    void rebuild_chunks(const CellMap& cells);
-    [[nodiscard]] CellMap collect_cells() const;
+    void rebuild_chunks(const FlatCells& cells);
+    void write_chunk_cell(CellPosition position, MaterialId material_id);
+    void write_chunk_cell_deferred(
+        CellPosition position, MaterialId material_id, std::set<CellPosition>* maybe_emptied);
     [[nodiscard]] static std::size_t chunk_index(int local_x, int local_y) noexcept {
         return static_cast<std::size_t>(local_y * kChunkSize + local_x);
     }
     [[nodiscard]] static bool chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept;
 
+    // cells_ is the authoritative occupied set, persistent across ticks:
+    // step() reads it in place and swaps in the next state, so there is no
+    // per-tick collect/rebuild pass. chunks_ mirrors it for chunk-granular
+    // presentation and read_chunk queries.
+    FlatCells cells_;
+    FlatCells next_scratch_;
+    FlatMarks stayed_scratch_;
+    DynCells dyn_scratch_;
+    DynCells order_scratch_;
     std::map<MaterialId, MaterialDefinition> materials_;
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;
-    std::size_t occupied_count_ = 0;
 };
 
 } // namespace ashfall
