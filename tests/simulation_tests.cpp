@@ -500,13 +500,15 @@ void test_save_load_rejects_malformed() {
         expect_rejected(extra, "trailing byte (count mismatch) is rejected");
     }
     {
+        // v2 layout ends with a 4-byte temp count: the last cell material
+        // byte sits 5 from the end.
         auto bad_material = valid;
-        bad_material.back() = 99;
+        bad_material[bad_material.size() - 5] = 99;
         expect_rejected(bad_material, "unknown material is rejected");
     }
     {
         auto air_material = valid;
-        air_material.back() = ashfall::kAir;
+        air_material[air_material.size() - 5] = ashfall::kAir;
         expect_rejected(air_material, "air material entry is rejected");
     }
 }
@@ -767,6 +769,164 @@ void test_material_ids_preserve_table_order() {
         "canonical order restored");
 }
 
+void test_temperature_set_and_query() {
+    ashfall::SimulationWorld world;
+    expect(world.temperature({0, 0}) == 0, "ambient reads zero");
+    expect(world.temperature_count() == 0, "fresh world stores nothing");
+    world.set_temperature({3, -2}, 100);
+    expect(world.temperature({3, -2}) == 100, "heat stored and read");
+    expect(world.temperature_count() == 1, "one entry stored");
+    world.set_temperature({3, -2}, -40);
+    expect(world.temperature({3, -2}) == -40, "cold overwrites heat");
+    expect(world.temperature_count() == 1, "overwrite keeps one entry");
+    world.set_temperature({3, -2}, 0);
+    expect(world.temperature({3, -2}) == 0, "zero reads ambient");
+    expect(world.temperature_count() == 0, "zero erases the entry");
+    world.set_temperature({0, 0}, 40000);
+    expect(world.temperature({0, 0}) == 32767, "heat clamps to int16 max");
+    world.set_temperature({1, 1}, -40000);
+    expect(world.temperature({1, 1}) == -32767, "cold clamps to int16 min");
+}
+
+void test_temperature_single_cell_cools_exact() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kStone);
+    world.set_temperature({0, 0}, 100);
+    world.step();
+    expect(world.temperature({0, 0}) == 20, "100 conducts to 20 against ambient air");
+    world.step();
+    expect(world.temperature({0, 0}) == 4, "20 conducts to 4");
+    world.step();
+    expect(world.temperature({0, 0}) == 0, "4 truncates to ambient");
+    expect(world.temperature_count() == 0, "ambient entries vanish");
+}
+
+void test_temperature_two_cells_equalize_exact() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kStone);
+    world.set_cell({1, 0}, ashfall::kStone);
+    world.set_temperature({0, 0}, 100);
+    world.step();
+    expect(world.temperature({0, 0}) == 20 && world.temperature({1, 0}) == 20,
+        "heat spreads: hot cools to 20, cold neighbor warms to 20");
+    world.step();
+    expect(world.temperature({0, 0}) == 8 && world.temperature({1, 0}) == 8, "pair conducts to 8");
+    world.step();
+    expect(world.temperature({0, 0}) == 3 && world.temperature({1, 0}) == 3, "pair conducts to 3");
+    world.step();
+    expect(world.temperature({0, 0}) == 1 && world.temperature({1, 0}) == 1, "pair conducts to 1");
+    world.step();
+    expect(world.temperature_count() == 0, "pair fully cools to ambient");
+    // Cold mirror: truncation toward zero is symmetric.
+    world.set_temperature({5, 5}, -100);
+    world.set_cell({5, 5}, ashfall::kStone);
+    world.set_cell({6, 5}, ashfall::kStone);
+    world.step();
+    expect(world.temperature({5, 5}) == -20 && world.temperature({6, 5}) == -20, "cold spreads symmetrically");
+}
+
+void test_temperature_ambient_world_stays_sparse() {
+    ashfall::SimulationWorld empty;
+    expect(empty.save().size() == 8 + 8 + 4 + 0 + 4, "empty v2 save is header plus zero counts");
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.fill_rect({1, 9}, {19, 9}, ashfall::kWater);
+    world.fill_rect({5, 5}, {8, 8}, ashfall::kSand);
+    for (int i = 0; i < 50; ++i) world.step();
+    expect(world.temperature_count() == 0, "ambient play never allocates heat");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(world.save()), "ambient v2 save loads");
+    expect(restored.temperature_count() == 0, "ambient load stores nothing");
+}
+
+void test_temperature_save_round_trip_v2() {
+    ashfall::SimulationWorld source;
+    source.fill_rect({0, 2}, {2, 2}, ashfall::kStone);
+    source.set_cell({1, 0}, ashfall::kSand);
+    source.set_temperature({0, 2}, 100);
+    source.set_temperature({1, 2}, -50);
+    source.set_temperature({2, 2}, 1);
+    source.step(); // tick 1: sand drops to (1,1), heat conducts once
+    // (0,2): (100-50)/5=10; (1,2): (-50+100+1)/5=10; (2,2): (1-50)/5=-9;
+    // (1,1) sand: (-50)/5=-10 from its hot neighbor below.
+    expect(source.temperature({0, 2}) == 10, "conducted stone cools to 10");
+    expect(source.temperature({1, 2}) == 10, "middle stone settles at 10");
+    expect(source.temperature({2, 2}) == -9, "cold edge truncates to -9");
+    expect(source.temperature({1, 1}) == -10, "fallen sand picks up conducted cold");
+    expect(source.temperature_count() == 4, "four entries conducted");
+    const auto saved = source.save();
+    ashfall::SimulationWorld restored;
+    expect(restored.load(saved), "v2 save with heat loads");
+    expect(restored.tick() == 1, "tick preserved");
+    expect(restored.cell({1, 1}) == ashfall::kSand, "cells preserved");
+    expect(restored.temperature({0, 2}) == 10 && restored.temperature({1, 2}) == 10 &&
+            restored.temperature({2, 2}) == -9 && restored.temperature({1, 1}) == -10,
+        "heat preserved across round-trip");
+    expect(restored.save() == saved, "v2 round-trip is byte-exact");
+}
+
+void test_temperature_v1_save_still_loads() {
+    // Hand-built v1 payload: magic(ASHFALL,1) + tick 7 + 1 stone cell (3,4).
+    const std::vector<std::uint8_t> v1 = {
+        'A', 'S', 'H', 'F', 'A', 'L', 'L', 1,
+        7, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0,
+        3, 0, 0, 0, 4, 0, 0, 0,
+        ashfall::kStone,
+    };
+    ashfall::SimulationWorld world;
+    expect(world.load(v1), "v1 save loads under v2 reader");
+    expect(world.cell({3, 4}) == ashfall::kStone, "v1 cell preserved");
+    expect(world.tick() == 7, "v1 tick preserved");
+    expect(world.temperature({3, 4}) == 0, "v1 world reads ambient");
+    expect(world.temperature_count() == 0, "v1 world stores no heat");
+    auto truncated = v1;
+    truncated.pop_back();
+    expect(!world.load(truncated), "truncated v1 rejected");
+    auto bad_version = v1;
+    bad_version[7] = 9;
+    expect(!world.load(bad_version), "unknown save version rejected");
+    world.set_temperature({3, 4}, 50);
+    expect(!world.load(truncated), "bad load rejected with heat present");
+    expect(world.temperature({3, 4}) == 50, "failed load preserves heat");
+}
+
+void test_temperature_cleared_by_edits_and_reset() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kSand);
+    world.set_temperature({0, 0}, 50);
+    world.set_cell({0, 0}, ashfall::kAir);
+    expect(world.temperature({0, 0}) == 0, "digging a cell clears its heat");
+    world.fill_rect({0, 0}, {2, 0}, ashfall::kStone);
+    world.set_temperature({1, 0}, 60);
+    world.fill_rect({0, 0}, {2, 0}, ashfall::kAir);
+    expect(world.temperature({1, 0}) == 0, "bulk clear clears heat");
+    expect(world.temperature_count() == 0, "no heat entries remain");
+    world.set_cell({5, 5}, ashfall::kStone);
+    world.set_temperature({5, 5}, 70);
+    world.reset();
+    expect(world.temperature_count() == 0 && world.temperature({5, 5}) == 0, "reset clears heat");
+    world.set_cell({5, 5}, ashfall::kStone);
+    world.set_temperature({5, 5}, 70);
+    expect(world.load_material_table(ashfall::default_material_table()), "table reload succeeds");
+    expect(world.temperature_count() == 0, "table load clears heat");
+}
+
+void test_temperature_does_not_follow_falling_sand() {
+    // P2.4 has no advection: vacated heat is pruned, never conducted from
+    // the stale wake entry, and nothing rides the grain. P2.5 advection
+    // carries heat with moving material and updates this test.
+    ashfall::SimulationWorld world;
+    world.fill_rect({-1, 2}, {1, 2}, ashfall::kStone);
+    world.set_cell({0, 0}, ashfall::kSand);
+    world.set_temperature({0, 0}, 100);
+    for (int i = 0; i < 3; ++i) world.step();
+    expect(world.cell({0, 1}) == ashfall::kSand, "sand rests on the floor");
+    expect(world.temperature({0, 0}) == 0, "vacated cell keeps no heat");
+    expect(world.temperature({0, 1}) == 0, "heat does not ride the grain yet");
+    expect(world.temperature_count() == 0, "fallen heat leaves no entries");
+}
+
 } // namespace
 
 int main() {
@@ -801,5 +961,13 @@ int main() {
     test_loading_table_resets_world();
     test_material_data_matches_canonical_json();
     test_material_ids_preserve_table_order();
+    test_temperature_set_and_query();
+    test_temperature_single_cell_cools_exact();
+    test_temperature_two_cells_equalize_exact();
+    test_temperature_ambient_world_stays_sparse();
+    test_temperature_save_round_trip_v2();
+    test_temperature_v1_save_still_loads();
+    test_temperature_cleared_by_edits_and_reset();
+    test_temperature_does_not_follow_falling_sand();
     std::cout << "All simulation tests passed.\n";
 }

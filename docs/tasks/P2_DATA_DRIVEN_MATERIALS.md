@@ -69,7 +69,7 @@ special material branch.
   3. Visual sim + headless verifies cover a data-driven color change.
 
 ### Phase P2.4: Per-Cell Temperature State
-- **Status**: Pending P2.2
+- **Status**: Complete (sparse int16 heat map with set/temperature queries, exact integer conduction + ambient fast path, v2 save carrying a sorted temps tail while v1 still loads as all-ambient; no bridge/host change; all suites green)
 - **Ownership**: `engine/`
 - **Description**: Compact temperature storage (sparse: only non-ambient cells
   stored, so the hot path and memory profile of ambient worlds are unchanged)

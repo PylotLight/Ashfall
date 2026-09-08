@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- P2.4 sparse per-cell temperature: `set_temperature`/`temperature` queries over a sparse int16 map (ambient 0, zero entries erase); deterministic integer conduction (self+4 neighbors / 5, truncating) each step with an ambient fast path so cold worlds pay one branch; save v2 (sparse temps tail) loads v1 saves as all-ambient, host wrapper untouched.
 - P2.3 renderer palette from data: base colors/names from the loaded table (liquid depth shading by movement class; water pixels byte-identical); sidebar palette generated from the table with table-order shortcuts 1-9.
 - P2.2 table-driven engine: `SimulationWorld` builds its material table from data (defaults byte-identical); step dispatch keys off movement class so remapped ids behave identically; host loads `data/materials.json` through `AshfallWorld::load_materials` every boot.
 - P2.1 material data: dependency-free versioned JSON-subset loader (`ashfall/material_data`) with strict schema validation (unique ids/names, air-0 anchor, solid-implies-static) plus canonical `data/materials.json`; no simulation behavior change.

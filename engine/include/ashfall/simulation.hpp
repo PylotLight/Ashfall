@@ -24,6 +24,15 @@ public:
     // resets the world, since live cells reference the previous ids.
     explicit SimulationWorld(const MaterialTable& table);
     bool load_material_table(const MaterialTable& table);
+    // Sparse per-cell temperature (ambient 0; only non-zero is stored).
+    // Deterministic integer conduction runs each step(); queries read the
+    // settled post-step state. Setting 0 erases the entry. Out-of-range
+    // values clamp to int16. Heat may be set on any position (even air);
+    // entries whose cell is gone are pruned on the next step (no advection
+    // in P2.4 — P2.5 carries heat with moving material).
+    void set_temperature(CellPosition position, int temperature);
+    [[nodiscard]] int temperature(CellPosition position) const;
+    [[nodiscard]] std::size_t temperature_count() const noexcept { return temps_.size(); }
     // Table-order material ids (insertion order from the loaded table) for
     // presentation layers (palette, shortcuts). Engine dispatch never uses
     // order, only the movement class.
@@ -89,6 +98,13 @@ private:
     DynCells order_scratch_;
     std::map<MaterialId, MaterialSpec> materials_;
     std::vector<MaterialId> material_order_;
+    [[nodiscard]] int temperature_at(CellPosition position) const;
+    void conduct_temperature();
+
+    using FlatTemps = FlatMap<CellPosition, std::int16_t, CellPositionHash>;
+    FlatTemps temps_;
+    FlatTemps temp_scratch_;
+    std::vector<CellPosition> temp_prune_scratch_;
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;

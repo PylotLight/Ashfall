@@ -8,7 +8,8 @@
 namespace ashfall {
 namespace {
 
-constexpr std::array<std::uint8_t, 8> kSaveMagic = {'A', 'S', 'H', 'F', 'A', 'L', 'L', 1};
+[[maybe_unused]] constexpr std::array<std::uint8_t, 8> kSaveMagic = {'A', 'S', 'H', 'F', 'A', 'L', 'L', 1};
+constexpr std::array<std::uint8_t, 8> kSaveMagicV2 = {'A', 'S', 'H', 'F', 'A', 'L', 'L', 2};
 
 int floor_divide(int value, int divisor) {
     const int quotient = value / divisor;
@@ -28,6 +29,11 @@ void append_u64(std::vector<std::uint8_t>& out, std::uint64_t value) {
     for (int byte = 0; byte < 8; ++byte) out.push_back(static_cast<std::uint8_t>(value >> (byte * 8)));
 }
 
+void append_u16(std::vector<std::uint8_t>& out, std::uint16_t value) {
+    out.push_back(static_cast<std::uint8_t>(value & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xFFu));
+}
+
 bool read_u32(std::span<const std::uint8_t> input, std::size_t& offset, std::uint32_t& value) {
     if (offset + 4 > input.size()) return false;
     value = 0;
@@ -39,6 +45,13 @@ bool read_u64(std::span<const std::uint8_t> input, std::size_t& offset, std::uin
     if (offset + 8 > input.size()) return false;
     value = 0;
     for (int byte = 0; byte < 8; ++byte) value |= static_cast<std::uint64_t>(input[offset++]) << (byte * 8);
+    return true;
+}
+
+bool read_u16(std::span<const std::uint8_t> input, std::size_t& offset, std::uint16_t& value) {
+    if (offset + 2 > input.size()) return false;
+    value = static_cast<std::uint16_t>(input[offset] | (static_cast<std::uint16_t>(input[offset + 1]) << 8));
+    offset += 2;
     return true;
 }
 
@@ -125,6 +138,9 @@ void SimulationWorld::reset() {
     }
     chunks_.clear();
     cells_.clear();
+    temps_.clear();
+    temp_scratch_.clear();
+    temp_prune_scratch_.clear();
     tick_ = 0;
 }
 
@@ -167,6 +183,7 @@ void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
     if (previous == material_id) return;
     if (material_id == kAir) {
         cells_.erase(position);
+        temps_.erase(position);
     } else {
         cells_.insert_or_assign(position, material_id);
     }
@@ -184,6 +201,7 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
                 const CellPosition position{x, y};
+                temps_.erase(position);
                 if (!cells_.contains(position)) continue;
                 cells_.erase(position);
                 write_chunk_cell(position, kAir);
@@ -439,6 +457,7 @@ void SimulationWorld::step() {
 
     std::swap(cells_, next);
     ++tick_;
+    conduct_temperature();
 }
 
 
@@ -512,9 +531,20 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
         if (left.first.y != right.first.y) return left.first.y < right.first.y;
         return left.second < right.second;
     });
+    // v2 temps section: sorted by (x, y) for deterministic bytes. Ambient
+    // worlds store a zero count (4 bytes) — the only size cost when cold.
+    std::vector<std::pair<CellPosition, std::int16_t>> ordered_temps;
+    ordered_temps.reserve(temps_.size());
+    temps_.for_each([&](const CellPosition& position, const std::int16_t& temp) {
+        ordered_temps.emplace_back(position, temp);
+    });
+    std::sort(ordered_temps.begin(), ordered_temps.end(), [](const auto& left, const auto& right) {
+        if (left.first.x != right.first.x) return left.first.x < right.first.x;
+        return left.first.y < right.first.y;
+    });
     std::vector<std::uint8_t> bytes;
-    bytes.reserve(kSaveMagic.size() + 12 + ordered.size() * 9);
-    bytes.insert(bytes.end(), kSaveMagic.begin(), kSaveMagic.end());
+    bytes.reserve(kSaveMagicV2.size() + 12 + ordered.size() * 9 + 4 + ordered_temps.size() * 10);
+    bytes.insert(bytes.end(), kSaveMagicV2.begin(), kSaveMagicV2.end());
     append_u64(bytes, tick_);
     append_u32(bytes, static_cast<std::uint32_t>(ordered.size()));
     for (const auto& [position, material_id] : ordered) {
@@ -522,15 +552,30 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
         append_u32(bytes, static_cast<std::uint32_t>(position.y));
         bytes.push_back(material_id);
     }
+    append_u32(bytes, static_cast<std::uint32_t>(ordered_temps.size()));
+    for (const auto& [position, temp] : ordered_temps) {
+        append_u32(bytes, static_cast<std::uint32_t>(position.x));
+        append_u32(bytes, static_cast<std::uint32_t>(position.y));
+        append_u16(bytes, static_cast<std::uint16_t>(temp));
+    }
     return bytes;
 }
 
 bool SimulationWorld::load(std::span<const std::uint8_t> bytes) {
-    if (bytes.size() < kSaveMagic.size() + 12 || !std::equal(kSaveMagic.begin(), kSaveMagic.end(), bytes.begin())) return false;
-    std::size_t offset = kSaveMagic.size();
+    // Migration decision (per docs/AGENT_GUIDE.md): v1 loads with all cells
+    // ambient (no heat section); v2 adds the sparse temps tail. Anything
+    // else is rejected; failed loads leave the world (cells, heat, tick)
+    // untouched. The host wrapper is unchanged — old user saves load.
+    if (bytes.size() < kSaveMagicV2.size() + 12) return false;
+    if (!std::equal(kSaveMagicV2.begin(), kSaveMagicV2.end() - 1, bytes.begin())) return false;
+    const std::uint8_t version = bytes[kSaveMagicV2.size() - 1];
+    if (version != 1 && version != 2) return false;
+    std::size_t offset = kSaveMagicV2.size();
     std::uint64_t saved_tick = 0;
     std::uint32_t count = 0;
-    if (!read_u64(bytes, offset, saved_tick) || !read_u32(bytes, offset, count) || bytes.size() - offset != static_cast<std::size_t>(count) * 9) return false;
+    if (!read_u64(bytes, offset, saved_tick) || !read_u32(bytes, offset, count)) return false;
+    if (version == 1 && bytes.size() - offset != static_cast<std::size_t>(count) * 9) return false;
+    if (version == 2 && bytes.size() - offset < static_cast<std::size_t>(count) * 9 + 4) return false;
     FlatCells loaded;
     loaded.reserve_for(static_cast<std::size_t>(count) + 16);
     for (std::uint32_t index = 0; index < count; ++index) {
@@ -541,12 +586,31 @@ bool SimulationWorld::load(std::span<const std::uint8_t> bytes) {
         if (material_id == kAir || !materials_.contains(material_id)) return false;
         loaded.insert_or_assign({static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, material_id);
     }
+    FlatTemps loaded_temps;
+    if (version == 2) {
+        std::uint32_t temp_count = 0;
+        if (!read_u32(bytes, offset, temp_count)) return false;
+        if (bytes.size() - offset != static_cast<std::size_t>(temp_count) * 10) return false;
+        for (std::uint32_t index = 0; index < temp_count; ++index) {
+            std::uint32_t raw_x = 0;
+            std::uint32_t raw_y = 0;
+            std::uint16_t raw_temp = 0;
+            if (!read_u32(bytes, offset, raw_x) || !read_u32(bytes, offset, raw_y) ||
+                !read_u16(bytes, offset, raw_temp))
+                return false;
+            const auto temp = static_cast<std::int16_t>(raw_temp);
+            if (temp == 0) return false; // canonical saves never store ambient
+            loaded_temps.insert_or_assign(
+                {static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, temp);
+        }
+    }
     std::set<CellPosition> changed_chunks;
     for (const auto& [chunk_position, _] : chunks_) {
         changed_chunks.insert(chunk_position);
     }
     rebuild_chunks(loaded);
     cells_ = std::move(loaded);
+    temps_ = std::move(loaded_temps);
     for (const auto& [chunk_pos, _] : chunks_) {
         changed_chunks.insert(chunk_pos);
     }
@@ -621,6 +685,55 @@ bool SimulationWorld::material_info(MaterialId id, MaterialSpec& out) const {
     if (found == materials_.end()) return false;
     out = found->second;
     return true;
+}
+
+void SimulationWorld::set_temperature(CellPosition position, int temperature) {
+    const int clamped = std::clamp(temperature, -32767, 32767);
+    if (clamped == 0) {
+        temps_.erase(position);
+    } else {
+        temps_.insert_or_assign(position, static_cast<std::int16_t>(clamped));
+    }
+}
+
+int SimulationWorld::temperature_at(CellPosition position) const {
+    const std::int16_t* found = temps_.find(position);
+    return found == nullptr ? 0 : static_cast<int>(*found);
+}
+
+int SimulationWorld::temperature(CellPosition position) const { return temperature_at(position); }
+
+void SimulationWorld::conduct_temperature() {
+    // Ambient fast path: no stored heat anywhere, so ambient worlds pay one
+    // branch per tick and the hot loop is untouched (perf note: conduction
+    // is O(occupied) integer ops only while heat exists).
+    if (temps_.empty()) return;
+    // No advection in P2.4: drop heat whose cell is gone BEFORE conducting,
+    // or falling hot material would heat its own wake through the stale
+    // snapshot entry. P2.5 carries heat with moving material instead.
+    temp_prune_scratch_.clear();
+    temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
+        if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);
+    });
+    for (const CellPosition position : temp_prune_scratch_) temps_.erase(position);
+    if (temps_.empty()) return;
+    // Snapshot reads (temps_ untouched during the pass) → per-position
+    // results are iteration-order independent and deterministic. Integer
+    // mean over self + 4 neighbors (missing = ambient 0); truncates toward
+    // zero so small temps vanish instead of lingering at ±1.
+    FlatTemps& conducted = temp_scratch_;
+    conducted.clear();
+    conducted.reserve_for(cells_.size() + 16);
+    cells_.for_each([&](const CellPosition& position, const MaterialId&) {
+        int sum = temperature_at(position);
+        sum += temperature_at({position.x - 1, position.y});
+        sum += temperature_at({position.x + 1, position.y});
+        sum += temperature_at({position.x, position.y - 1});
+        sum += temperature_at({position.x, position.y + 1});
+        const int next = sum / 5;
+        if (next != 0) conducted.insert_or_assign(position, static_cast<std::int16_t>(next));
+    });
+    std::swap(temps_, temp_scratch_);
 }
 
 bool SimulationWorld::chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept {
