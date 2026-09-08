@@ -48,6 +48,13 @@ func _run_scene_checks() -> void:
 	assert(not main._box_passable(8.0, 400.0), "stone wall blocks avatar box")
 	assert(main._box_passable(200.0, 300.0), "open air admits avatar box")
 
+	# Presentation layers must stay pixel-aligned: the water overlay is a
+	# second view of the same grid, so any rect drift renders water offset
+	# from the cells the brush actually edits.
+	var base_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WorldTexture")
+	var water_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WaterOverlay")
+	assert(water_tex.get_rect() == base_tex.get_rect(), "water overlay aligned with base layer")
+
 	main.player_pos = Vector2(60.0, 440.0)
 	var before: int = main.world.get_occupied_cell_count()
 	main._dig_at_player()
