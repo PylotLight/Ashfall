@@ -24,6 +24,12 @@ public:
     // resets the world, since live cells reference the previous ids.
     explicit SimulationWorld(const MaterialTable& table);
     bool load_material_table(const MaterialTable& table);
+    // Table-order material ids (insertion order from the loaded table) for
+    // presentation layers (palette, shortcuts). Engine dispatch never uses
+    // order, only the movement class.
+    [[nodiscard]] std::vector<MaterialId> material_ids() const { return material_order_; }
+    // Look up one table row by id; returns false for unknown ids.
+    [[nodiscard]] bool material_info(MaterialId id, MaterialSpec& out) const;
 
     [[nodiscard]] MaterialId cell(CellPosition position) const;
     void reset();
@@ -82,6 +88,7 @@ private:
     DynCells dyn_scratch_;
     DynCells order_scratch_;
     std::map<MaterialId, MaterialSpec> materials_;
+    std::vector<MaterialId> material_order_;
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;

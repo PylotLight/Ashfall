@@ -55,7 +55,7 @@ special material branch.
      rejected; all P1 suites green unchanged.
 
 ### Phase P2.3: Renderer Palette from Data
-- **Status**: Pending P2.2
+- **Status**: Complete (base colors/names from the loaded table, liquid depth shading by movement class with water pixels byte-identical, sidebar palette generated from the table with table-order shortcuts 1-9; godot_p2_verify proves a data-driven color change end to end; all suites green)
 - **Ownership**: `bridge/`, `scripts/`
 - **Description**: Base-layer colors and material names come from the loaded
   table. Water depth shading keys off the `liquid` movement class, not the

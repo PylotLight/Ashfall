@@ -105,8 +105,10 @@ bool SimulationWorld::load_material_table(const MaterialTable& table) {
     std::string error;
     if (!validate_material_table(table, error)) return false;
     materials_.clear();
+    material_order_.clear();
     for (const MaterialSpec& spec : table.materials) {
         materials_.emplace(spec.id, spec);
+        material_order_.push_back(spec.id);
     }
     reset();
     return true;
@@ -613,6 +615,13 @@ void SimulationWorld::mark_chunk_dirty(CellPosition chunk_position) {
 }
 
 const MaterialSpec& SimulationWorld::material(MaterialId id) const { return materials_.at(id); }
+
+bool SimulationWorld::material_info(MaterialId id, MaterialSpec& out) const {
+    const auto found = materials_.find(id);
+    if (found == materials_.end()) return false;
+    out = found->second;
+    return true;
+}
 
 bool SimulationWorld::chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept {
     for (MaterialId material_id : chunk) {

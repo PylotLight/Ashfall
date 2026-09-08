@@ -1,9 +1,13 @@
 #pragma once
 
+#include <array>
+
 #include <godot_cpp/classes/node2d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/color.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
@@ -38,6 +42,16 @@ private:
     PackedByteArray water_pixel_bytes_;
     Ref<Image> water_image_;
     Ref<ImageTexture> water_texture_;
+    // Renderer cache: base color, precomputed deep-shade color, movement
+    // class, and known-flag per id, refreshed from the world table on
+    // init/load. Unknown ids default to background/static so stale cells
+    // can never paint garbage. Array-indexed (uint8 id) — no map lookups
+    // on the per-pixel hot path.
+    std::array<std::array<std::uint8_t, 3>, 256> base_colors_;
+    std::array<std::array<std::uint8_t, 3>, 256> deep_colors_;
+    std::array<std::uint8_t, 256> movements_;
+    std::array<bool, 256> known_ids_;
+    void refresh_material_cache();
     // Wall-clock cost of the last step() (sim + present), for the perf HUD.
     double last_step_ms_ = 0.0;
     bool auto_step_ = false;
@@ -77,6 +91,14 @@ public:
     // Load a versioned material table (see data/materials.json). Resets the
     // world; returns false (world untouched) on parse/validation failure.
     bool load_materials(const String &p_json_text);
+    // Presentation view of the loaded table (table order). Names/colors
+    // come from data/materials.json; the renderer caches them per load.
+    int get_material_count() const;
+    PackedInt32Array get_material_ids() const;
+    String get_material_name(int p_material_id) const;
+    Color get_material_color(int p_material_id) const;
+    // (int)ashfall::Movement, -1 for unknown ids.
+    int get_material_movement(int p_material_id) const;
 
     void set_auto_step(bool p_auto);
     bool is_auto_step() const;

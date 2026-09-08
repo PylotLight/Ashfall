@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <span>
 #include <string>
@@ -32,6 +33,11 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("save_to_bytes"), &AshfallWorld::save_to_bytes);
     ClassDB::bind_method(D_METHOD("load_from_bytes", "bytes"), &AshfallWorld::load_from_bytes);
     ClassDB::bind_method(D_METHOD("load_materials", "json_text"), &AshfallWorld::load_materials);
+    ClassDB::bind_method(D_METHOD("get_material_count"), &AshfallWorld::get_material_count);
+    ClassDB::bind_method(D_METHOD("get_material_ids"), &AshfallWorld::get_material_ids);
+    ClassDB::bind_method(D_METHOD("get_material_name", "material_id"), &AshfallWorld::get_material_name);
+    ClassDB::bind_method(D_METHOD("get_material_color", "material_id"), &AshfallWorld::get_material_color);
+    ClassDB::bind_method(D_METHOD("get_material_movement", "material_id"), &AshfallWorld::get_material_movement);
 
     ClassDB::bind_method(D_METHOD("set_auto_step", "auto_step"), &AshfallWorld::set_auto_step);
     ClassDB::bind_method(D_METHOD("is_auto_step"), &AshfallWorld::is_auto_step);
@@ -92,6 +98,7 @@ void AshfallWorld::init_world(int p_width, int p_height) {
     // since we repaint the full background below, clear immediately to keep
     // presentation and dirty set in sync.
     world_.reset();
+    refresh_material_cache();
 
     const std::size_t total_cells = static_cast<std::size_t>(world_width_ * world_height_);
     cell_buffer_.resize(total_cells, ashfall::kAir);
@@ -224,8 +231,65 @@ bool AshfallWorld::load_materials(const String &p_json_text) {
         UtilityFunctions::push_error("load_materials: table failed validation");
         return false;
     }
+    refresh_material_cache();
     update_world_texture();
     return true;
+}
+
+void AshfallWorld::refresh_material_cache() {
+    for (int i = 0; i < 256; ++i) {
+        base_colors_[i] = {18, 20, 24};
+        deep_colors_[i] = {18, 20, 24};
+        movements_[i] = static_cast<std::uint8_t>(ashfall::Movement::Static);
+        known_ids_[i] = false;
+    }
+    for (const ashfall::MaterialId id : world_.material_ids()) {
+        ashfall::MaterialSpec spec;
+        if (!world_.material_info(id, spec)) continue;
+        base_colors_[id] = spec.color;
+        // Deep shade reproduces the legacy water ramp exactly for water
+        // (lround(86*.30)=26, lround(178*(88/178))=88, lround(214*.55)=118)
+        // and gives every future liquid a matching gradient for free.
+        deep_colors_[id] = {
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[0]) * 0.30f)),
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[1]) * (88.0f / 178.0f))),
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[2]) * 0.55f)),
+        };
+        movements_[id] = static_cast<std::uint8_t>(spec.movement);
+        known_ids_[id] = true;
+    }
+}
+
+int AshfallWorld::get_material_count() const {
+    return static_cast<int>(world_.material_ids().size());
+}
+
+PackedInt32Array AshfallWorld::get_material_ids() const {
+    PackedInt32Array ids;
+    for (const ashfall::MaterialId id : world_.material_ids()) {
+        ids.push_back(static_cast<int>(id));
+    }
+    return ids;
+}
+
+String AshfallWorld::get_material_name(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return String();
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) return String();
+    return String(spec.name.c_str());
+}
+
+Color AshfallWorld::get_material_color(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return Color(0, 0, 0, 1);
+    const auto& c = base_colors_[static_cast<std::size_t>(p_material_id)];
+    return Color(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1.0f);
+}
+
+int AshfallWorld::get_material_movement(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return -1;
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) return -1;
+    return static_cast<int>(spec.movement);
 }
 
 Vector2i AshfallWorld::get_player_spawn() const {
@@ -278,50 +342,45 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
         return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
     };
 
-    // Noita-style water: depth ramp (light surface to deep teal) plus a
-    // highlight on the surface skin, translucent so it reads as liquid
-    // rather than plastic. Sand/stone get subtle grain to break banding.
-    // Depth is the water column thickness in BOTH directions (min of below
-    // and above): a floating blob or a falling stream is thin everywhere and
-    // shades light instead of inverting dark-on-top. Only genuinely deep,
-    // enclosed water goes dark teal.
-    // Paints BOTH layers: base gets opaque solids over background (water
-    // leaves background showing through the translucent overlay), water layer
-    // gets shaded RGB + coverage alpha and is transparent elsewhere.
-    auto paint_cell = [&](int x, int y, ashfall::MaterialId mat, int depth_below, ashfall::MaterialId above_mat,
+    // Colors come from the loaded table (refresh_material_cache); liquid
+    // depth shading keys off the movement class, never the id. Powder gets
+    // stronger grain than static. Paints BOTH layers: base gets opaque
+    // known materials over background (air/unknown leave background), water
+    // layer gets shaded RGB + coverage alpha for liquids, transparent else.
+    static constexpr std::uint8_t kLiquidClass = static_cast<std::uint8_t>(ashfall::Movement::Liquid);
+    static constexpr std::uint8_t kPowderClass = static_cast<std::uint8_t>(ashfall::Movement::Powder);
+    auto paint_cell = [&](int x, int y, ashfall::MaterialId mat, int depth_below, bool surface,
                           uint8_t *dst, uint8_t *water_dst) {
         const int gr = grain(x, y);
+        const std::size_t idx = static_cast<std::size_t>(mat);
+        const bool is_liquid = movements_[idx] == kLiquidClass;
         int r = 18, g = 20, b = 24, a = 255;
         int wr = 0, wg = 0, wb = 0, wa = 0;
-        switch (mat) {
-            case ashfall::kStone:
-                r = 128 + gr;
-                g = 133 + gr;
-                b = 138 + gr;
-                break;
-            case ashfall::kSand: {
-                const int j = gr * 2;
-                r = 230 + j;
-                g = 175 + j;
-                b = 50 + j;
-                break;
+        if (is_liquid) {
+            const float t = depth_below >= 5 ? 1.0f : static_cast<float>(depth_below) / 5.0f;
+            const auto& base = base_colors_[idx];
+            const auto& deep = deep_colors_[idx];
+            wr = static_cast<int>(static_cast<float>(base[0]) +
+                    (static_cast<float>(deep[0]) - static_cast<float>(base[0])) * t) +
+                gr;
+            wg = static_cast<int>(static_cast<float>(base[1]) +
+                    (static_cast<float>(deep[1]) - static_cast<float>(base[1])) * t) +
+                gr;
+            wb = static_cast<int>(static_cast<float>(base[2]) +
+                    (static_cast<float>(deep[2]) - static_cast<float>(base[2])) * t) +
+                gr;
+            if (surface) { // surface skin highlight
+                wr += 22;
+                wg += 22;
+                wb += 22;
             }
-            case ashfall::kWater: {
-                const float t = depth_below >= 5 ? 1.0f : static_cast<float>(depth_below) / 5.0f;
-                wr = static_cast<int>(86.0f + (26.0f - 86.0f) * t) + gr;
-                wg = static_cast<int>(178.0f + (88.0f - 178.0f) * t) + gr;
-                wb = static_cast<int>(214.0f + (118.0f - 214.0f) * t) + gr;
-                if (above_mat != ashfall::kWater) { // surface skin highlight
-                    wr += 22;
-                    wg += 22;
-                    wb += 22;
-                }
-                wa = 205;
-                break;
-            }
-            case ashfall::kAir:
-            default:
-                break;
+            wa = 205;
+        } else if (mat != ashfall::kAir && known_ids_[idx]) {
+            const auto& base = base_colors_[idx];
+            const int j = movements_[idx] == kPowderClass ? gr * 2 : gr;
+            r = static_cast<int>(base[0]) + j;
+            g = static_cast<int>(base[1]) + j;
+            b = static_cast<int>(base[2]) + j;
         }
         dst[0] = clamp_channel(r);
         dst[1] = clamp_channel(g);
@@ -351,22 +410,30 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
             for (int x = 0; x < world_width_; ++x) {
                 const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
                 const ashfall::MaterialId mat = cell_buffer_[i];
+                const bool is_liquid =
+                    movements_[static_cast<std::size_t>(mat)] == kLiquidClass;
                 int depth = 0;
-                ashfall::MaterialId above = ashfall::kAir;
-                if (y > 0) above = cell_buffer_[i - static_cast<std::size_t>(world_width_)];
-                if (mat == ashfall::kWater) {
+                bool surface = true;
+                if (y > 0) {
+                    const ashfall::MaterialId above_mat =
+                        cell_buffer_[i - static_cast<std::size_t>(world_width_)];
+                    surface = movements_[static_cast<std::size_t>(above_mat)] != kLiquidClass;
+                }
+                if (is_liquid) {
                     while (depth < 5 && y + 1 + depth < world_height_ &&
-                           cell_buffer_[i + static_cast<std::size_t>((1 + depth) * world_width_)] == ashfall::kWater) {
+                           movements_[cell_buffer_[i + static_cast<std::size_t>((1 + depth) * world_width_)]] ==
+                               kLiquidClass) {
                         ++depth;
                     }
                     int height = 0;
                     while (height < depth && y - 1 - height >= 0 &&
-                           cell_buffer_[i - static_cast<std::size_t>((1 + height) * world_width_)] == ashfall::kWater) {
+                           movements_[cell_buffer_[i - static_cast<std::size_t>((1 + height) * world_width_)]] ==
+                               kLiquidClass) {
                         ++height;
                     }
                     depth = height;
                 }
-                paint_cell(x, y, mat, depth, above, w + i * 4, water_w + i * 4);
+                paint_cell(x, y, mat, depth, surface, w + i * 4, water_w + i * 4);
             }
         }
     } else {
@@ -380,22 +447,27 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
             for (int y = start_y; y <= end_y; ++y) {
                 for (int x = start_x; x <= end_x; ++x) {
                     const ashfall::MaterialId mat = world_.cell({x, y});
+                    const bool is_liquid =
+                        movements_[static_cast<std::size_t>(mat)] == kLiquidClass;
                     int depth = 0;
-                    ashfall::MaterialId above = y > 0 ? world_.cell({x, y - 1}) : ashfall::kAir;
-                    if (mat == ashfall::kWater) {
+                    bool surface = true;
+                    if (y > 0) {
+                        surface = movements_[world_.cell({x, y - 1})] != kLiquidClass;
+                    }
+                    if (is_liquid) {
                         while (depth < 5 && y + 1 + depth < world_height_ &&
-                               world_.cell({x, y + 1 + depth}) == ashfall::kWater) {
+                               movements_[world_.cell({x, y + 1 + depth})] == kLiquidClass) {
                             ++depth;
                         }
                         int height = 0;
                         while (height < depth && y - 1 - height >= 0 &&
-                               world_.cell({x, y - 1 - height}) == ashfall::kWater) {
+                               movements_[world_.cell({x, y - 1 - height})] == kLiquidClass) {
                             ++height;
                         }
                         depth = height;
                     }
                     const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
-                    paint_cell(x, y, mat, depth, above, w + offset, water_w + offset);
+                    paint_cell(x, y, mat, depth, surface, w + offset, water_w + offset);
                 }
             }
         }

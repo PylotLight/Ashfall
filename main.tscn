@@ -196,21 +196,9 @@ layout_mode = 2
 theme_override_font_sizes/font_size = 14
 text = "Material Palette:"
 
-[node name="SandBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=674678877]
+[node name="PaletteBox" type="VBoxContainer" parent="MainLayout/SidebarScroll/Sidebar"]
 layout_mode = 2
-text = "[1] Sand (Powder)"
-
-[node name="WaterBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=2121446087]
-layout_mode = 2
-text = "[2] Water (Liquid)"
-
-[node name="StoneBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=674220850]
-layout_mode = 2
-text = "[3] Stone (Static)"
-
-[node name="EraserBtn" type="Button" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1614910097]
-layout_mode = 2
-text = "[4] Air (Eraser)"
+theme_override_constants/separation = 4
 
 [node name="HSeparator3" type="HSeparator" parent="MainLayout/SidebarScroll/Sidebar" unique_id=1251431050]
 layout_mode = 2
@@ -258,10 +246,6 @@ text = "Controls:
 autowrap_mode = 2
 
 [connection signal="gui_input" from="MainLayout/ViewportContainer/WorldStack/WorldTexture" to="." method="_on_world_texture_gui_input"]
-[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/SandBtn" to="." method="_on_sand_btn_pressed"]
-[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/WaterBtn" to="." method="_on_water_btn_pressed"]
-[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/StoneBtn" to="." method="_on_stone_btn_pressed"]
-[connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/EraserBtn" to="." method="_on_eraser_btn_pressed"]
 [connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/PlayBtn" to="." method="_on_play_btn_pressed"]
 [connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/StepBtn" to="." method="_on_step_btn_pressed"]
 [connection signal="pressed" from="MainLayout/SidebarScroll/Sidebar/ResetBtn" to="." method="_on_reset_btn_pressed"]

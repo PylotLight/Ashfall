@@ -739,6 +739,34 @@ void test_material_data_matches_canonical_json() {
     }
 }
 
+void test_material_ids_preserve_table_order() {
+    // Table listed out of id order: presentation order must follow the
+    // table, not the sorted map.
+    ashfall::MaterialTable table;
+    table.version = 1;
+    table.materials = {
+        {0, "air", ashfall::Movement::Static, false, 0, {0, 0, 0}},
+        {6, "water", ashfall::Movement::Liquid, false, 1, {0, 0, 0}},
+        {4, "stone", ashfall::Movement::Static, true, 99, {0, 0, 0}},
+        {5, "sand", ashfall::Movement::Powder, false, 2, {0, 0, 0}},
+    };
+    ashfall::SimulationWorld world(table);
+    const std::vector<ashfall::MaterialId> ids = world.material_ids();
+    expect(ids.size() == 4, "four ids listed");
+    expect(ids[0] == 0 && ids[1] == 6 && ids[2] == 4 && ids[3] == 5,
+        "ids follow table order, not sorted order");
+    ashfall::MaterialSpec spec;
+    expect(world.material_info(6, spec), "known id lookup succeeds");
+    expect(spec.name == "water" && spec.movement == ashfall::Movement::Liquid,
+        "info carries name and movement");
+    expect(spec.color[0] == 0 && spec.color[1] == 0 && spec.color[2] == 0, "info carries color");
+    expect(!world.material_info(42, spec), "unknown id lookup fails");
+    expect(world.load_material_table(ashfall::default_material_table()), "defaults reload");
+    const std::vector<ashfall::MaterialId> canonical = world.material_ids();
+    expect(canonical.size() == 4 && canonical[0] == 0 && canonical[3] == 3,
+        "canonical order restored");
+}
+
 } // namespace
 
 int main() {
@@ -772,5 +800,6 @@ int main() {
     test_unknown_material_id_rejected();
     test_loading_table_resets_world();
     test_material_data_matches_canonical_json();
+    test_material_ids_preserve_table_order();
     std::cout << "All simulation tests passed.\n";
 }

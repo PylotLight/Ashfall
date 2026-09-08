@@ -16,11 +16,13 @@ extends Control
 @onready var fps_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/FpsValue
 @onready var frame_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/FrameValue
 @onready var sim_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/SimValue
+@onready var palette_box: VBoxContainer = $MainLayout/SidebarScroll/Sidebar/PaletteBox
 
 var current_material: int = AshfallWorld.MATERIAL_SAND
 var brush_size: int = 4
 var is_drawing: bool = false
 var draw_material: int = AshfallWorld.MATERIAL_SAND
+var palette_ids: Array[int] = []
 var _hud_cooldown: float = 0.0
 var _frame_ms_ema: float = 16.0
 const HUD_REFRESH_INTERVAL: float = 0.25
@@ -52,6 +54,7 @@ func _ready() -> void:
 	_respawn_player()
 	texture_display.texture = world.get_world_texture()
 	water_display.texture = world.get_water_texture()
+	_build_palette()
 	_update_hud()
 	_update_marker()
 
@@ -128,6 +131,32 @@ func _place_at_player() -> void:
 			if world.get_cell(c.x + dx, c.y + dy) == AshfallWorld.MATERIAL_AIR:
 				world.set_cell(c.x + dx, c.y + dy, current_material)
 	world.update_world_texture()
+	_update_hud()
+
+func _build_palette() -> void:
+	for child in palette_box.get_children():
+		child.queue_free()
+	palette_ids.clear()
+	var ids: PackedInt32Array = world.get_material_ids()
+	for i in ids.size():
+		var id: int = ids[i]
+		palette_ids.append(id)
+		var btn := Button.new()
+		var label: String = "[%d] %s" % [i + 1, world.get_material_name(id).capitalize()]
+		if id == AshfallWorld.MATERIAL_AIR:
+			label += " (Eraser)"
+		btn.text = label
+		btn.name = "PaletteBtn%d" % id
+		btn.pressed.connect(_on_palette_btn_pressed.bind(id))
+		palette_box.add_child(btn)
+
+func _select_palette(index: int) -> void:
+	if index >= 0 and index < palette_ids.size():
+		current_material = palette_ids[index]
+		_update_hud()
+
+func _on_palette_btn_pressed(id: int) -> void:
+	current_material = id
 	_update_hud()
 
 func _save_game() -> void:
@@ -217,15 +246,10 @@ func _update_marker() -> void:
 	var bottom_right := _world_to_display(Vector2(player_pos.x + PLAYER_HALF_W, player_pos.y))
 	player_marker.position = top_left
 	player_marker.size = bottom_right - top_left
-	match current_material:
-		AshfallWorld.MATERIAL_SAND:
-			material_label.text = "Sand"
-		AshfallWorld.MATERIAL_WATER:
-			material_label.text = "Water"
-		AshfallWorld.MATERIAL_STONE:
-			material_label.text = "Stone"
-		AshfallWorld.MATERIAL_AIR:
-			material_label.text = "Air (Eraser)"
+	if current_material == AshfallWorld.MATERIAL_AIR:
+		material_label.text = "Air (Eraser)"
+	else:
+		material_label.text = world.get_material_name(current_material).capitalize()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
@@ -250,17 +274,23 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F9:
 				_load_game()
 			KEY_1:
-				current_material = AshfallWorld.MATERIAL_SAND
-				_update_hud()
+				_select_palette(0)
 			KEY_2:
-				current_material = AshfallWorld.MATERIAL_WATER
-				_update_hud()
+				_select_palette(1)
 			KEY_3:
-				current_material = AshfallWorld.MATERIAL_STONE
-				_update_hud()
+				_select_palette(2)
 			KEY_4:
-				current_material = AshfallWorld.MATERIAL_AIR
-				_update_hud()
+				_select_palette(3)
+			KEY_5:
+				_select_palette(4)
+			KEY_6:
+				_select_palette(5)
+			KEY_7:
+				_select_palette(6)
+			KEY_8:
+				_select_palette(7)
+			KEY_9:
+				_select_palette(8)
 
 func _on_world_texture_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -291,22 +321,6 @@ func _draw_at(local_pos: Vector2) -> void:
 
 	world.fill_rect(x1, y1, x2, y2, draw_material)
 	world.update_world_texture()
-	_update_hud()
-
-func _on_sand_btn_pressed() -> void:
-	current_material = AshfallWorld.MATERIAL_SAND
-	_update_hud()
-
-func _on_water_btn_pressed() -> void:
-	current_material = AshfallWorld.MATERIAL_WATER
-	_update_hud()
-
-func _on_stone_btn_pressed() -> void:
-	current_material = AshfallWorld.MATERIAL_STONE
-	_update_hud()
-
-func _on_eraser_btn_pressed() -> void:
-	current_material = AshfallWorld.MATERIAL_AIR
 	_update_hud()
 
 func _on_step_btn_pressed() -> void:
