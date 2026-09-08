@@ -74,7 +74,7 @@ public:
     /// water reservoir. Resets the world first; deterministic content.
     void build_play_level();
     /// Player spawn for the play level, in cell units (feet position).
-    [[nodiscard]] static CellPosition play_level_spawn() noexcept { return {128, 240}; }
+    [[nodiscard]] static CellPosition play_level_spawn() noexcept { return {256, 480}; }
 
 private:
     // Flat open-addressing storage for the hot path: step() performs ~100k

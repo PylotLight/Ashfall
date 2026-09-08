@@ -9,18 +9,18 @@ func _init() -> void:
 	assert(world.get_occupied_cell_count() > 1000, "play level populated")
 
 	var spawn: Vector2i = world.get_player_spawn()
-	assert(spawn == Vector2i(128, 240), "spawn matches engine level")
-	assert(world.can_move_to_box(127, 238, 128, 239), "spawn avatar box passable")
-	assert(not world.can_move_to_box(127, 239, 128, 240), "floor blocks avatar box")
-	assert(not world.can_move_to_box(0, 100, 8, 110), "side wall blocks")
-	assert(world.is_solid_cell(128, 240), "floor cell solid")
-	assert(not world.is_solid_cell(128, 239), "spawn feet cell free")
+	assert(spawn == Vector2i(256, 480), "spawn matches engine level")
+	assert(world.can_move_to_box(255, 478, 256, 479), "spawn avatar box passable")
+	assert(not world.can_move_to_box(255, 479, 256, 480), "floor blocks avatar box")
+	assert(not world.can_move_to_box(0, 200, 16, 220), "side wall blocks")
+	assert(world.is_solid_cell(256, 480), "floor cell solid")
+	assert(not world.is_solid_cell(256, 479), "spawn feet cell free")
 
 	var saved := world.save_to_bytes()
 	assert(saved.size() > 100, "save bytes non-empty")
-	world.set_cell(128, 239, AshfallWorld.MATERIAL_SAND)
+	world.set_cell(256, 479, AshfallWorld.MATERIAL_SAND)
 	assert(world.load_from_bytes(saved), "load valid bytes succeeds")
-	assert(world.get_cell(128, 239) == AshfallWorld.MATERIAL_AIR, "load restores exact state")
+	assert(world.get_cell(256, 479) == AshfallWorld.MATERIAL_AIR, "load restores exact state")
 	assert(world.save_to_bytes() == saved, "save bytes identical after round-trip")
 	assert(not world.load_from_bytes(PackedByteArray()), "empty load rejected")
 
@@ -36,11 +36,11 @@ func _run_scene_checks() -> void:
 	root.add_child(main)
 	await process_frame
 	await process_frame
-	assert(main.player_pos == Vector2(128.0, 240.0), "avatar spawns at play-level spawn")
-	assert(not main._box_passable(8.0, 200.0), "stone wall blocks avatar box")
-	assert(main._box_passable(20.0, 200.0), "open air admits avatar box")
+	assert(main.player_pos == Vector2(256.0, 480.0), "avatar spawns at play-level spawn")
+	assert(not main._box_passable(8.0, 400.0), "stone wall blocks avatar box")
+	assert(main._box_passable(200.0, 300.0), "open air admits avatar box")
 
-	main.player_pos = Vector2(30.0, 220.0)
+	main.player_pos = Vector2(60.0, 440.0)
 	var before: int = main.world.get_occupied_cell_count()
 	main._dig_at_player()
 	assert(main.world.get_occupied_cell_count() < before, "avatar dig removes sand")

@@ -53,7 +53,7 @@ void AshfallWorld::_bind_methods() {
 }
 
 AshfallWorld::AshfallWorld() {
-    init_world(256, 256);
+    init_world(512, 512);
     set_physics_process(true);
 }
 
@@ -80,8 +80,8 @@ void AshfallWorld::_physics_process(double delta) {
 }
 
 void AshfallWorld::init_world(int p_width, int p_height) {
-    world_width_ = p_width > 0 ? p_width : 256;
-    world_height_ = p_height > 0 ? p_height : 256;
+    world_width_ = p_width > 0 ? p_width : 512;
+    world_height_ = p_height > 0 ? p_height : 512;
 
     // Authoritative state reset: presentation window resize must not preserve
     // stale cells from a previous world. reset() dirties removed chunks, but
@@ -178,23 +178,23 @@ void AshfallWorld::set_max_steps_per_physics_frame(int p_max) {
 
 void AshfallWorld::setup_reference_world() {
     world_.reset();
-    // 256 by 256 world layout
+    // 512 by 512 world layout
     // Solid floor
-    world_.fill_rect({0, 240}, {255, 255}, ashfall::kStone);
+    world_.fill_rect({0, 480}, {511, 511}, ashfall::kStone);
 
     // Lateral boundary walls
-    world_.fill_rect({0, 40}, {8, 239}, ashfall::kStone);
-    world_.fill_rect({247, 40}, {255, 239}, ashfall::kStone);
+    world_.fill_rect({0, 80}, {16, 479}, ashfall::kStone);
+    world_.fill_rect({494, 80}, {511, 479}, ashfall::kStone);
 
     // Funnel guiding down towards center
-    world_.fill_rect({20, 130}, {105, 136}, ashfall::kStone);
-    world_.fill_rect({150, 130}, {235, 136}, ashfall::kStone);
-    world_.fill_rect({60, 170}, {120, 175}, ashfall::kStone);
-    world_.fill_rect({135, 170}, {195, 175}, ashfall::kStone);
+    world_.fill_rect({40, 260}, {210, 272}, ashfall::kStone);
+    world_.fill_rect({300, 260}, {470, 272}, ashfall::kStone);
+    world_.fill_rect({120, 340}, {240, 350}, ashfall::kStone);
+    world_.fill_rect({270, 340}, {390, 350}, ashfall::kStone);
 
     // Initial powder and liquid deposits
-    world_.fill_rect({40, 50}, {90, 100}, ashfall::kSand);
-    world_.fill_rect({165, 50}, {215, 100}, ashfall::kWater);
+    world_.fill_rect({80, 100}, {180, 200}, ashfall::kSand);
+    world_.fill_rect({330, 100}, {430, 200}, ashfall::kWater);
 
     update_world_texture();
 }

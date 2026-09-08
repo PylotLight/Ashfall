@@ -26,8 +26,8 @@ private:
     ashfall::SimulationWorld world_;
     Ref<Image> world_image_;
     Ref<ImageTexture> world_texture_;
-    int world_width_ = 256;
-    int world_height_ = 256;
+    int world_width_ = 512;
+    int world_height_ = 512;
     std::vector<ashfall::MaterialId> cell_buffer_;
     PackedByteArray pixel_bytes_;
     // Water-only layer: shaded RGB + coverage alpha, everything else

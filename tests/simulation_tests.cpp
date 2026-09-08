@@ -329,20 +329,21 @@ void test_play_level_layout() {
     world.build_play_level();
     expect(world.occupied_cell_count() > 0, "play level contains material");
     const ashfall::CellPosition spawn = ashfall::SimulationWorld::play_level_spawn();
+    expect(spawn.x == 256 && spawn.y == 480, "spawn matches the 512 play level");
     expect(world.cell({spawn.x, spawn.y}) == ashfall::kStone, "spawn stands on the floor");
     expect(world.cell({spawn.x, spawn.y - 1}) == ashfall::kAir, "spawn feet cell is free");
     expect(world.cell({spawn.x, spawn.y - 2}) == ashfall::kAir, "spawn head cell is free");
     expect(world.can_move_to({spawn.x, spawn.y - 2}, {spawn.x, spawn.y - 1}), "spawn box is passable");
     expect(!world.can_move_to({spawn.x, spawn.y - 1}, {spawn.x, spawn.y}), "floor box is blocked");
     std::size_t water = 0, sand = 0;
-    std::vector<ashfall::MaterialId> rect(256 * 256, ashfall::kAir);
-    world.copy_rect({0, 0}, {255, 255}, rect);
+    std::vector<ashfall::MaterialId> rect(512 * 512, ashfall::kAir);
+    world.copy_rect({0, 0}, {511, 511}, rect);
     for (ashfall::MaterialId material_id : rect) {
         if (material_id == ashfall::kWater) ++water;
         else if (material_id == ashfall::kSand) ++sand;
     }
-    expect(water > 500, "reservoir and pocket hold water");
-    expect(sand > 500, "dunes and plug hold sand");
+    expect(water > 2000, "reservoir and pocket hold water");
+    expect(sand > 2000, "dunes and plug hold sand");
     ashfall::SimulationWorld again;
     again.build_play_level();
     expect(again.save() == world.save(), "play level builds deterministically");

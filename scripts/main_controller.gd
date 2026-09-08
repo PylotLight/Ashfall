@@ -18,7 +18,7 @@ extends Control
 @onready var sim_label: Label = $MainLayout/Sidebar/InfoBox/SimValue
 
 var current_material: int = AshfallWorld.MATERIAL_SAND
-var brush_size: int = 2
+var brush_size: int = 4
 var is_drawing: bool = false
 var draw_material: int = AshfallWorld.MATERIAL_SAND
 var _hud_cooldown: float = 0.0
@@ -28,10 +28,10 @@ const HUD_REFRESH_INTERVAL: float = 0.25
 # Player avatar state. Position is in cell units, anchored at the feet center.
 # The sim owns all cells; the avatar is host-side and only queries native
 # stone collision (can_move_to_box) before translating.
-var player_pos: Vector2 = Vector2(128.0, 240.0)
+var player_pos: Vector2 = Vector2(256.0, 480.0)
 const PLAYER_HALF_W: float = 0.4
 const PLAYER_H: float = 1.8
-const PLAYER_SPEED: float = 45.0
+const PLAYER_SPEED: float = 90.0
 const SAVE_PATH: String = "user://ashfall_save.bin"
 
 func _ready() -> void:
@@ -101,8 +101,8 @@ func _player_center_cell() -> Vector2i:
 func _dig_at_player() -> void:
 	# Dig sand/water around the avatar; stone is too hard to dig by hand.
 	var c := _player_center_cell()
-	for dy in range(-1, 2):
-		for dx in range(-1, 2):
+	for dy in range(-2, 3):
+		for dx in range(-2, 3):
 			var m: int = world.get_cell(c.x + dx, c.y + dy)
 			if m != AshfallWorld.MATERIAL_AIR and m != AshfallWorld.MATERIAL_STONE:
 				world.set_cell(c.x + dx, c.y + dy, AshfallWorld.MATERIAL_AIR)
@@ -114,8 +114,8 @@ func _place_at_player() -> void:
 	if current_material == AshfallWorld.MATERIAL_AIR:
 		return
 	var c := _player_center_cell()
-	for dy in range(-1, 2):
-		for dx in range(-1, 2):
+	for dy in range(-2, 3):
+		for dx in range(-2, 3):
 			if world.get_cell(c.x + dx, c.y + dy) == AshfallWorld.MATERIAL_AIR:
 				world.set_cell(c.x + dx, c.y + dy, current_material)
 	world.update_world_texture()
