@@ -94,10 +94,22 @@ void order_dynamic_cells(std::vector<std::pair<CellPosition, MaterialId>>& cells
 } // namespace
 
 SimulationWorld::SimulationWorld() {
-    materials_.emplace(kAir, MaterialDefinition{Movement::Static, false, 0});
-    materials_.emplace(kStone, MaterialDefinition{Movement::Static, true, 99});
-    materials_.emplace(kSand, MaterialDefinition{Movement::Powder, false, 2});
-    materials_.emplace(kWater, MaterialDefinition{Movement::Liquid, false, 1});
+    load_material_table(default_material_table());
+}
+
+SimulationWorld::SimulationWorld(const MaterialTable& table) {
+    load_material_table(table);
+}
+
+bool SimulationWorld::load_material_table(const MaterialTable& table) {
+    std::string error;
+    if (!validate_material_table(table, error)) return false;
+    materials_.clear();
+    for (const MaterialSpec& spec : table.materials) {
+        materials_.emplace(spec.id, spec);
+    }
+    reset();
+    return true;
 }
 
 MaterialId SimulationWorld::cell(CellPosition position) const {
@@ -323,11 +335,12 @@ void SimulationWorld::step() {
                     // Stone walls stop the scan.
                     constexpr int kDispersion = 4;
                     const MaterialId* below_mat = next.find(down);
-                    const bool deep = below_mat != nullptr && *below_mat == kWater;
+                    const bool deep = below_mat != nullptr &&
+                                      material(*below_mat).movement == Movement::Liquid;
                     // Wetness in the settled/next state (decided cells only).
                     auto wet_at = [&](CellPosition p) -> bool {
                         const MaterialId* found = next.find(p);
-                        return found != nullptr && *found == kWater;
+                        return found != nullptr && material(*found).movement == Movement::Liquid;
                     };
                     if (deep) {
                         // A cell embedded in a complete surface row (wet on
@@ -360,13 +373,14 @@ void SimulationWorld::step() {
                         const CellPosition above{source.x, source.y - 1};
                         const bool open_above = !current.contains(above);
                         const MaterialId* below_now = next.find(down);
-                        // Any sand here: settled or in flight. Swapping
+                        // Any powder here: settled or in flight. Swapping
                         // relocates (never overwrites), so percolation is
                         // mass-safe even through a slumping dune; the source
                         // home is free in next (writers only move down or
                         // skip current-occupied laterals).
-                        const bool sand_below =
-                            below_now != nullptr && *below_now == kSand;
+                        const MaterialId below_id = below_now != nullptr ? *below_now : kAir;
+                        const bool powder_below =
+                            below_now != nullptr && material(below_id).movement == Movement::Powder;
                         // Escape hatch: only seep when the displaced sand can
                         // roll somewhere (a diag of the source holding air or
                         // water in current). Otherwise the pair swap back and
@@ -374,14 +388,14 @@ void SimulationWorld::step() {
                         // A dot in a fully-cupped pit stays put (a puddle).
                         auto escapable = [&](CellPosition p) -> bool {
                             const MaterialId* found = current.find(p);
-                            return found == nullptr || *found == kWater;
+                            return found == nullptr || material(*found).movement == Movement::Liquid;
                         };
                         const CellPosition seep_l{source.x - 1, source.y + 1};
                         const CellPosition seep_r{source.x + 1, source.y + 1};
-                        if (open_above && !wet_at(side_l) && !wet_at(side_r) && sand_below &&
+                        if (open_above && !wet_at(side_l) && !wet_at(side_r) && powder_below &&
                             (escapable(seep_l) || escapable(seep_r))) {
                             next.insert_or_assign(down, material_id);
-                            next.insert_or_assign(source, kSand);
+                            next.insert_or_assign(source, below_id);
                             moved = true;
                         }
                     }
@@ -598,7 +612,7 @@ void SimulationWorld::mark_chunk_dirty(CellPosition chunk_position) {
     dirty_chunks_.insert(chunk_position);
 }
 
-const MaterialDefinition& SimulationWorld::material(MaterialId id) const { return materials_.at(id); }
+const MaterialSpec& SimulationWorld::material(MaterialId id) const { return materials_.at(id); }
 
 bool SimulationWorld::chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept {
     for (MaterialId material_id : chunk) {

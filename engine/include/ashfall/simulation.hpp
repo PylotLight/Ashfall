@@ -10,44 +10,20 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ashfall/cell_types.hpp"
 #include "ashfall/flat_cell_map.hpp"
+#include "ashfall/material_data.hpp"
 
 namespace ashfall {
-
-using MaterialId = std::uint8_t;
-constexpr MaterialId kAir = 0;
-constexpr MaterialId kStone = 1;
-constexpr MaterialId kSand = 2;
-constexpr MaterialId kWater = 3;
-constexpr int kChunkSize = 64;
-
-enum class Movement : std::uint8_t { Static, Powder, Liquid };
-
-struct MaterialDefinition {
-    Movement movement = Movement::Static;
-    bool solid = false;
-    int density = 0;
-};
-
-struct CellPosition {
-    int x = 0;
-    int y = 0;
-    auto operator<=>(const CellPosition&) const = default;
-};
-
-struct CellPositionHash {
-    std::size_t operator()(CellPosition p) const noexcept {
-        // Deterministic 32-bit mix (independent of std::hash seed).
-        std::uint32_t h = static_cast<std::uint32_t>(p.x) * 0x9E3779B1u;
-        h ^= static_cast<std::uint32_t>(p.y) * 0x85EBCA77u + 0x9E3779B9u + (h << 6) + (h >> 2);
-        return static_cast<std::size_t>(h);
-    }
-};
 
 /// Portable, deterministic cellular world. Godot and rendering code must not own this state.
 class SimulationWorld {
 public:
     SimulationWorld();
+    // Build from a data table (validated; id 0 must be air). Loading a table
+    // resets the world, since live cells reference the previous ids.
+    explicit SimulationWorld(const MaterialTable& table);
+    bool load_material_table(const MaterialTable& table);
 
     [[nodiscard]] MaterialId cell(CellPosition position) const;
     void reset();
@@ -85,7 +61,7 @@ private:
     using FlatMarks = FlatMap<CellPosition, std::uint8_t, CellPositionHash>;
     using DynCells = std::vector<std::pair<CellPosition, MaterialId>>;
 
-    [[nodiscard]] const MaterialDefinition& material(MaterialId id) const;
+    [[nodiscard]] const MaterialSpec& material(MaterialId id) const;
     [[nodiscard]] static bool prefers_left(CellPosition position, std::uint64_t tick);
     void rebuild_chunks(const FlatCells& cells);
     void write_chunk_cell(CellPosition position, MaterialId material_id);
@@ -105,7 +81,7 @@ private:
     FlatMarks stayed_scratch_;
     DynCells dyn_scratch_;
     DynCells order_scratch_;
-    std::map<MaterialId, MaterialDefinition> materials_;
+    std::map<MaterialId, MaterialSpec> materials_;
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;

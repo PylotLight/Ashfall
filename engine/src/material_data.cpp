@@ -275,6 +275,64 @@ bool movement_from_string(std::string_view name, Movement& out) {
     return false;
 }
 
+bool validate_material_table(const MaterialTable& table, std::string& error) {
+    if (table.version != 1) {
+        error = "unsupported data version (want 1)";
+        return false;
+    }
+    if (table.materials.empty()) {
+        error = "\"materials\" must be a non-empty array";
+        return false;
+    }
+    bool seen_id[256] = {};
+    bool has_air = false;
+    for (const MaterialSpec& spec : table.materials) {
+        if (seen_id[spec.id]) {
+            error = "duplicate material id";
+            return false;
+        }
+        seen_id[spec.id] = true;
+        for (const MaterialSpec& other : table.materials) {
+            if (&other != &spec && other.name == spec.name) {
+                error = "duplicate material name \"" + spec.name + "\"";
+                return false;
+            }
+        }
+        if (spec.name.empty()) {
+            error = "material \"name\" must be a non-empty string";
+            return false;
+        }
+        if (spec.solid && spec.movement != Movement::Static) {
+            error = "material \"" + spec.name + "\" is solid but not static";
+            return false;
+        }
+        if (spec.id == 0) {
+            has_air = true;
+            if (spec.name != "air" || spec.movement != Movement::Static || spec.solid || spec.density != 0) {
+                error = "material id 0 must be non-solid static air with density 0";
+                return false;
+            }
+        }
+    }
+    if (!has_air) {
+        error = "material id 0 (air) is required";
+        return false;
+    }
+    return true;
+}
+
+MaterialTable default_material_table() {
+    MaterialTable table;
+    table.version = 1;
+    table.materials = {
+        {kAir, "air", Movement::Static, false, 0, {18, 20, 24}},
+        {kStone, "stone", Movement::Static, true, 99, {128, 133, 138}},
+        {kSand, "sand", Movement::Powder, false, 2, {230, 175, 50}},
+        {kWater, "water", Movement::Liquid, false, 1, {86, 178, 214}},
+    };
+    return table;
+}
+
 bool parse_material_data(std::string_view text, MaterialTable& out, std::string& error) {
     out = MaterialTable{};
     Parser parser(text);
@@ -363,19 +421,7 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         seen_id[static_cast<std::size_t>(id)] = true;
         seen_names.push_back(name);
     }
-    bool has_air = false;
-    for (const MaterialSpec& spec : table.materials) {
-        if (spec.id != 0) continue;
-        has_air = true;
-        if (spec.name != "air" || spec.movement != Movement::Static || spec.solid || spec.density != 0) {
-            error = "material id 0 must be non-solid static air with density 0";
-            return false;
-        }
-    }
-    if (!has_air) {
-        error = "material id 0 (air) is required";
-        return false;
-    }
+    if (!validate_material_table(table, error)) return false;
     out = std::move(table);
     return true;
 }

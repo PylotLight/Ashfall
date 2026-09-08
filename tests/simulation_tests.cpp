@@ -657,6 +657,88 @@ void test_material_data_rejects_bad_input() {
     expect(rejects(kV2), "wrong version rejected");
 }
 
+void test_table_with_remapped_ids_behaves_identically() {
+    // Same physics roles, different ids: proves dispatch keys off the
+    // movement class, never the id. Air must stay 0 (engine air anchor).
+    ashfall::MaterialTable table;
+    table.version = 1;
+    table.materials = {
+        {0, "air", ashfall::Movement::Static, false, 0, {0, 0, 0}},
+        {4, "stone", ashfall::Movement::Static, true, 99, {0, 0, 0}},
+        {5, "sand", ashfall::Movement::Powder, false, 2, {0, 0, 0}},
+        {6, "water", ashfall::Movement::Liquid, false, 1, {0, 0, 0}},
+    };
+    ashfall::SimulationWorld world(table);
+    // Powder falls and rests on static.
+    world.fill_rect({-1, 3}, {1, 3}, 4);
+    world.set_cell({0, 0}, 5);
+    world.step();
+    world.step();
+    expect(world.cell({0, 2}) == 5, "remapped sand falls and rests");
+    // Liquid spreads over static.
+    world.fill_rect({-3, 2}, {3, 2}, 4);
+    world.fill_rect({-2, 1}, {2, 1}, 6);
+    world.fill_rect({0, 0}, {1, 0}, 6);
+    world.step();
+    expect(world.cell({-1, 0}) == 6 || world.cell({2, 0}) == 6, "remapped water disperses");
+    // Powder sinks through liquid (mini tube).
+    ashfall::SimulationWorld tube(table);
+    tube.fill_rect({2, 5}, {4, 5}, 4);
+    tube.fill_rect({2, 0}, {2, 5}, 4);
+    tube.fill_rect({4, 0}, {4, 5}, 4);
+    tube.fill_rect({3, 3}, {3, 4}, 6);
+    tube.set_cell({3, 1}, 5);
+    for (int i = 0; i < 20; ++i) tube.step();
+    expect(tube.cell({3, 4}) == 5, "remapped sand sinks through remapped water");
+    expect(tube.occupied_cell_count() == 16, "remapped scenario conserves mass");
+}
+
+void test_unknown_material_id_rejected() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, 42);
+    expect(world.cell({0, 0}) == ashfall::kAir, "unknown id set_cell is a no-op");
+    world.fill_rect({-2, -2}, {2, 2}, 42);
+    expect(world.occupied_cell_count() == 0, "unknown id fill_rect is a no-op");
+}
+
+void test_loading_table_resets_world() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kSand);
+    world.step();
+    expect(world.occupied_cell_count() == 1 && world.tick() == 1, "world has state before load");
+    expect(world.load_material_table(ashfall::default_material_table()), "reloading defaults succeeds");
+    expect(world.occupied_cell_count() == 0 && world.tick() == 0, "loading a table resets the world");
+    ashfall::MaterialTable bad;
+    bad.version = 1;
+    expect(!world.load_material_table(bad), "invalid table rejected, world untouched");
+}
+
+void test_material_data_matches_canonical_json() {
+    // Literal mirrors data/materials.json field-for-field; the Godot verify
+    // loads the real file through the bridge (see godot_p1_verify.gd).
+    const char* kJson = R"JSON({
+  "version": 1,
+  "materials": [
+    {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
+    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 99, "color": [128, 133, 138]},
+    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]},
+    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 1, "color": [86, 178, 214]}
+  ]
+})JSON";
+    ashfall::MaterialTable parsed;
+    std::string error;
+    expect(ashfall::parse_material_data(kJson, parsed, error), "canonical JSON parses");
+    const ashfall::MaterialTable defaults = ashfall::default_material_table();
+    expect(parsed.materials.size() == defaults.materials.size(), "canonical table has default length");
+    for (std::size_t i = 0; i < parsed.materials.size(); ++i) {
+        const ashfall::MaterialSpec& a = parsed.materials[i];
+        const ashfall::MaterialSpec& b = defaults.materials[i];
+        expect(a.id == b.id && a.name == b.name && a.movement == b.movement && a.solid == b.solid &&
+                a.density == b.density && a.color == b.color,
+            "canonical entry matches code default");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -686,5 +768,9 @@ int main() {
     test_player_collision_and_dirty_tracking();
     test_material_data_parses_table();
     test_material_data_rejects_bad_input();
+    test_table_with_remapped_ids_behaves_identically();
+    test_unknown_material_id_rejected();
+    test_loading_table_resets_world();
+    test_material_data_matches_canonical_json();
     std::cout << "All simulation tests passed.\n";
 }

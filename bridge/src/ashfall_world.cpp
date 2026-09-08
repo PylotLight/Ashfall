@@ -1,9 +1,12 @@
 #include "ashfall_world.hpp"
 
+#include "ashfall/material_data.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <godot_cpp/core/class_db.hpp>
@@ -28,6 +31,7 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("can_move_to_box", "x1", "y1", "x2", "y2"), &AshfallWorld::can_move_to_box);
     ClassDB::bind_method(D_METHOD("save_to_bytes"), &AshfallWorld::save_to_bytes);
     ClassDB::bind_method(D_METHOD("load_from_bytes", "bytes"), &AshfallWorld::load_from_bytes);
+    ClassDB::bind_method(D_METHOD("load_materials", "json_text"), &AshfallWorld::load_materials);
 
     ClassDB::bind_method(D_METHOD("set_auto_step", "auto_step"), &AshfallWorld::set_auto_step);
     ClassDB::bind_method(D_METHOD("is_auto_step"), &AshfallWorld::is_auto_step);
@@ -207,6 +211,21 @@ void AshfallWorld::setup_play_level() {
     // keeps setup deterministic; ~1s at 512 on M2 Max.
     for (int i = 0; i < 200; ++i) world_.step();
     update_world_texture();
+}
+
+bool AshfallWorld::load_materials(const String &p_json_text) {
+    ashfall::MaterialTable table;
+    std::string error;
+    if (!ashfall::parse_material_data(p_json_text.utf8().get_data(), table, error)) {
+        UtilityFunctions::push_error("load_materials: ", error.c_str());
+        return false;
+    }
+    if (!world_.load_material_table(table)) {
+        UtilityFunctions::push_error("load_materials: table failed validation");
+        return false;
+    }
+    update_world_texture();
+    return true;
 }
 
 Vector2i AshfallWorld::get_player_spawn() const {

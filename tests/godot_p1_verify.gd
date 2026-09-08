@@ -77,6 +77,15 @@ func _run_scene_checks() -> void:
 	assert(main.player_pos == Vector2(100.0, 150.0), "load restores avatar position")
 	assert(main.current_material == AshfallWorld.MATERIAL_WATER, "load restores held material")
 	assert(main.world.get_cell(100, 100) != AshfallWorld.MATERIAL_STONE, "load restores exact world")
+
+	# P2.2: the canonical data file loads through the bridge into the core.
+	var data_file := FileAccess.open("res://data/materials.json", FileAccess.READ)
+	assert(data_file != null, "canonical material data file present")
+	assert(main.world.load_materials(data_file.get_as_text()), "canonical data loads through bridge")
+	data_file.close()
+	assert(main.world.get_occupied_cell_count() == 0, "loading a table resets the world")
+	assert(main.world.get_cell(256, 479) == AshfallWorld.MATERIAL_AIR, "reset world is empty air")
+
 	if FileAccess.file_exists("user://ashfall_save.bin"):
 		DirAccess.remove_absolute("user://ashfall_save.bin")
 

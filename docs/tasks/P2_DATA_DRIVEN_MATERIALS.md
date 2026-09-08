@@ -16,7 +16,7 @@ special material branch.
 ## Phased Task Breakdown
 
 ### Phase P2.1: Versioned Material Data + Loader (no sim change)
-- **Status**: Ready for Execution
+- **Status**: Complete (`ashfall/material_data` parser + validator, canonical `data/materials.json`, loader tests green; no sim change)
 - **Ownership**: `engine/include/ashfall/material_data.hpp`, `engine/src/material_data.cpp`, `data/materials.json`, `tests/simulation_tests.cpp`
 - **Description**: Strict JSON-subset parser (objects, arrays, strings, ints,
   bools; no floats, no deps) plus the versioned material schema (`version`,
@@ -37,7 +37,7 @@ special material branch.
   5. CMake: compile `material_data.cpp` into `ashfall_sim`.
 
 ### Phase P2.2: Engine Table from Data
-- **Status**: Pending P2.1
+- **Status**: Complete (table-driven `materials_`, movement-class dispatch incl. infiltration write-back, `load_materials` bridged + booted from file, remapped-id/unknown-id/reset/parity tests, scene file-to-core assert; all suites green)
 - **Ownership**: `engine/`, `bridge/`
 - **Description**: `SimulationWorld` builds its material table from a loaded
   `MaterialTable` instead of hardcoded `emplace` calls. Default construction

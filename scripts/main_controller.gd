@@ -35,6 +35,15 @@ const PLAYER_SPEED: float = 90.0
 const SAVE_PATH: String = "user://ashfall_save.bin"
 
 func _ready() -> void:
+	# Material table comes from versioned data (P2); defaults match, so this
+	# only proves the production file-to-core path every boot.
+	var data_file := FileAccess.open("res://data/materials.json", FileAccess.READ)
+	if data_file != null:
+		if not world.load_materials(data_file.get_as_text()):
+			push_error("main_controller: data/materials.json rejected, using built-in defaults")
+		data_file.close()
+	else:
+		push_error("main_controller: data/materials.json missing, using built-in defaults")
 	# Boot the hand-authored P1 play level in C++ (deterministic content).
 	world.setup_play_level()
 	world.auto_step = false
