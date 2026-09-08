@@ -348,6 +348,36 @@ void test_play_level_layout() {
     expect(again.save() == world.save(), "play level builds deterministically");
 }
 
+void test_water_trickles_down_sand_slope() {
+    ashfall::SimulationWorld world;
+    // Closed basin so cell counts are exact (nothing escapes the window).
+    world.fill_rect({0, 31}, {40, 31}, ashfall::kStone); // floor
+    world.fill_rect({0, 0}, {0, 31}, ashfall::kStone);   // left wall
+    world.fill_rect({40, 0}, {40, 31}, ashfall::kStone); // right wall
+    for (int i = 0; i < 10; ++i) world.fill_rect({20 + i, 20 + i}, {20 + i, 30}, ashfall::kSand); // staircase
+    world.set_cell({20, 19}, ashfall::kWater);
+    for (int i = 0; i < 300; ++i) world.step();
+    std::vector<ashfall::MaterialId> area(static_cast<std::size_t>(41 * 32), ashfall::kAir);
+    world.copy_rect({0, 0}, {40, 31}, area);
+    std::size_t slope_water = 0, total_water = 0, total_sand = 0;
+    for (int y = 0; y <= 31; ++y) {
+        for (int x = 0; x <= 40; ++x) {
+            const ashfall::MaterialId m = area[static_cast<std::size_t>(y * 41 + x)];
+            if (m == ashfall::kWater) {
+                ++total_water;
+                if (y < 30) ++slope_water;
+            } else if (m == ashfall::kSand) {
+                ++total_sand;
+            }
+        }
+    }
+    expect(total_water == 1, "slope water mass conserved");
+    expect(total_sand == 65, "slope sand mass conserved");
+    // A dot cupped in a fully-enclosed 1-cell pit is a puddle and stays;
+    // anything on open slope must drain (no swap-cycle flicker either).
+    expect(slope_water <= 1, "open slope drains instead of dotting up");
+}
+
 void test_command_replay() {
     auto run_scenario = []() {
         ashfall::SimulationWorld world;
@@ -531,6 +561,7 @@ int main() {
     test_water_mound_levels_quickly();
     test_chunk_boundaries_crossing();
     test_play_level_layout();
+    test_water_trickles_down_sand_slope();
     test_command_replay();
     test_step_marks_dirty_chunks();
     test_save_load_rejects_malformed();

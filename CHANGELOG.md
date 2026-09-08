@@ -22,6 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Formally validated P0 exit criteria and authored Milestone P1 task specification in `docs/tasks/P1_CELLULAR_WORLD.md`.
 - Deterministic headless visual simulation check (`tests/godot_visual_simulation.gd`) rendering the native bridge to PNG.
 - P1.1–P1.3 backend coverage: true cross-boundary movement, mass conservation, sand/water settling, command replay, malformed-payload rejection, varied-topology and step-dirty tracking tests.
+- Water infiltration: lone surface droplets on sand seep down (mass-safe swap, escape-gated so no swap-cycle flicker); micro-puddles drain into dunes instead of dotting slopes. Covered by `test_water_trickles_down_sand_slope`.
+- Floating-water shading regression check in `tests/godot_visual_simulation.gd` (column top never darker than middle).
+
+### Fixed
+- Water depth shading inverted on floating blobs and falling streams (dark-on-top). Depth is now min(water-below, water-above): only genuinely enclosed deep water goes dark teal.
+- Window letterbox glare: explicit `canvas_items`/`keep` stretch, dark clear color matching the world background, dark viewport panel stylebox.
 
 ### Improved
 - Simulation performance: hash-based cell storage with deterministic sorted saves, incremental `set_cell`/`fill_rect` (O(area) not O(world)), O(1) occupied-cell count; bridge fixed-rate pacing (30 Hz, backlog dropped) and throttled HUD; Release (`-O3`) build. Bridge tick cost on the reference world dropped from ~38 ms to ~2.3 ms.

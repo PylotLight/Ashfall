@@ -285,16 +285,17 @@ void SimulationWorld::step() {
                     constexpr int kDispersion = 4;
                     const auto below_it = next.find(down);
                     const bool deep = below_it != next.end() && below_it->second == kWater;
+                    // Wetness in the settled/next state (decided cells only).
+                    auto wet_at = [&](CellPosition p) -> bool {
+                        const auto it = next.find(p);
+                        return it != next.end() && it->second == kWater;
+                    };
                     if (deep) {
                         // A cell embedded in a complete surface row (wet on
                         // both sides) rests, so flat surfaces stay flat. A
                         // cell with a dry side flows toward the gap, so bumps
                         // drain and sparse rows level instead of freezing into
                         // permanent single-pixel dots.
-                        auto wet_at = [&](CellPosition p) -> bool {
-                            const auto it = next.find(p);
-                            return it != next.end() && it->second == kWater;
-                        };
                         if (!(wet_at(side_l) && wet_at(side_r))) {
                             for (CellPosition side : sides) {
                                 const int step_x = side.x - source.x;
@@ -310,6 +311,39 @@ void SimulationWorld::step() {
                                 }
                                 if (moved) break;
                             }
+                        }
+                    } else {
+                        // Infiltration: a lone surface droplet (open sky, no
+                        // wet sides) sitting on settled sand seeps down,
+                        // swapping with it. Micro-puddles drain into dunes
+                        // instead of dotting slopes; packed water, buried
+                        // water, and water over stone are unaffected.
+                        const CellPosition above{source.x, source.y - 1};
+                        const bool open_above = !current.contains(above);
+                        const auto settled_it = next.find(down);
+                        // Any sand here: settled or in flight. Swapping
+                        // relocates (never overwrites), so percolation is
+                        // mass-safe even through a slumping dune; the source
+                        // home is free in next (writers only move down or
+                        // skip current-occupied laterals).
+                        const bool sand_below =
+                            settled_it != next.end() && settled_it->second == kSand;
+                        // Escape hatch: only seep when the displaced sand can
+                        // roll somewhere (a diag of the source holding air or
+                        // water in current). Otherwise the pair swap back and
+                        // forth every tick: visible flicker, zero drainage.
+                        // A dot in a fully-cupped pit stays put (a puddle).
+                        auto escapable = [&](CellPosition p) -> bool {
+                            const auto it = current.find(p);
+                            return it == current.end() || it->second == kWater;
+                        };
+                        const CellPosition seep_l{source.x - 1, source.y + 1};
+                        const CellPosition seep_r{source.x + 1, source.y + 1};
+                        if (open_above && !wet_at(side_l) && !wet_at(side_r) && sand_below &&
+                            (escapable(seep_l) || escapable(seep_r))) {
+                            next[down] = material_id;
+                            next[source] = kSand;
+                            moved = true;
                         }
                     }
                 }

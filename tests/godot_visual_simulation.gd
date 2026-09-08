@@ -35,4 +35,18 @@ func _init() -> void:
 	assert(found_water, "Water layer must contain visible water")
 	print("Visual simulation passed; PNG written to ", output_path)
 	world.free()
+
+	# Falling water must not shade inverted (dark-on-top): a floating column
+	# is thin in both directions, so its top must render as light as or
+	# lighter than its middle.
+	var fall := AshfallWorld.new()
+	fall.init_world(16, 16)
+	fall.fill_rect(7, 5, 9, 11, AshfallWorld.MATERIAL_WATER)
+	fall.update_world_texture()
+	var fall_image := fall.get_water_image()
+	var top := fall_image.get_pixel(8, 5)
+	var mid := fall_image.get_pixel(8, 8)
+	assert(top.r + top.g + top.b >= mid.r + mid.g + mid.b,
+		"Floating water top must not shade darker than its middle")
+	fall.free()
 	quit(0)

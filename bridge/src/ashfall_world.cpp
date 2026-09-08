@@ -258,6 +258,10 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
     // Noita-style water: depth ramp (light surface to deep teal) plus a
     // highlight on the surface skin, translucent so it reads as liquid
     // rather than plastic. Sand/stone get subtle grain to break banding.
+    // Depth is the water column thickness in BOTH directions (min of below
+    // and above): a floating blob or a falling stream is thin everywhere and
+    // shades light instead of inverting dark-on-top. Only genuinely deep,
+    // enclosed water goes dark teal.
     // Paints BOTH layers: base gets opaque solids over background (water
     // leaves background showing through the translucent overlay), water layer
     // gets shaded RGB + coverage alpha and is transparent elsewhere.
@@ -332,6 +336,12 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
                            cell_buffer_[i + static_cast<std::size_t>((1 + depth) * world_width_)] == ashfall::kWater) {
                         ++depth;
                     }
+                    int height = 0;
+                    while (height < depth && y - 1 - height >= 0 &&
+                           cell_buffer_[i - static_cast<std::size_t>((1 + height) * world_width_)] == ashfall::kWater) {
+                        ++height;
+                    }
+                    depth = height;
                 }
                 paint_cell(x, y, mat, depth, above, w + i * 4, water_w + i * 4);
             }
@@ -354,6 +364,12 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
                                world_.cell({x, y + 1 + depth}) == ashfall::kWater) {
                             ++depth;
                         }
+                        int height = 0;
+                        while (height < depth && y - 1 - height >= 0 &&
+                               world_.cell({x, y - 1 - height}) == ashfall::kWater) {
+                            ++height;
+                        }
+                        depth = height;
                     }
                     const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
                     paint_cell(x, y, mat, depth, above, w + offset, water_w + offset);
