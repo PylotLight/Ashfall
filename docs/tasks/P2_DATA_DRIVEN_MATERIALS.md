@@ -77,8 +77,9 @@ special material branch.
   bump with explicit version/migration decision per `docs/AGENT_GUIDE.md`.
 - **Tasks**:
   1. Sparse temp map + `set_temperature`/`temperature` + conduction rule.
-  2. Save v2 carries temps (or explicit reset decision, documented).
+  2.   Save v2 carries temps (or explicit reset decision, documented).
   3. Tests: conduction converges, determinism, save round-trip, perf note.
+  (Enables the freeze/melt reaction rows; see `docs/NOITA_MATERIALS.md` §5.)
 
 ### Phase P2.5: Gas Movement, Fire, Reaction Execution
 - **Status**: Pending P2.4
@@ -86,8 +87,13 @@ special material branch.
 - **Description**: `gas` movement (rises, disperses, dissipates at open sky),
   data-defined `fire`, and a data-defined reaction rule format (neighbor
   match + temperature gate + transform) executed deterministically in `step`.
-  Proof reaction: fire heats fuel, water quenches fire to steam (gas), steam
-  condenses/cools back to water.
+  Reaction schema mirrors the mined Noita table — `probability`, tag-or-id
+  reactants/products, positional mapping, hash-based deterministic rolls —
+  see `docs/NOITA_MATERIALS.md` §4 for the curated starter set (roster A)
+  and §5 for phase hooks. Proof reaction: fire heats fuel, water quenches
+  fire to steam (gas), steam condenses/cools back to water. Requires
+  density-ordered liquid swaps (oil floats, blood/lava sink) — engine gap
+  noted in `docs/NOITA_MATERIALS.md` §2.
 - **Tasks**:
   1. Gas movement in step dispatch (table-driven, no id branch).
   2. Reaction schema + executor (deterministic order, mass-conserving).
