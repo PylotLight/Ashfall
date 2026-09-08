@@ -202,6 +202,10 @@ void AshfallWorld::setup_reference_world() {
 void AshfallWorld::setup_play_level() {
     world_.reset();
     world_.build_play_level();
+    // Settle the authored rects so the first paint shows a lived-in world
+    // (dunes at repose, pools flat) instead of raw rectangles. Fixed count
+    // keeps setup deterministic; ~1s at 512 on M2 Max.
+    for (int i = 0; i < 200; ++i) world_.step();
     update_world_texture();
 }
 

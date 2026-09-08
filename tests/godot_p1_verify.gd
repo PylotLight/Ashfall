@@ -16,6 +16,14 @@ func _init() -> void:
 	assert(world.is_solid_cell(256, 480), "floor cell solid")
 	assert(not world.is_solid_cell(256, 479), "spawn feet cell free")
 
+	# Rain pocket stays contained below its tub (settled at setup).
+	var leaks := 0
+	for y in range(263, 331):
+		for x in range(290, 421):
+			if world.get_cell(x, y) == AshfallWorld.MATERIAL_WATER:
+				leaks += 1
+	assert(leaks == 0, "pocket water contained until dug")
+
 	var saved := world.save_to_bytes()
 	assert(saved.size() > 100, "save bytes non-empty")
 	world.set_cell(256, 479, AshfallWorld.MATERIAL_SAND)

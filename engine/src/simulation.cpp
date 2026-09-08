@@ -560,7 +560,7 @@ void SimulationWorld::build_play_level() {
     fill_rect({200, 360}, {310, 372}, kStone);
     // Sand dunes resting on the floor.
     fill_rect({30, 440}, {110, 479}, kSand);
-    fill_rect({300, 450}, {370, 479}, kSand);
+    fill_rect({320, 450}, {379, 479}, kSand);
     // Water reservoir (right): stone divider wall + pooled water.
     fill_rect({380, 400}, {392, 479}, kStone);
     fill_rect({394, 430}, {492, 479}, kWater);

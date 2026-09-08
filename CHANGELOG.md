@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Floating-water shading regression check in `tests/godot_visual_simulation.gd` (column top never darker than middle).
 
 ### Fixed
+- Boot showed raw authored rectangles (floating water/sand blocks). `setup_play_level` now settles 200 ticks deterministically (~0.8 s), so first paint is dunes-at-repose with flat pools; dune2 shifted right to keep the settled spawn box clear. Pocket containment is now a permanent P1 assert.
 - Water depth shading inverted on floating blobs and falling streams (dark-on-top). Depth is now min(water-below, water-above): only genuinely enclosed deep water goes dark teal.
 - Window letterbox glare: explicit `canvas_items`/`keep` stretch, dark clear color matching the world background, dark viewport panel stylebox.
 
