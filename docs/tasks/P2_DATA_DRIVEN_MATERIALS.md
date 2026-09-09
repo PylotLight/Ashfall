@@ -101,7 +101,7 @@ special material branch.
   4. Tests for each reaction step (ignite, quench, condense) + mass balance.
 
 ### Phase P2.6: P2 Verification & Exit Criterion Validation
-- **Status**: Pending P2.5
+- **Status**: Complete (oil + oil-flash added data-only; only C++ deltas are `kOil`, one default-table row, and tests — `simulation.cpp`/`bridge`/save/renderer diffs empty; float/flash covered in C++ and end-to-end in Godot; all suites green)
 - **Ownership**: Whole repo
 - **Description**: Add one NEW material + reaction via data only (e.g. oil:
   flammable liquid; burns when hot) touching no C++ branch, and prove it

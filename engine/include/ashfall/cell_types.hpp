@@ -16,6 +16,7 @@ constexpr MaterialId kFire = 5;
 constexpr MaterialId kWood = 6;
 constexpr MaterialId kLava = 7;
 constexpr MaterialId kRock = 8;
+constexpr MaterialId kOil = 9;
 
 enum class Movement : std::uint8_t { Static, Powder, Liquid, Gas };
 

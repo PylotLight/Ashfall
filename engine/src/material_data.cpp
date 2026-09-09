@@ -108,6 +108,7 @@ MaterialTable default_material_table() {
         {kWood, "wood", Movement::Static, true, 2000, {146, 104, 58}, {"burnable", "static"}, 2},
         {kLava, "lava", Movement::Liquid, false, 140, {255, 80, 10}, {"liquid"}, 0},
         {kRock, "rock", Movement::Static, true, 2000, {120, 115, 110}, {"static"}, 3},
+        {kOil, "oil", Movement::Liquid, false, 40, {122, 72, 18}, {"liquid", "burnable"}, 0},
     };
     return table;
 }

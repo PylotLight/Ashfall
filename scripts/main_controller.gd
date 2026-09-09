@@ -300,6 +300,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_select_palette(7)
 			KEY_9:
 				_select_palette(8)
+			KEY_0:
+				_select_palette(9)
 
 func _on_world_texture_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:

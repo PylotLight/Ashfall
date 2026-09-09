@@ -9,6 +9,7 @@
     {"id": 5, "name": "fire", "movement": "gas", "solid": false, "density": 1, "color": [255, 180, 40], "tags": ["fire"]},
     {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2},
     {"id": 7, "name": "lava", "movement": "liquid", "solid": false, "density": 140, "color": [255, 80, 10], "tags": ["liquid"]},
-    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3}
+    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3},
+    {"id": 9, "name": "oil", "movement": "liquid", "solid": false, "density": 40, "color": [122, 72, 18], "tags": ["liquid", "burnable"]}
   ]
 }

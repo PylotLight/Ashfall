@@ -743,7 +743,8 @@ void test_material_data_matches_canonical_json() {
     {"id": 5, "name": "fire", "movement": "gas", "solid": false, "density": 1, "color": [255, 180, 40], "tags": ["fire"]},
     {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2},
     {"id": 7, "name": "lava", "movement": "liquid", "solid": false, "density": 140, "color": [255, 80, 10], "tags": ["liquid"]},
-    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3}
+    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3},
+    {"id": 9, "name": "oil", "movement": "liquid", "solid": false, "density": 40, "color": [122, 72, 18], "tags": ["liquid", "burnable"]}
   ]
 })JSON";
     ashfall::MaterialTable parsed;
@@ -785,7 +786,7 @@ void test_material_ids_preserve_table_order() {
     expect(!world.material_info(42, spec), "unknown id lookup fails");
     expect(world.load_material_table(ashfall::default_material_table()), "defaults reload");
     const std::vector<ashfall::MaterialId> canonical = world.material_ids();
-    expect(canonical.size() == 9 && canonical[0] == 0 && canonical[8] == 8,
+    expect(canonical.size() == 10 && canonical[0] == 0 && canonical[9] == 9,
         "canonical order restored");
 }
 
@@ -1560,6 +1561,67 @@ void test_play_level_fire_pit_burns_out() {
     expect(again.save() == world.save(), "pit burn is deterministic");
 }
 
+void test_oil_floats_on_water() {
+    // Density data drives buoyancy: oil (40) rises through water (100) and
+    // layers above it with no engine branch — inverted start proves active
+    // rise, not just containment; the cup contains sideways dispersal.
+    ashfall::SimulationWorld world;
+    world.fill_rect({10, 20}, {20, 20}, ashfall::kStone);
+    world.fill_rect({10, 10}, {10, 19}, ashfall::kStone);
+    world.fill_rect({20, 10}, {20, 19}, ashfall::kStone);
+    world.fill_rect({11, 11}, {19, 14}, ashfall::kWater);
+    world.fill_rect({11, 15}, {19, 19}, ashfall::kOil);
+    for (int i = 0; i < 200; ++i) world.step();
+    std::size_t oil = 0, water = 0;
+    int oil_bottom = -1, water_top = 512;
+    for (int y = 10; y <= 20; ++y) {
+        for (int x = 10; x <= 20; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kOil) {
+                ++oil;
+                oil_bottom = y;
+            } else if (m == ashfall::kWater) {
+                ++water;
+                water_top = (y < water_top) ? y : water_top;
+            }
+        }
+    }
+    expect(oil == 45, "oil mass conserved while rising");
+    expect(water == 36, "water mass conserved under oil");
+    expect(oil_bottom < water_top, "oil rises and layers cleanly above water");
+}
+
+void test_oil_flash_ignites() {
+    // Data-only rule proof: a material-addressed row ignites oil with no
+    // engine change; p=90 means ignition within a few deterministic rolls.
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kOil);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec flash;
+    flash.name = "oil-flash";
+    flash.probability = 90;
+    flash.reactants = {{false, "fire"}, {false, "oil"}};
+    flash.products = {{"fire"}, {"fire"}};
+    flash.product_temperature = 150;
+    table.reactions = {flash};
+    expect(world.load_reactions(table), "oil-flash loads");
+    world.step();
+    // Fire is gas: the product rises away the same tick it ignites, so
+    // count the neighborhood (Task 6 spread style), not the origin cell.
+    std::size_t oil = 0, fire = 0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -1; x <= 2; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kOil) ++oil;
+            else if (m == ashfall::kFire) ++fire;
+        }
+    }
+    expect(oil == 0, "oil flashes on the first tick");
+    expect(fire == 2, "flash conserves the pair as fire");
+}
+
 } // namespace
 
 int main() {
@@ -1614,6 +1676,8 @@ int main() {
     test_reactions_are_scan_order_independent();
     test_loading_table_clears_reactions();
     test_play_level_fire_pit_burns_out();
+    test_oil_floats_on_water();
+    test_oil_flash_ignites();
     test_temperature_set_and_query();
     test_temperature_single_cell_cools_exact();
     test_temperature_two_cells_equalize_exact();

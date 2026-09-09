@@ -1,6 +1,10 @@
 {
   "version": 1,
   "reactions": [
+    {"name": "oil-flash", "probability": 90,
+     "reactants": [{"material": "fire"}, {"material": "oil"}],
+     "products": [{"material": "fire"}, {"material": "fire"}],
+     "product_temperature": 150},
     {"name": "quench", "probability": 20,
      "reactants": [{"material": "fire"}, {"material": "water"}],
      "products": [{"material": "fire"}, {"material": "steam"}]},
