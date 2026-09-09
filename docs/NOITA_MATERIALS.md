@@ -21,7 +21,7 @@ Six categories, which map cleanly onto our `Movement` enum plus P2.5 work:
 | Noita category      | Behavior                                  | Our engine status          |
 |---------------------|-------------------------------------------|----------------------------|
 | Static solids       | Never move; hardness 0–6 (dig tiers)      | Done (P1); hardness = future dig tiers |
-| Liquids             | Pool flat; float/sink by density          | Done motion; NO density layering yet |
+| Liquids             | Pool flat; float/sink by density          | Done (P2.5 density-ordered swaps; P2.6 oil-float proof) |
 | Magical liquids     | Liquids with transmutative effects        | Deferred (needs entities/P4+) |
 | Gases               | Rise, pool under ceilings, dissipate      | P2.5 (`gas` movement)      |
 | Powders             | Fall, pile at repose                      | Done (P1)                  |
@@ -31,8 +31,9 @@ Three mechanisms do almost all the work:
 
 1. **Density layering.** Every liquid has a float density (water defined as
    1.0). Lighter floats, heavier sinks — including *through each other*.
-   Our `density` is an integer used only for sand-vs-water swaps; scaling it
-   (water = 100) absorbs Noita's table with no format change.
+   Our `density` is an integer driving all liquid/gas down-swaps (P2.5);
+   the water = 100 scale absorbs Noita's table with no format change
+   (P2.6: oil at 40 floats, lava at 140 sinks through).
 2. **Tags.** Reactions match material *tags* (`[burnable]`, `[meltable]`,
    `[evaporable]`…) as well as specific materials. One rule covers a whole
    family — this is the design to copy for `data/reactions.json`.
@@ -59,10 +60,8 @@ From the wiki liquids table (water = 1.0 baseline):
 | Brine         | 1.2           | 120  | Sinks                      |
 | Water         | 1.0           | 100  | Baseline                   |
 
-Engine gap this exposes: liquid-on-liquid displacement (oil poured on water
-must spread *on top*, blood must sink *through*). Today only powder/liquid
-swaps exist. Required for roster A — file under P2.5 as "density-ordered
-liquid swaps".
+Gap closed in P2.5 ("density-ordered liquid swaps") and proven in P2.6:
+oil poured on water spreads *on top*, lava sinks *through* oil and water.
 
 ## 3. Tag glossary (from the mined sheet; families we adopt)
 
@@ -77,8 +76,8 @@ liquid swaps".
 - Corrosion: `[acid]`, `[corrodible]` (acid persists, emits gas)
 - Context: `[static]`, `[liquid]`, `[water]`, `[lava]`, `[ice]`
 
-Schema impact (planned P2.5, backward compatible): material entries gain
-`"tags": [...]` and `"hardness": 0-6`. Reactions gain tag-or-id matching.
+Schema impact (landed in P2.5, backward compatible): material entries gained
+`"tags": [...]` and `"hardness": 0-6`. Reactions gained tag-or-id matching.
 
 ## 4. Curated starter reaction set (all verified in the sheet)
 
@@ -113,15 +112,15 @@ gold collection, O2/suffocation.
 
 ## 5. Adoption roadmap (phase hooks)
 
-- **P2.3 (renderer):** base colors for roster A from the wiki appearances
-  (oil light-brown, lava glowing orange, steam light-grey, smoke grey,
-  acid deep-green, blood red, ice translucent blue, wood browns, coal black).
-- **P2.4 (temperature):** enables the freeze/melt rows (ice↔water,
-  freezing liquid, molten↔solid + steam).
-- **P2.5 (gas/fire/reactions):** reaction schema mirrors the sheet
+- **P2.3 (renderer):** done — roster-A base colors from data (oil dark
+  amber `[122, 72, 18]`, lava `[255, 80, 10]`, steam light-grey, wood
+  browns).
+- **P2.4 (temperature):** done — sparse per-cell temps enable the
+  freeze/melt rows; ice/water/molten rows remain roster-B future work.
+- **P2.5 (gas/fire/reactions):** done — reaction schema mirrors the sheet
   (`probability`, tag-or-id reactants/products, positional mapping,
-  deterministic rolls); implement roster A + density-ordered liquid swaps;
-  exit proof stays "data-only oil" (oil is row #4/#5 fuel — perfect fit).
+  deterministic rolls); roster-A starter set + density-ordered liquid swaps
+  implemented; exit proof delivered as data-only oil in P2.6.
 - **P5 (world structure):** biome deposits from roster B (coal veins in
   Coal-Pits-like biome, oil pools, frozen vault ice).
 - **P6 (vertical slice):** environmental puzzle wants fire + oil/wood +

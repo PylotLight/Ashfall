@@ -74,3 +74,18 @@ world and player state.
   2. Execute Godot automated/headless verification script testing player movement, stone blocking, sand/water modification, and save/load state identity.
   3. Update `CHANGELOG.md` under `[Unreleased]`.
   4. Sign off on P1 exit criterion and establish readiness for P2.
+
+---
+
+## Exit Criterion Verification & Evidence
+
+| Criterion Item | Requirement | Verification Result | Evidence / Artifact |
+| :--- | :--- | :--- | :--- |
+| **Alter sand and water in a hand-authored scene** | Player digs sand and places water in real time | **PASS** | `tests/godot_p1_verify.gd` scene checks: `_dig_at_player` reduces occupied cells, `_place_at_player` adds water; P1.4 `build_play_level` + spawn. |
+| **Stone blocks movement** | Avatar collision from authoritative native state | **PASS** | `can_move_to_box` native query; scene asserts stone wall blocks the avatar box while open air admits it. |
+| **Quit and load restores exact world and player** | Versioned save file with avatar state; Save/Load UI + F5/F9 | **PASS** | Save-bytes round-trip is byte-identical (`save_to_bytes() == saved`); scene `_save_game`/`_load_game` restores avatar position, held material, and world cells. |
+| **Deterministic core** | Boundary, mass, settling, replay, save/load tests | **PASS** | `ashfall_sim_tests` green (P1.1–P1.3 suites); `godot_p1_verify.gd` core + scene checks green. |
+
+### Sign-Off
+- **P1 Status**: **COMPLETE & VERIFIED**
+- **Readiness for P2**: **READY TO PROCEED** (P2 since completed — see `P2_DATA_DRIVEN_MATERIALS.md`)

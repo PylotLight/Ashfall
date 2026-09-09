@@ -27,8 +27,9 @@ special material branch.
   1. Parser: `parse_material_data(text, table, error)` with line/col errors.
   2. Schema validation: `version == 1`; id 0 exists (air: static, non-solid,
      density 0); unique ids/names; id fits uint8; `movement` in
-     {static, powder, liquid}; `solid` implies static; density 0..255; color
-     3x 0..255.
+   {static, powder, liquid}; `solid` implies static; density 0..255; color
+   3x 0..255. (P2.5 widened the schema: `movement` gains `gas`, density
+   range 0..100000.)
   3. Canonical `data/materials.json` matching legacy air/stone/sand/water
      (ids, movement, solidity, density, renderer base colors).
   4. Deterministic tests: valid table parses; each malformed input rejected
@@ -55,7 +56,7 @@ special material branch.
      rejected; all P1 suites green unchanged.
 
 ### Phase P2.3: Renderer Palette from Data
-- **Status**: Complete (base colors/names from the loaded table, liquid depth shading by movement class with water pixels byte-identical, sidebar palette generated from the table with table-order shortcuts 1-9; godot_p2_verify proves a data-driven color change end to end; all suites green)
+- **Status**: Complete (base colors/names from the loaded table, liquid depth shading by movement class with water pixels byte-identical, sidebar palette generated from the table with table-order shortcuts 1-9,0; godot_p2_verify proves a data-driven color change end to end; all suites green)
 - **Ownership**: `bridge/`, `scripts/`
 - **Description**: Base-layer colors and material names come from the loaded
   table. Water depth shading keys off the `liquid` movement class, not the
@@ -82,7 +83,7 @@ special material branch.
   (Enables the freeze/melt reaction rows; see `docs/NOITA_MATERIALS.md` §5.)
 
 ### Phase P2.5: Gas Movement, Fire, Reaction Execution
-- **Status**: Complete (gas branch + density down-swaps + heat advection; reaction schema/parser/executor with 8-row roster-A starter set; fire/steam/wood/lava/rock purely in data; fire-pit demo burns out deterministically during setup settle; bridge `load_reactions` + host wiring; all suites green)
+- **Status**: Complete (gas branch + density down-swaps + heat advection; reaction schema/parser/executor with 8-row roster-A starter set (9 rows once P2.6 prepends oil-flash); fire/steam/wood/lava/rock purely in data; fire-pit demo burns out deterministically during setup settle; bridge `load_reactions` + host wiring; all suites green)
 - **Ownership**: `engine/`, `data/reactions.json`
 - **Description**: `gas` movement (rises, disperses, dissipates at open sky),
   data-defined `fire`, and a data-defined reaction rule format (neighbor
@@ -111,3 +112,20 @@ special material branch.
   1. Data-only oil + burn reaction; tests green.
   2. Full suites (C++ sim, P0/P1/P2 headless verifies, visual sim, boot).
   3. `CHANGELOG.md` + sign off P2 exit criterion, establish P3 readiness.
+
+---
+
+## Exit Criterion Verification & Evidence
+
+| Criterion Item | Requirement | Verification Result | Evidence / Artifact |
+| :--- | :--- | :--- | :--- |
+| **Data-only material addition** | New material reaches core, renderer, save, and tests with no special branch | **PASS** | P2.6 oil (id 9, liquid, density 40): one row in `data/materials.json` + one `kOil` constant + one default-table row. `git diff` on `simulation.cpp` / `simulation.hpp` / `bridge/` / parsers is empty (`6ead52e`). |
+| **Data-only reaction addition** | New reaction executes through the generic executor | **PASS** | `oil-flash` (p=90, fire+oil → fire+fire) prepended in `data/reactions.json`; ignition proven in C++ (`test_oil_flash_ignites`) with no executor change. |
+| **Native core behavior** | Buoyancy/ignition from table data, deterministic | **PASS** | `test_oil_floats_on_water` (inverted start: oil rises through water, layers clean, mass conserved) + kiln determinism twin-test; `ashfall_sim_tests` green. |
+| **Renderer path** | Data color paints, palette lists the addition | **PASS** | `godot_p2_verify.gd`: oil name/movement/amber asserts, 10-button palette, `[10] Oil` shortcut (`KEY_0`); visual sim green. |
+| **Save format** | New id round-trips byte-identically | **PASS** | P2 core save/load round-trip preserves id 9; P1 save identity still byte-identical (`godot_p1_verify.gd`, occupied=51840). |
+| **Deterministic tests** | Full suites green on the proven tree | **PASS** | Sim + P0/P1/P2 headless verifies + visual sim + 60-frame boot, all exit 0 at `6ead52e`. |
+
+### Sign-Off
+- **P2 Status**: **COMPLETE & VERIFIED**
+- **Readiness for P3**: **READY FOR SCOPING**
