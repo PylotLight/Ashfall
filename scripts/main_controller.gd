@@ -46,6 +46,15 @@ func _ready() -> void:
 		data_file.close()
 	else:
 		push_error("main_controller: data/materials.json missing, using built-in defaults")
+	# Reaction rules resolve against the loaded table (P2.5); a missing or
+	# invalid file only disables reactions, never blocks boot.
+	var rx_file := FileAccess.open("res://data/reactions.json", FileAccess.READ)
+	if rx_file != null:
+		if not world.load_reactions(rx_file.get_as_text()):
+			push_error("main_controller: data/reactions.json rejected, reactions disabled")
+		rx_file.close()
+	else:
+		push_error("main_controller: data/reactions.json missing, reactions disabled")
 	# Boot the hand-authored P1 play level in C++ (deterministic content).
 	world.setup_play_level()
 	world.auto_step = false

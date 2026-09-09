@@ -7,12 +7,15 @@
 #include <map>
 #include <set>
 #include <span>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "ashfall/cell_types.hpp"
 #include "ashfall/flat_cell_map.hpp"
 #include "ashfall/material_data.hpp"
+#include "ashfall/reaction_data.hpp"
 
 namespace ashfall {
 
@@ -22,8 +25,16 @@ public:
     SimulationWorld();
     // Build from a data table (validated; id 0 must be air). Loading a table
     // resets the world, since live cells reference the previous ids.
+    // Loading a material table also clears reactions, since rules
+    // reference its ids.
     explicit SimulationWorld(const MaterialTable& table);
     bool load_material_table(const MaterialTable& table);
+    // Data-defined reactions (see data/reactions.json). Names resolve
+    // against the current material table; unknown names reject the load
+    // with rules_ untouched. Loading a material table clears reactions,
+    // since rules reference its ids.
+    bool load_reactions(const ReactionTable& table);
+    [[nodiscard]] std::size_t reaction_count() const noexcept { return reactions_.size(); }
     // Sparse per-cell temperature (ambient 0; only non-zero is stored).
     // Deterministic integer conduction runs each step(); queries read the
     // settled post-step state. Setting 0 erases the entry. Out-of-range
@@ -100,11 +111,48 @@ private:
     std::vector<MaterialId> material_order_;
     [[nodiscard]] int temperature_at(CellPosition position) const;
     void conduct_temperature();
+    // Heat advection: movement stages each mover's tick-start temperature
+    // keyed by destination; step() applies the stages post-swap (before
+    // conduction), so heat rides the material instead of pruning at the
+    // vacated cell. Destinations are unique per tick (mass conservation),
+    // so last-write conflicts cannot occur.
+    void stage_heat_carry(CellPosition from, CellPosition to);
+
+    std::vector<std::pair<CellPosition, std::int16_t>> heat_carry_scratch_;
 
     using FlatTemps = FlatMap<CellPosition, std::int16_t, CellPositionHash>;
     FlatTemps temps_;
     FlatTemps temp_scratch_;
     std::vector<CellPosition> temp_prune_scratch_;
+    struct ReactionSlot {
+        bool is_tag = false;
+        std::string tag;
+        MaterialId id = kAir;
+    };
+    struct ResolvedReaction {
+        std::string name;
+        int probability = 0;
+        ReactionSlot reactants[2];
+        int reactant_count = 0;
+        struct Product {
+            MaterialId id = kAir;
+        };
+        Product products[2];
+        int product_count = 0; // <= reactant_count; missing tail = identity
+        bool has_min = false;
+        int min_temp = 0;
+        bool has_max = false;
+        int max_temp = 0;
+        bool has_product_temp = false;
+        int product_temp = 0;
+    };
+    std::vector<ResolvedReaction> reactions_;
+
+    [[nodiscard]] bool material_id_by_name(const std::string& name, MaterialId& out) const;
+    [[nodiscard]] bool matches_reactant(MaterialId id, const ReactionSlot& slot) const;
+    [[nodiscard]] static std::uint32_t reaction_roll(
+        CellPosition position, std::uint64_t tick, std::uint32_t rule);
+    void run_reactions();
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;

@@ -18,6 +18,12 @@ struct MaterialSpec {
     bool solid = false;
     int density = 0;
     std::array<std::uint8_t, 3> color = {0, 0, 0};
+    // Reaction vocabulary: open string set matched by reaction tag slots
+    // (e.g. "burnable", "static", "vapor"). Empty by default; v1 JSON
+    // without "tags" still parses (backward compatible).
+    std::vector<std::string> tags{};
+    // Dig tier 0..6 (Noita scale; consumed by a future digging phase).
+    int hardness = 0;
 };
 
 // A validated, load-ready material table.
@@ -26,8 +32,7 @@ struct MaterialTable {
     std::vector<MaterialSpec> materials;
 };
 
-// "static" | "powder" | "liquid". Returns false for anything else
-// ("gas" arrives in P2.5 with gas movement).
+// "static" | "powder" | "liquid" | "gas". Returns false for anything else.
 bool movement_from_string(std::string_view name, Movement& out);
 
 // Structural validation for programmatically built tables (the parser calls

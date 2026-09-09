@@ -82,7 +82,7 @@ special material branch.
   (Enables the freeze/melt reaction rows; see `docs/NOITA_MATERIALS.md` §5.)
 
 ### Phase P2.5: Gas Movement, Fire, Reaction Execution
-- **Status**: Pending P2.4
+- **Status**: Complete (gas branch + density down-swaps + heat advection; reaction schema/parser/executor with 8-row roster-A starter set; fire/steam/wood/lava/rock purely in data; fire-pit demo burns out deterministically during setup settle; bridge `load_reactions` + host wiring; all suites green)
 - **Ownership**: `engine/`, `data/reactions.json`
 - **Description**: `gas` movement (rises, disperses, dissipates at open sky),
   data-defined `fire`, and a data-defined reaction rule format (neighbor

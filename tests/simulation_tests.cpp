@@ -1,5 +1,6 @@
 #include "ashfall/simulation.hpp"
 #include "ashfall/material_data.hpp"
+#include "ashfall/reaction_data.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -380,6 +381,19 @@ void test_play_level_layout() {
     }
     expect(water > 2000, "reservoir and pocket hold water");
     expect(sand > 2000, "dunes and plug hold sand");
+    expect(world.cell({455, 320}) == ashfall::kStone, "fire pit kiln floor present");
+    expect(world.cell({440, 315}) == ashfall::kStone, "fire pit west wall present");
+    expect(world.cell({455, 310}) == ashfall::kStone, "fire pit lid present");
+    std::size_t pit_wood = 0, pit_fire = 0;
+    for (int y = 310; y <= 320; ++y) {
+        for (int x = 440; x <= 470; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kWood) ++pit_wood;
+            else if (m == ashfall::kFire) ++pit_fire;
+        }
+    }
+    expect(pit_wood == 19, "pit wood pile built");
+    expect(pit_fire == 2, "pit starter built");
     ashfall::SimulationWorld again;
     again.build_play_level();
     expect(again.save() == world.save(), "play level builds deterministically");
@@ -604,7 +618,7 @@ void test_material_data_parses_table() {
     ashfall::Movement movement = ashfall::Movement::Static;
     expect(ashfall::movement_from_string("liquid", movement) && movement == ashfall::Movement::Liquid,
         "movement name resolves");
-    expect(!ashfall::movement_from_string("gas", movement), "gas rejected until P2.5");
+    expect(ashfall::movement_from_string("gas", movement) && movement == ashfall::Movement::Gas, "gas movement resolves");
 }
 
 void test_material_data_rejects_bad_input() {
@@ -639,16 +653,16 @@ void test_material_data_rejects_bad_input() {
         R"JSON({"id": 4, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [1, 2, 3]})JSON";
     std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kSand + "," + kSand2).c_str());
     expect(rejects(buf), "duplicate name rejected");
-    const char* kGas =
-        R"JSON({"id": 5, "name": "smoke", "movement": "gas", "solid": false, "density": 0, "color": [1, 2, 3]})JSON";
-    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kGas).c_str());
+    const char* kPlasma =
+        R"JSON({"id": 5, "name": "smoke", "movement": "plasma", "solid": false, "density": 0, "color": [1, 2, 3]})JSON";
+    std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kPlasma).c_str());
     expect(rejects(buf), "unknown movement rejected");
     const char* kSolidSand =
         R"JSON({"id": 6, "name": "brick", "movement": "powder", "solid": true, "density": 5, "color": [1, 2, 3]})JSON";
     std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kSolidSand).c_str());
     expect(rejects(buf), "solid powder rejected");
     const char* kDense =
-        R"JSON({"id": 7, "name": "heavy", "movement": "static", "solid": true, "density": 300, "color": [1, 2, 3]})JSON";
+        R"JSON({"id": 7, "name": "heavy", "movement": "static", "solid": true, "density": 100001, "color": [1, 2, 3]})JSON";
     std::snprintf(buf, sizeof(buf), kBase, (std::string(kAir) + "," + kDense).c_str());
     expect(rejects(buf), "density out of range rejected");
     const char* kBadColor =
@@ -722,9 +736,14 @@ void test_material_data_matches_canonical_json() {
   "version": 1,
   "materials": [
     {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
-    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 99, "color": [128, 133, 138]},
-    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]},
-    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 1, "color": [86, 178, 214]}
+    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 2000, "color": [128, 133, 138], "tags": ["static"], "hardness": 3},
+    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 160, "color": [230, 175, 50], "tags": ["powder"]},
+    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 100, "color": [86, 178, 214], "tags": ["liquid"]},
+    {"id": 4, "name": "steam", "movement": "gas", "solid": false, "density": 1, "color": [205, 205, 210], "tags": ["vapour"]},
+    {"id": 5, "name": "fire", "movement": "gas", "solid": false, "density": 1, "color": [255, 180, 40], "tags": ["fire"]},
+    {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2},
+    {"id": 7, "name": "lava", "movement": "liquid", "solid": false, "density": 140, "color": [255, 80, 10], "tags": ["liquid"]},
+    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3}
   ]
 })JSON";
     ashfall::MaterialTable parsed;
@@ -736,7 +755,8 @@ void test_material_data_matches_canonical_json() {
         const ashfall::MaterialSpec& a = parsed.materials[i];
         const ashfall::MaterialSpec& b = defaults.materials[i];
         expect(a.id == b.id && a.name == b.name && a.movement == b.movement && a.solid == b.solid &&
-                a.density == b.density && a.color == b.color,
+                a.density == b.density && a.color == b.color && a.tags == b.tags &&
+                a.hardness == b.hardness,
             "canonical entry matches code default");
     }
 }
@@ -765,7 +785,7 @@ void test_material_ids_preserve_table_order() {
     expect(!world.material_info(42, spec), "unknown id lookup fails");
     expect(world.load_material_table(ashfall::default_material_table()), "defaults reload");
     const std::vector<ashfall::MaterialId> canonical = world.material_ids();
-    expect(canonical.size() == 4 && canonical[0] == 0 && canonical[3] == 3,
+    expect(canonical.size() == 9 && canonical[0] == 0 && canonical[8] == 8,
         "canonical order restored");
 }
 
@@ -912,19 +932,632 @@ void test_temperature_cleared_by_edits_and_reset() {
     expect(world.temperature_count() == 0, "table load clears heat");
 }
 
-void test_temperature_does_not_follow_falling_sand() {
-    // P2.4 has no advection: vacated heat is pruned, never conducted from
-    // the stale wake entry, and nothing rides the grain. P2.5 advection
-    // carries heat with moving material and updates this test.
+void test_temperature_follows_falling_sand() {
+    // P2.5 advection: heat rides the grain (staged during movement, applied
+    // post-swap, then conducted). Replaces the P2.4 no-advection pin.
     ashfall::SimulationWorld world;
     world.fill_rect({-1, 2}, {1, 2}, ashfall::kStone);
     world.set_cell({0, 0}, ashfall::kSand);
     world.set_temperature({0, 0}, 100);
-    for (int i = 0; i < 3; ++i) world.step();
-    expect(world.cell({0, 1}) == ashfall::kSand, "sand rests on the floor");
+    world.step();
+    expect(world.cell({0, 1}) == ashfall::kSand, "sand falls one cell");
     expect(world.temperature({0, 0}) == 0, "vacated cell keeps no heat");
-    expect(world.temperature({0, 1}) == 0, "heat does not ride the grain yet");
-    expect(world.temperature_count() == 0, "fallen heat leaves no entries");
+    expect(world.temperature({0, 1}) == 20, "carried heat conducts at the new home");
+    expect(world.temperature({0, 2}) == 20, "carried heat also warms the floor");
+    expect(world.temperature_count() == 2, "rider plus warmed floor");
+}
+
+void test_material_data_gas_tags_hardness() {
+    const char* kJson = R"JSON({
+  "version": 1,
+  "materials": [
+    {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
+    {"id": 4, "name": "steam", "movement": "gas", "solid": false, "density": 1, "color": [205, 205, 210], "tags": ["vapour"], "hardness": 0},
+    {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2}
+  ]
+})JSON";
+    ashfall::MaterialTable table;
+    std::string error;
+    expect(ashfall::parse_material_data(kJson, table, error), "gas/tags/hardness parse");
+    expect(table.materials[1].movement == ashfall::Movement::Gas, "steam is gas");
+    expect(table.materials[1].tags.size() == 1 && table.materials[1].tags[0] == "vapour",
+        "steam tags intact");
+    expect(table.materials[2].hardness == 2, "wood hardness intact");
+    expect(table.materials[2].tags.size() == 2, "wood has two tags");
+    ashfall::MaterialTable bad;
+    std::string bad_error;
+    bad.version = 1;
+    bad.materials = {
+        {0, "air", ashfall::Movement::Static, false, 0, {0, 0, 0}, {}, 0},
+        {4, "steam", ashfall::Movement::Gas, true, 1, {0, 0, 0}, {}, 0},
+    };
+    expect(!ashfall::validate_material_table(bad, bad_error), "solid gas rejected");
+    bad.materials[1].solid = false;
+    bad.materials[1].hardness = 7;
+    expect(!ashfall::validate_material_table(bad, bad_error), "hardness above 6 rejected");
+    bad.materials[1].hardness = 0;
+    bad.materials[1].tags = {"vapour", "vapour"};
+    expect(!ashfall::validate_material_table(bad, bad_error), "duplicate tags rejected");
+}
+
+void test_material_data_legacy_json_still_parses() {
+    // v1 JSON without the P2.5 optional fields: tags default empty,
+    // hardness defaults 0, schema version stays 1.
+    const char* kJson = R"JSON({
+  "version": 1,
+  "materials": [
+    {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
+    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]}
+  ]
+})JSON";
+    ashfall::MaterialTable table;
+    std::string error;
+    expect(ashfall::parse_material_data(kJson, table, error), "legacy JSON parses");
+    expect(table.materials[1].tags.empty(), "missing tags default empty");
+    expect(table.materials[1].hardness == 0, "missing hardness defaults to 0");
+}
+
+void test_reaction_data_parses() {
+    const char* kJson = R"JSON({
+  "version": 1,
+  "reactions": [
+    {"name": "quench", "probability": 20,
+     "reactants": [{"material": "fire"}, {"material": "water"}],
+     "products": [{"material": "fire"}, {"material": "steam"}]},
+    {"name": "heat-ignition", "probability": 100,
+     "reactants": [{"tag": "burnable"}],
+     "products": [{"material": "fire"}],
+     "temperature": {"min_temperature": 25},
+     "product_temperature": 150}
+  ]
+})JSON";
+    ashfall::ReactionTable table;
+    std::string error;
+    expect(ashfall::parse_reaction_data(kJson, table, error), "reaction data parses");
+    expect(table.reactions.size() == 2, "two reactions loaded");
+    const ashfall::ReactionSpec& quench = table.reactions[0];
+    expect(quench.probability == 20, "probability intact");
+    expect(quench.reactants.size() == 2 && !quench.reactants[0].is_tag &&
+            quench.reactants[0].name == "fire",
+        "positional reactant 1 intact");
+    expect(quench.products[1].material == "steam", "positional product 2 intact");
+    const ashfall::ReactionSpec& ignite = table.reactions[1];
+    expect(ignite.reactants.size() == 1 && ignite.reactants[0].is_tag &&
+            ignite.reactants[0].name == "burnable",
+        "tag reactant intact");
+    expect(ignite.products.size() == 1, "short products = identity tail");
+    expect(ignite.gate.has_min && ignite.gate.min_value == 25, "temperature gate intact");
+    expect(ignite.has_product_temperature && ignite.product_temperature == 150,
+        "product temperature intact");
+}
+
+void test_reaction_data_rejects_bad_input() {
+    auto rejects = [&](const std::string& text) {
+        ashfall::ReactionTable table;
+        std::string error;
+        if (ashfall::parse_reaction_data(text, table, error)) {
+            std::cerr << "ACCEPTED BAD REACTIONS: " << text << '\n';
+            return false;
+        }
+        return !error.empty();
+    };
+    const char* kGood =
+        R"JSON({"name": "quench", "probability": 20, "reactants": [{"material": "fire"}, {"material": "water"}], "products": [{"material": "fire"}, {"material": "steam"}]})JSON";
+    auto wrap = [&](const std::string& reaction) {
+        return std::string(R"JSON({"version": 1, "reactions": [)JSON") + reaction + "]}";
+    };
+    expect(rejects(""), "empty input rejected");
+    expect(rejects(R"JSON({"version": 2, "reactions": []})JSON"), "wrong version rejected");
+    expect(rejects(R"JSON({"version": 1, "reactions": []})JSON"), "empty array rejected");
+    expect(rejects(wrap(kGood) + "trailing"), "trailing rejected");
+    std::string no_name = kGood;
+    no_name.replace(no_name.find("\"quench\""), 8, "\"\"");
+    expect(rejects(wrap(no_name)), "empty name rejected");
+    std::string dup = wrap(kGood);
+    dup = std::string(R"JSON({"version": 1, "reactions": [)JSON") + kGood + "," + kGood + "]}";
+    expect(rejects(dup), "duplicate name rejected");
+    std::string bad_prob = kGood;
+    bad_prob.replace(bad_prob.find("20"), 2, "101");
+    expect(rejects(wrap(bad_prob)), "probability above 100 rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "big", "probability": 10, "reactants": [{"material": "fire"}, {"material": "water"}, {"material": "air"}], "products": [{"material": "fire"}]})JSON")),
+        "three reactants rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "wide", "probability": 10, "reactants": [{"material": "fire"}], "products": [{"material": "fire"}, {"material": "air"}]})JSON")),
+        "products wider than reactants rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "both", "probability": 10, "reactants": [{"material": "fire", "tag": "fire"}], "products": [{"material": "fire"}]})JSON")),
+        "material+tag reactant rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "neither", "probability": 10, "reactants": [{}], "products": [{"material": "fire"}]})JSON")),
+        "empty reactant rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "create", "probability": 10, "reactants": [{"material": "steam"}, {"material": "air"}], "products": [{"material": "air"}, {"material": "water"}]})JSON")),
+        "creation from air rejected");
+    expect(
+        rejects(wrap(R"JSON({"name": "gate", "probability": 10, "reactants": [{"material": "fire"}], "products": [{"material": "air"}], "temperature": {"min_temperature": 50, "max_temperature": 10}})JSON")),
+        "inverted gate rejected");
+    // Programmatic table: validator is shared with load_reactions.
+    ashfall::ReactionTable bad;
+    bad.version = 1;
+    std::string bad_error;
+    expect(!ashfall::validate_reaction_table(bad, bad_error), "programmatic empty rejected");
+}
+
+void test_gas_rises_one_cell_per_tick() {
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 10}, ashfall::kSteam);
+    for (int i = 0; i < 5; ++i) world.step();
+    expect(world.cell({5, 5}) == ashfall::kSteam, "steam rises one cell per tick");
+    expect(world.occupied_cell_count() == 1, "rising conserves mass");
+}
+
+void test_gas_pools_under_ceiling() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 0}, {10, 0}, ashfall::kStone);
+    world.set_cell({5, 5}, ashfall::kSteam);
+    for (int i = 0; i < 4; ++i) world.step();
+    expect(world.cell({5, 1}) == ashfall::kSteam, "steam rises to the ceiling");
+    for (int i = 0; i < 6; ++i) world.step();
+    expect(world.occupied_cell_count() == 12, "ceiling plus pooled gas conserved");
+    int steam_y = -99;
+    for (int y = 0; y <= 5; ++y) {
+        for (int x = 0; x <= 10; ++x) {
+            if (world.cell({x, y}) == ashfall::kSteam) steam_y = y;
+        }
+    }
+    expect(steam_y == 1, "blocked gas stays pooled along the ceiling");
+}
+
+void test_sand_falls_through_steam() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {8, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({8, 0}, {8, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {8, 0}, ashfall::kStone); // cap: displaced steam pools, not escapes
+    world.fill_rect({2, 8}, {4, 8}, ashfall::kSteam);
+    world.set_cell({3, 5}, ashfall::kSand);
+    for (int i = 0; i < 10; ++i) world.step();
+    expect(world.cell({3, 9}) == ashfall::kSand, "sand rests on the floor");
+    std::size_t steam = 0;
+    bool steam_low = false;
+    for (int y = 0; y <= 10; ++y) {
+        for (int x = 0; x <= 8; ++x) {
+            if (world.cell({x, y}) == ashfall::kSteam) {
+                ++steam;
+                if (y >= 9) steam_low = true;
+            }
+        }
+    }
+    expect(steam == 3, "steam mass conserved through the swap");
+    expect(!steam_low, "displaced steam ends above the sand");
+}
+
+void test_lava_sinks_through_water() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {8, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({8, 0}, {8, 10}, ashfall::kStone);
+    world.fill_rect({1, 6}, {7, 9}, ashfall::kWater); // 28 water
+    world.fill_rect({3, 3}, {5, 3}, ashfall::kLava);  // 3 lava
+    for (int i = 0; i < 80; ++i) world.step();
+    std::size_t lava = 0, water = 0;
+    bool lava_high = false;
+    for (int y = 0; y <= 10; ++y) {
+        for (int x = 0; x <= 8; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kLava) {
+                ++lava;
+                if (y < 9) lava_high = true;
+            } else if (m == ashfall::kWater) {
+                ++water;
+            }
+        }
+    }
+    expect(lava == 3, "lava mass conserved while sinking");
+    expect(water == 28, "water mass conserved while displaced");
+    expect(!lava_high, "all lava reaches the floor");
+}
+
+void test_water_rests_on_lava() {
+    // The float direction: lighter water cannot displace heavier lava down.
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {8, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({8, 0}, {8, 10}, ashfall::kStone);
+    world.fill_rect({1, 9}, {7, 9}, ashfall::kLava);
+    world.set_cell({3, 7}, ashfall::kWater);
+    for (int i = 0; i < 30; ++i) world.step();
+    // The droplet falls onto the lake, then spreads along the surface row:
+    // it can never displace lava downward, and liquid has no upward move,
+    // so y == 8 is invariant while x wanders.
+    std::size_t water = 0;
+    int water_y = -99;
+    for (int y = 0; y <= 10; ++y) {
+        for (int x = 0; x <= 8; ++x) {
+            if (world.cell({x, y}) == ashfall::kWater) {
+                ++water;
+                water_y = y;
+            }
+        }
+    }
+    expect(water == 1, "droplet mass conserved on the lava");
+    expect(water_y == 8, "water rests on the lava surface");
+    std::size_t lava = 0;
+    for (int x = 0; x <= 8; ++x) {
+        if (world.cell({x, 9}) == ashfall::kLava) ++lava;
+    }
+    expect(lava == 7, "lava lake intact under the water");
+}
+
+void test_reactions_reject_unknown_materials() {
+    ashfall::SimulationWorld world;
+    ashfall::ReactionTable good;
+    good.version = 1;
+    ashfall::ReactionSpec quench;
+    quench.name = "quench";
+    quench.probability = 100;
+    quench.reactants = {{false, "fire"}, {false, "water"}};
+    quench.products = {{"fire"}, {"steam"}};
+    good.reactions = {quench};
+    expect(world.load_reactions(good), "known materials resolve");
+    expect(world.reaction_count() == 1, "one rule stored");
+    ashfall::ReactionTable bad = good;
+    bad.reactions[0].reactants[1].name = "unobtainium";
+    expect(!world.load_reactions(bad), "unknown material rejected");
+    expect(world.reaction_count() == 1, "failed load keeps previous rules");
+    ashfall::ReactionTable malformed;
+    malformed.version = 1;
+    expect(!world.load_reactions(malformed), "empty table rejected");
+    expect(world.reaction_count() == 1, "rejected load keeps rules");
+}
+
+void test_reaction_inapplicable_rule_does_not_shadow() {
+    // A 2-reactant rule whose R1 matches but R2 is absent must NOT consume
+    // the primary: lower-priority rules still get their chance (regression:
+    // wet quench used to shadow burnout for a dry fire, making it immortal).
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kWood);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec quench;
+    quench.name = "quench";
+    quench.probability = 100;
+    quench.reactants = {{false, "fire"}, {false, "water"}};
+    quench.products = {{"fire"}, {"steam"}};
+    ashfall::ReactionSpec burnout;
+    burnout.name = "burnout";
+    burnout.probability = 100;
+    burnout.reactants = {{false, "fire"}};
+    burnout.products = {{"air"}};
+    table.reactions = {quench, burnout};
+    expect(world.load_reactions(table), "quench+burnout load");
+    world.step();
+    expect(world.cell({0, 0}) == ashfall::kAir, "dry fire burns out despite quench priority");
+    expect(world.cell({1, 0}) == ashfall::kWood, "wood untouched without spread");
+}
+
+void test_reaction_quench_conserves_cells() {
+    ashfall::SimulationWorld world;
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec quench;
+    quench.name = "quench";
+    quench.probability = 100;
+    quench.reactants = {{false, "fire"}, {false, "water"}};
+    quench.products = {{"fire"}, {"steam"}};
+    table.reactions = {quench};
+    expect(world.load_reactions(table), "quench loads");
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kWater);
+    for (int i = 0; i < 20; ++i) {
+        world.step();
+        expect(world.occupied_cell_count() == 2, "quench conserves cell count every tick");
+    }
+    std::size_t fire = 0, steam = 0, water = 0;
+    for (int y = -25; y <= 5; ++y) {
+        for (int x = -5; x <= 6; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kFire) ++fire;
+            else if (m == ashfall::kSteam) ++steam;
+            else if (m == ashfall::kWater) ++water;
+        }
+    }
+    expect(fire == 1 && steam == 1 && water == 0, "fire persists, water becomes steam");
+}
+
+void test_reaction_spread_and_burnout() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.fill_rect({1, 0}, {2, 0}, ashfall::kWood);
+    ashfall::ReactionTable spread_table;
+    spread_table.version = 1;
+    ashfall::ReactionSpec spread;
+    spread.name = "spread";
+    spread.probability = 100;
+    spread.reactants = {{false, "fire"}, {true, "burnable"}};
+    spread.products = {{"fire"}, {"fire"}};
+    spread.has_product_temperature = true;
+    spread.product_temperature = 150;
+    spread_table.reactions = {spread};
+    expect(world.load_reactions(spread_table), "spread loads");
+    world.step();
+    // One ignition per fire per tick (first matching neighbor only); both
+    // flames then rise one cell and their carried 150s conduct (150 + 150
+    // from the twin flame) / 5 = 60.
+    std::size_t fire = 0, wood = 0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 4; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kFire) ++fire;
+            else if (m == ashfall::kWood) ++wood;
+        }
+    }
+    expect(fire == 2, "fire spreads to one wood cell in one tick");
+    expect(wood == 1, "unreached wood waits its turn");
+    expect(world.temperature({1, -1}) == 60, "fresh fire heat conducts at the new home");
+    // Burnout alone: every flame dies the next tick at p=100.
+    ashfall::ReactionTable burnout_table;
+    burnout_table.version = 1;
+    ashfall::ReactionSpec burnout;
+    burnout.name = "burnout";
+    burnout.probability = 100;
+    burnout.reactants = {{false, "fire"}};
+    burnout.products = {{"air"}};
+    burnout_table.reactions = {burnout};
+    expect(world.load_reactions(burnout_table), "burnout loads");
+    world.step();
+    expect(world.occupied_cell_count() == 1, "burnout deletes all fire, spares wood");
+    expect(world.cell({2, 0}) == ashfall::kWood, "unburned wood stands");
+    expect(world.temperature_count() == 0, "burned-out fire leaves no heat");
+}
+
+void test_reaction_heat_ignition_gate() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kWood);
+    world.set_cell({5, 5}, ashfall::kWood);
+    world.set_temperature({0, 0}, 30);
+    world.set_temperature({5, 5}, 10);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec ignite;
+    ignite.name = "heat-ignition";
+    ignite.probability = 100;
+    ignite.reactants = {{true, "burnable"}};
+    ignite.products = {{"fire"}};
+    ignite.gate.has_min = true;
+    ignite.gate.min_value = 25;
+    ignite.has_product_temperature = true;
+    ignite.product_temperature = 150;
+    table.reactions = {ignite};
+    expect(world.load_reactions(table), "heat-ignition loads");
+    world.step();
+    // Gate reads tick-start temps (reactions run before conduction): 30
+    // ignites, 10 stays wood. The new flame then rises one cell.
+    std::size_t fire = 0, wood = 0;
+    for (int y = -2; y <= 6; ++y) {
+        for (int x = -2; x <= 7; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kFire) ++fire;
+            else if (m == ashfall::kWood) ++wood;
+        }
+    }
+    expect(fire == 1 && wood == 1, "only hot wood ignites");
+    expect(world.cell({5, 5}) == ashfall::kWood, "cold wood stays wood");
+}
+
+void test_reaction_condense_on_static() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 0}, {2, 0}, ashfall::kStone);
+    world.set_cell({1, 1}, ashfall::kSteam);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec condense;
+    condense.name = "condense";
+    condense.probability = 100;
+    condense.reactants = {{false, "steam"}, {true, "static"}};
+    condense.products = {{"water"}};
+    table.reactions = {condense};
+    expect(world.load_reactions(table), "condense loads");
+    world.step();
+    // steam->water (missing tail product = identity, ceiling untouched),
+    // then the droplet falls to (1,2).
+    expect(world.cell({1, 2}) == ashfall::kWater, "condensed water drips");
+    expect(world.cell({1, 0}) == ashfall::kStone, "ceiling unchanged");
+    std::size_t steam = 0;
+    for (int y = 0; y <= 3; ++y) {
+        for (int x = 0; x <= 2; ++x) {
+            if (world.cell({x, y}) == ashfall::kSteam) ++steam;
+        }
+    }
+    expect(steam == 0, "no steam remains");
+}
+
+void test_reaction_dissipate_needs_air() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kSteam); // open air
+    world.set_cell({10, 10}, ashfall::kSteam); // boxed: stone ring
+    world.set_cell({10, 9}, ashfall::kStone);
+    world.set_cell({10, 11}, ashfall::kStone);
+    world.set_cell({9, 10}, ashfall::kStone);
+    world.set_cell({11, 10}, ashfall::kStone);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec dissipate;
+    dissipate.name = "dissipate";
+    dissipate.probability = 100;
+    dissipate.reactants = {{true, "vapour"}, {false, "air"}};
+    dissipate.products = {{"air"}, {"air"}};
+    table.reactions = {dissipate};
+    expect(world.load_reactions(table), "dissipate loads");
+    world.step();
+    // Open steam reacts away before movement (empty up-neighbor); boxed
+    // steam has no air neighbor and its diagonal escapes are corner-cut
+    // blocked, so it stays put.
+    expect(world.occupied_cell_count() == 5, "open steam vanishes, boxed steam + 4 stones remain");
+    expect(world.cell({10, 10}) == ashfall::kSteam, "enclosed steam survives");
+}
+
+void test_reaction_lava_crusts_on_water() {
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kLava);
+    world.set_cell({1, 0}, ashfall::kWater);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec crust;
+    crust.name = "lava-crust";
+    crust.probability = 100;
+    crust.reactants = {{false, "lava"}, {false, "water"}};
+    crust.products = {{"rock"}, {"steam"}};
+    table.reactions = {crust};
+    expect(world.load_reactions(table), "lava-crust loads");
+    world.step();
+    // Rock is static and stays; the spawned steam rises one cell.
+    expect(world.cell({0, 0}) == ashfall::kRock, "lava crusts to rock");
+    std::size_t steam = 0, water = 0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 3; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kSteam) ++steam;
+            else if (m == ashfall::kWater) ++water;
+        }
+    }
+    expect(steam == 1, "one steam spawned");
+    expect(water == 0, "water consumed into steam");
+}
+
+void test_reactions_are_scan_order_independent() {
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec quench;
+    quench.name = "quench";
+    quench.probability = 100;
+    quench.reactants = {{false, "fire"}, {false, "water"}};
+    quench.products = {{"fire"}, {"steam"}};
+    ashfall::ReactionSpec spread;
+    spread.name = "spread";
+    spread.probability = 100;
+    spread.reactants = {{false, "fire"}, {true, "burnable"}};
+    spread.products = {{"fire"}, {"fire"}};
+    spread.has_product_temperature = true;
+    spread.product_temperature = 150;
+    ashfall::ReactionSpec condense;
+    condense.name = "condense";
+    condense.probability = 100;
+    condense.reactants = {{false, "steam"}, {true, "static"}};
+    condense.products = {{"water"}};
+    table.reactions = {quench, spread, condense};
+    auto build = [&](bool reverse) {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(table), "rules load");
+        const std::vector<std::pair<ashfall::CellPosition, ashfall::MaterialId>> cells = {
+            {{0, 0}, ashfall::kFire}, {{1, 0}, ashfall::kWater}, {{2, 0}, ashfall::kWood},
+            {{0, 1}, ashfall::kStone}, {{1, 1}, ashfall::kSteam}, {{2, 1}, ashfall::kStone},
+        };
+        if (!reverse) {
+            for (const auto& [pos, mat] : cells) world.set_cell(pos, mat);
+        } else {
+            for (auto it = cells.rbegin(); it != cells.rend(); ++it) world.set_cell(it->first, it->second);
+        }
+        return world;
+    };
+    ashfall::SimulationWorld forward = build(false);
+    ashfall::SimulationWorld backward = build(true);
+    for (int i = 0; i < 5; ++i) {
+        forward.step();
+        backward.step();
+    }
+    expect(forward.save() == backward.save(), "insertion order never affects reactions");
+}
+
+void test_loading_table_clears_reactions() {
+    ashfall::SimulationWorld world;
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec burnout;
+    burnout.name = "burnout";
+    burnout.probability = 8;
+    burnout.reactants = {{false, "fire"}};
+    burnout.products = {{"air"}};
+    table.reactions = {burnout};
+    expect(world.load_reactions(table), "reactions load");
+    expect(world.reaction_count() == 1, "one rule stored");
+    expect(world.load_material_table(ashfall::default_material_table()), "table reload succeeds");
+    expect(world.reaction_count() == 0, "table load clears reactions");
+}
+
+void test_play_level_fire_pit_burns_out() {
+    // Reactions are data, not state: the test loads the canonical rule set
+    // (literal mirrors data/reactions.json field-for-field; godot_p2_verify
+    // loads the real file through the bridge), exactly like the host boot.
+    const char* kReactions = R"JSON({
+  "version": 1,
+  "reactions": [
+    {"name": "quench", "probability": 20,
+     "reactants": [{"material": "fire"}, {"material": "water"}],
+     "products": [{"material": "fire"}, {"material": "steam"}]},
+    {"name": "spread", "probability": 40,
+     "reactants": [{"material": "fire"}, {"tag": "burnable"}],
+     "products": [{"material": "fire"}, {"material": "fire"}],
+     "product_temperature": 150},
+    {"name": "heat-ignition", "probability": 100,
+     "reactants": [{"tag": "burnable"}],
+     "products": [{"material": "fire"}],
+     "temperature": {"min_temperature": 25},
+     "product_temperature": 150},
+    {"name": "lava-crust", "probability": 80,
+     "reactants": [{"material": "lava"}, {"material": "water"}],
+     "products": [{"material": "rock"}, {"material": "steam"}]},
+    {"name": "lava-ignite", "probability": 8,
+     "reactants": [{"material": "lava"}, {"tag": "burnable"}],
+     "products": [{"material": "lava"}, {"material": "fire"}],
+     "product_temperature": 150},
+    {"name": "condense", "probability": 70,
+     "reactants": [{"material": "steam"}, {"tag": "static"}],
+     "products": [{"material": "water"}]},
+    {"name": "dissipate", "probability": 3,
+     "reactants": [{"tag": "vapour"}, {"material": "air"}],
+     "products": [{"material": "air"}, {"material": "air"}]},
+    {"name": "burnout", "probability": 8,
+     "reactants": [{"material": "fire"}],
+     "products": [{"material": "air"}]}
+  ]
+})JSON";
+    ashfall::ReactionTable rules;
+    std::string error;
+    expect(ashfall::parse_reaction_data(kReactions, rules, error), "canonical reactions parse");
+    ashfall::SimulationWorld world;
+    world.build_play_level();
+    expect(world.load_reactions(rules), "pit rules load");
+    for (int i = 0; i < 200; ++i) world.step();
+    // Kiln stone is static: floor 31 + walls 10 + 10 + lid 29, all intact.
+    for (int x = 440; x <= 470; ++x) {
+        expect(world.cell({x, 320}) == ashfall::kStone, "kiln floor survives the burn");
+    }
+    for (int y = 310; y <= 319; ++y) {
+        expect(world.cell({440, y}) == ashfall::kStone, "kiln west wall survives");
+        expect(world.cell({470, y}) == ashfall::kStone, "kiln east wall survives");
+    }
+    for (int x = 441; x <= 469; ++x) {
+        expect(world.cell({x, 310}) == ashfall::kStone, "kiln lid survives");
+    }
+    std::vector<ashfall::MaterialId> full(static_cast<std::size_t>(512 * 512), ashfall::kAir);
+    world.copy_rect({0, 0}, {511, 511}, full);
+    std::size_t fire = 0, steam = 0, wood = 0;
+    for (ashfall::MaterialId m : full) {
+        if (m == ashfall::kFire) ++fire;
+        else if (m == ashfall::kSteam) ++steam;
+        else if (m == ashfall::kWood) ++wood;
+    }
+    expect(fire == 0, "all pit fire burns out during settle");
+    expect(steam == 0, "all pit steam dissipates or condenses");
+    expect(wood <= 19, "no reaction creates wood");
+    ashfall::SimulationWorld again;
+    again.build_play_level();
+    expect(again.load_reactions(rules), "pit rules load on the twin");
+    for (int i = 0; i < 200; ++i) again.step();
+    expect(again.save() == world.save(), "pit burn is deterministic");
 }
 
 } // namespace
@@ -961,6 +1594,26 @@ int main() {
     test_loading_table_resets_world();
     test_material_data_matches_canonical_json();
     test_material_ids_preserve_table_order();
+    test_material_data_gas_tags_hardness();
+    test_material_data_legacy_json_still_parses();
+    test_reaction_data_parses();
+    test_reaction_data_rejects_bad_input();
+    test_gas_rises_one_cell_per_tick();
+    test_gas_pools_under_ceiling();
+    test_sand_falls_through_steam();
+    test_lava_sinks_through_water();
+    test_water_rests_on_lava();
+    test_reactions_reject_unknown_materials();
+    test_reaction_quench_conserves_cells();
+    test_reaction_spread_and_burnout();
+    test_reaction_inapplicable_rule_does_not_shadow();
+    test_reaction_heat_ignition_gate();
+    test_reaction_condense_on_static();
+    test_reaction_dissipate_needs_air();
+    test_reaction_lava_crusts_on_water();
+    test_reactions_are_scan_order_independent();
+    test_loading_table_clears_reactions();
+    test_play_level_fire_pit_burns_out();
     test_temperature_set_and_query();
     test_temperature_single_cell_cools_exact();
     test_temperature_two_cells_equalize_exact();
@@ -968,6 +1621,6 @@ int main() {
     test_temperature_save_round_trip_v2();
     test_temperature_v1_save_still_loads();
     test_temperature_cleared_by_edits_and_reset();
-    test_temperature_does_not_follow_falling_sand();
+    test_temperature_follows_falling_sand();
     std::cout << "All simulation tests passed.\n";
 }

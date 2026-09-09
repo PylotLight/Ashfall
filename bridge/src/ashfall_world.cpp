@@ -1,6 +1,7 @@
 #include "ashfall_world.hpp"
 
 #include "ashfall/material_data.hpp"
+#include "ashfall/reaction_data.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +34,7 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("save_to_bytes"), &AshfallWorld::save_to_bytes);
     ClassDB::bind_method(D_METHOD("load_from_bytes", "bytes"), &AshfallWorld::load_from_bytes);
     ClassDB::bind_method(D_METHOD("load_materials", "json_text"), &AshfallWorld::load_materials);
+    ClassDB::bind_method(D_METHOD("load_reactions", "json_text"), &AshfallWorld::load_reactions);
     ClassDB::bind_method(D_METHOD("get_material_count"), &AshfallWorld::get_material_count);
     ClassDB::bind_method(D_METHOD("get_material_ids"), &AshfallWorld::get_material_ids);
     ClassDB::bind_method(D_METHOD("get_material_name", "material_id"), &AshfallWorld::get_material_name);
@@ -60,6 +62,11 @@ void AshfallWorld::_bind_methods() {
     BIND_ENUM_CONSTANT(MATERIAL_STONE);
     BIND_ENUM_CONSTANT(MATERIAL_SAND);
     BIND_ENUM_CONSTANT(MATERIAL_WATER);
+    BIND_ENUM_CONSTANT(MATERIAL_STEAM);
+    BIND_ENUM_CONSTANT(MATERIAL_FIRE);
+    BIND_ENUM_CONSTANT(MATERIAL_WOOD);
+    BIND_ENUM_CONSTANT(MATERIAL_LAVA);
+    BIND_ENUM_CONSTANT(MATERIAL_ROCK);
 }
 
 AshfallWorld::AshfallWorld() {
@@ -233,6 +240,20 @@ bool AshfallWorld::load_materials(const String &p_json_text) {
     }
     refresh_material_cache();
     update_world_texture();
+    return true;
+}
+
+bool AshfallWorld::load_reactions(const String &p_json_text) {
+    ashfall::ReactionTable table;
+    std::string error;
+    if (!ashfall::parse_reaction_data(p_json_text.utf8().get_data(), table, error)) {
+        UtilityFunctions::push_error("load_reactions: ", error.c_str());
+        return false;
+    }
+    if (!world_.load_reactions(table)) {
+        UtilityFunctions::push_error("load_reactions: rules failed validation");
+        return false;
+    }
     return true;
 }
 

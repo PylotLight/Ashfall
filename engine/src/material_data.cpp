@@ -1,263 +1,10 @@
 #include "ashfall/material_data.hpp"
+#include "ashfall/json_subset.hpp"
 
 #include <string>
 #include <utility>
 
 namespace ashfall {
-namespace {
-
-struct JsonValue {
-    enum class Type { Object, Array, String, Int, Bool };
-    Type type = Type::Object;
-    std::string str;
-    long long integer = 0;
-    bool boolean = false;
-    std::vector<JsonValue> items;
-    std::vector<std::pair<std::string, JsonValue>> fields;
-};
-
-class Parser {
-  public:
-    explicit Parser(std::string_view text) : text_(text) {}
-
-    bool run(JsonValue& root) {
-        if (!parse_value(root)) return false;
-        skip_ws();
-        if (pos_ != text_.size()) return fail("trailing characters after top-level value");
-        return true;
-    }
-
-    [[nodiscard]] const std::string& error() const { return error_; }
-
-  private:
-    [[nodiscard]] bool at_end() const { return pos_ >= text_.size(); }
-
-    void skip_ws() {
-        while (!at_end()) {
-            const char c = text_[pos_];
-            if (c == ' ' || c == '\t' || c == '\r') {
-                ++pos_;
-                ++col_;
-            } else if (c == '\n') {
-                ++pos_;
-                ++line_;
-                col_ = 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    bool fail(const std::string& message) {
-        if (error_.empty()) {
-            error_ = "line " + std::to_string(line_) + " col " + std::to_string(col_) + ": " + message;
-        }
-        return false;
-    }
-
-    bool consume(char want, const char* what) {
-        if (at_end() || text_[pos_] != want) return fail(std::string("expected ") + what);
-        ++pos_;
-        ++col_;
-        return true;
-    }
-
-    bool parse_value(JsonValue& out) {
-        skip_ws();
-        if (at_end()) return fail("unexpected end of input");
-        const char c = text_[pos_];
-        if (c == '{') return parse_object(out);
-        if (c == '[') return parse_array(out);
-        if (c == '"') return parse_string_value(out);
-        if (c == 't' || c == 'f') return parse_bool(out);
-        if (c == '-' || (c >= '0' && c <= '9')) return parse_int(out);
-        return fail(std::string("unexpected character '") + c + "'");
-    }
-
-    bool parse_object(JsonValue& out) {
-        if (!consume('{', "'{'")) return false;
-        out = JsonValue{};
-        out.type = JsonValue::Type::Object;
-        skip_ws();
-        if (!at_end() && text_[pos_] == '}') {
-            ++pos_;
-            ++col_;
-            return true;
-        }
-        while (true) {
-            skip_ws();
-            if (at_end() || text_[pos_] != '"') return fail("expected string key");
-            JsonValue key;
-            if (!parse_string_value(key)) return false;
-            for (const auto& field : out.fields) {
-                if (field.first == key.str) return fail("duplicate key \"" + field.first + "\"");
-            }
-            skip_ws();
-            if (!consume(':', "':'")) return false;
-            JsonValue value;
-            if (!parse_value(value)) return false;
-            out.fields.emplace_back(key.str, std::move(value));
-            skip_ws();
-            if (at_end()) return fail("unexpected end of input in object");
-            if (text_[pos_] == ',') {
-                ++pos_;
-                ++col_;
-                continue;
-            }
-            if (text_[pos_] == '}') {
-                ++pos_;
-                ++col_;
-                return true;
-            }
-            return fail("expected ',' or '}' in object");
-        }
-    }
-
-    bool parse_array(JsonValue& out) {
-        if (!consume('[', "'['")) return false;
-        out = JsonValue{};
-        out.type = JsonValue::Type::Array;
-        skip_ws();
-        if (!at_end() && text_[pos_] == ']') {
-            ++pos_;
-            ++col_;
-            return true;
-        }
-        while (true) {
-            JsonValue value;
-            if (!parse_value(value)) return false;
-            out.items.push_back(std::move(value));
-            skip_ws();
-            if (at_end()) return fail("unexpected end of input in array");
-            if (text_[pos_] == ',') {
-                ++pos_;
-                ++col_;
-                continue;
-            }
-            if (text_[pos_] == ']') {
-                ++pos_;
-                ++col_;
-                return true;
-            }
-            return fail("expected ',' or ']' in array");
-        }
-    }
-
-    bool parse_string_value(JsonValue& out) {
-        if (!consume('"', "'\"'")) return false;
-        out = JsonValue{};
-        out.type = JsonValue::Type::String;
-        while (!at_end()) {
-            const char c = text_[pos_];
-            if (c == '"') {
-                ++pos_;
-                ++col_;
-                return true;
-            }
-            if (c == '\\') {
-                if (pos_ + 1 >= text_.size()) break;
-                const char e = text_[pos_ + 1];
-                if (e != '"' && e != '\\') return fail("unsupported escape (only \\\" and \\\\ allowed)");
-                out.str.push_back(e);
-                pos_ += 2;
-                col_ += 2;
-                continue;
-            }
-            if (static_cast<unsigned char>(c) < 0x20) return fail("unescaped control character in string");
-            out.str.push_back(c);
-            ++pos_;
-            ++col_;
-        }
-        return fail("unterminated string");
-    }
-
-    bool parse_int(JsonValue& out) {
-        bool negative = false;
-        if (!at_end() && text_[pos_] == '-') {
-            negative = true;
-            ++pos_;
-            ++col_;
-        }
-        if (at_end() || text_[pos_] < '0' || text_[pos_] > '9') return fail("expected integer");
-        long long value = 0;
-        while (!at_end() && text_[pos_] >= '0' && text_[pos_] <= '9') {
-            value = value * 10 + (text_[pos_] - '0');
-            if (value > 1000000000LL) return fail("integer out of range");
-            ++pos_;
-            ++col_;
-        }
-        out = JsonValue{};
-        out.type = JsonValue::Type::Int;
-        out.integer = negative ? -value : value;
-        return true;
-    }
-
-    bool parse_bool(JsonValue& out) {
-        for (const char* word : {"true", "false"}) {
-            const std::string_view view(word);
-            if (text_.substr(pos_, view.size()) == view) {
-                out = JsonValue{};
-                out.type = JsonValue::Type::Bool;
-                out.boolean = view == "true";
-                pos_ += view.size();
-                col_ += static_cast<int>(view.size());
-                return true;
-            }
-        }
-        return fail("expected 'true' or 'false'");
-    }
-
-    std::string_view text_;
-    std::size_t pos_ = 0;
-    int line_ = 1;
-    int col_ = 1;
-    std::string error_;
-};
-
-const JsonValue* find_field(const JsonValue& obj, std::string_view key) {
-    if (obj.type != JsonValue::Type::Object) return nullptr;
-    for (const auto& [name, value] : obj.fields) {
-        if (name == key) return &value;
-    }
-    return nullptr;
-}
-
-bool require_int(const JsonValue& obj, std::string_view key, long long low, long long high, long long& out,
-                 std::string& error) {
-    const JsonValue* field = find_field(obj, key);
-    if (field == nullptr || field->type != JsonValue::Type::Int) {
-        error = std::string("material field \"") + std::string(key) + "\" must be an integer";
-        return false;
-    }
-    if (field->integer < low || field->integer > high) {
-        error = std::string("material field \"") + std::string(key) + "\" out of range";
-        return false;
-    }
-    out = field->integer;
-    return true;
-}
-
-bool require_bool(const JsonValue& obj, std::string_view key, bool& out, std::string& error) {
-    const JsonValue* field = find_field(obj, key);
-    if (field == nullptr || field->type != JsonValue::Type::Bool) {
-        error = std::string("material field \"") + std::string(key) + "\" must be true/false";
-        return false;
-    }
-    out = field->boolean;
-    return true;
-}
-
-bool require_string(const JsonValue& obj, std::string_view key, std::string& out, std::string& error) {
-    const JsonValue* field = find_field(obj, key);
-    if (field == nullptr || field->type != JsonValue::Type::String) {
-        error = std::string("material field \"") + std::string(key) + "\" must be a string";
-        return false;
-    }
-    out = field->str;
-    return true;
-}
-
-} // namespace
 
 bool movement_from_string(std::string_view name, Movement& out) {
     if (name == "static") {
@@ -270,6 +17,10 @@ bool movement_from_string(std::string_view name, Movement& out) {
     }
     if (name == "liquid") {
         out = Movement::Liquid;
+        return true;
+    }
+    if (name == "gas") {
+        out = Movement::Gas;
         return true;
     }
     return false;
@@ -306,6 +57,26 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
             error = "material \"" + spec.name + "\" is solid but not static";
             return false;
         }
+        if (spec.movement == Movement::Gas && spec.solid) {
+            error = "material \"" + spec.name + "\" is gas but solid";
+            return false;
+        }
+        if (spec.hardness < 0 || spec.hardness > 6) {
+            error = "material \"" + spec.name + "\" hardness must be 0..6";
+            return false;
+        }
+        for (std::size_t t = 0; t < spec.tags.size(); ++t) {
+            if (spec.tags[t].empty()) {
+                error = "material \"" + spec.name + "\" has an empty tag";
+                return false;
+            }
+            for (std::size_t u = t + 1; u < spec.tags.size(); ++u) {
+                if (spec.tags[u] == spec.tags[t]) {
+                    error = "material \"" + spec.name + "\" has a duplicate tag";
+                    return false;
+                }
+            }
+        }
         if (spec.id == 0) {
             has_air = true;
             if (spec.name != "air" || spec.movement != Movement::Static || spec.solid || spec.density != 0) {
@@ -322,20 +93,28 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
 }
 
 MaterialTable default_material_table() {
+    // Densities follow docs/NOITA_MATERIALS.md §2 (water = 100 baseline):
+    // oil 40 floats, lava 140 and blood 110 sink. Sand (160) still sinks
+    // through water (100); static anchors sit at 2000, above every dynamic.
     MaterialTable table;
     table.version = 1;
     table.materials = {
-        {kAir, "air", Movement::Static, false, 0, {18, 20, 24}},
-        {kStone, "stone", Movement::Static, true, 99, {128, 133, 138}},
-        {kSand, "sand", Movement::Powder, false, 2, {230, 175, 50}},
-        {kWater, "water", Movement::Liquid, false, 1, {86, 178, 214}},
+        {kAir, "air", Movement::Static, false, 0, {18, 20, 24}, {}, 0},
+        {kStone, "stone", Movement::Static, true, 2000, {128, 133, 138}, {"static"}, 3},
+        {kSand, "sand", Movement::Powder, false, 160, {230, 175, 50}, {"powder"}, 0},
+        {kWater, "water", Movement::Liquid, false, 100, {86, 178, 214}, {"liquid"}, 0},
+        {kSteam, "steam", Movement::Gas, false, 1, {205, 205, 210}, {"vapour"}, 0},
+        {kFire, "fire", Movement::Gas, false, 1, {255, 180, 40}, {"fire"}, 0},
+        {kWood, "wood", Movement::Static, true, 2000, {146, 104, 58}, {"burnable", "static"}, 2},
+        {kLava, "lava", Movement::Liquid, false, 140, {255, 80, 10}, {"liquid"}, 0},
+        {kRock, "rock", Movement::Static, true, 2000, {120, 115, 110}, {"static"}, 3},
     };
     return table;
 }
 
 bool parse_material_data(std::string_view text, MaterialTable& out, std::string& error) {
     out = MaterialTable{};
-    Parser parser(text);
+    JsonParser parser(text);
     JsonValue root;
     if (!parser.run(root)) {
         error = parser.error();
@@ -345,12 +124,12 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         error = "top-level value must be an object";
         return false;
     }
-    const JsonValue* version = find_field(root, "version");
+    const JsonValue* version = find_json_field(root, "version");
     if (version == nullptr || version->type != JsonValue::Type::Int || version->integer != 1) {
         error = "unsupported data version (want 1)";
         return false;
     }
-    const JsonValue* materials = find_field(root, "materials");
+    const JsonValue* materials = find_json_field(root, "materials");
     if (materials == nullptr || materials->type != JsonValue::Type::Array || materials->items.empty()) {
         error = "\"materials\" must be a non-empty array";
         return false;
@@ -365,13 +144,13 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
             return false;
         }
         long long id = 0;
-        if (!require_int(entry, "id", 0, 255, id, error)) return false;
+        if (!require_json_int(entry, "id", 0, 255, id, error)) return false;
         if (seen_id[static_cast<std::size_t>(id)]) {
             error = "duplicate material id";
             return false;
         }
         std::string name;
-        if (!require_string(entry, "name", name, error) || name.empty()) {
+        if (!require_json_string(entry, "name", name, error) || name.empty()) {
             error = "material \"name\" must be a non-empty string";
             return false;
         }
@@ -382,21 +161,21 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
             }
         }
         std::string movement_name;
-        if (!require_string(entry, "movement", movement_name, error)) return false;
+        if (!require_json_string(entry, "movement", movement_name, error)) return false;
         Movement movement = Movement::Static;
         if (!movement_from_string(movement_name, movement)) {
-            error = "unknown movement \"" + movement_name + "\" (want static/powder/liquid)";
+            error = "unknown movement \"" + movement_name + "\" (want static/powder/liquid/gas)";
             return false;
         }
         bool solid = false;
-        if (!require_bool(entry, "solid", solid, error)) return false;
+        if (!require_json_bool(entry, "solid", solid, error)) return false;
         if (solid && movement != Movement::Static) {
             error = "material \"" + name + "\" is solid but not static";
             return false;
         }
         long long density = 0;
-        if (!require_int(entry, "density", 0, 255, density, error)) return false;
-        const JsonValue* color = find_field(entry, "color");
+        if (!require_json_int(entry, "density", 0, 100000, density, error)) return false;
+        const JsonValue* color = find_json_field(entry, "color");
         if (color == nullptr || color->type != JsonValue::Type::Array || color->items.size() != 3) {
             error = "material \"color\" must be an array of 3 integers";
             return false;
@@ -417,6 +196,26 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         spec.solid = solid;
         spec.density = static_cast<int>(density);
         spec.color = rgb;
+        const JsonValue* tags = find_json_field(entry, "tags");
+        if (tags != nullptr) {
+            if (tags->type != JsonValue::Type::Array) {
+                error = "material \"tags\" must be an array of strings";
+                return false;
+            }
+            for (const JsonValue& tag : tags->items) {
+                if (tag.type != JsonValue::Type::String || tag.str.empty()) {
+                    error = "material \"tags\" must be non-empty strings";
+                    return false;
+                }
+                spec.tags.push_back(tag.str);
+            }
+        }
+        const JsonValue* hardness_field = find_json_field(entry, "hardness");
+        if (hardness_field != nullptr) {
+            long long hardness = 0;
+            if (!require_json_int(entry, "hardness", 0, 6, hardness, error)) return false;
+            spec.hardness = static_cast<int>(hardness);
+        }
         table.materials.push_back(std::move(spec));
         seen_id[static_cast<std::size_t>(id)] = true;
         seen_names.push_back(name);

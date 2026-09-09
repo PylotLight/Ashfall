@@ -11,8 +11,13 @@ constexpr MaterialId kAir = 0;
 constexpr MaterialId kStone = 1;
 constexpr MaterialId kSand = 2;
 constexpr MaterialId kWater = 3;
+constexpr MaterialId kSteam = 4;
+constexpr MaterialId kFire = 5;
+constexpr MaterialId kWood = 6;
+constexpr MaterialId kLava = 7;
+constexpr MaterialId kRock = 8;
 
-enum class Movement : std::uint8_t { Static, Powder, Liquid };
+enum class Movement : std::uint8_t { Static, Powder, Liquid, Gas };
 
 constexpr int kChunkSize = 64;
 

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "reactions": [
+    {"name": "quench", "probability": 20,
+     "reactants": [{"material": "fire"}, {"material": "water"}],
+     "products": [{"material": "fire"}, {"material": "steam"}]},
+    {"name": "spread", "probability": 40,
+     "reactants": [{"material": "fire"}, {"tag": "burnable"}],
+     "products": [{"material": "fire"}, {"material": "fire"}],
+     "product_temperature": 150},
+    {"name": "heat-ignition", "probability": 100,
+     "reactants": [{"tag": "burnable"}],
+     "products": [{"material": "fire"}],
+     "temperature": {"min_temperature": 25},
+     "product_temperature": 150},
+    {"name": "lava-crust", "probability": 80,
+     "reactants": [{"material": "lava"}, {"material": "water"}],
+     "products": [{"material": "rock"}, {"material": "steam"}]},
+    {"name": "lava-ignite", "probability": 8,
+     "reactants": [{"material": "lava"}, {"tag": "burnable"}],
+     "products": [{"material": "lava"}, {"material": "fire"}],
+     "product_temperature": 150},
+    {"name": "condense", "probability": 70,
+     "reactants": [{"material": "steam"}, {"tag": "static"}],
+     "products": [{"material": "water"}]},
+    {"name": "dissipate", "probability": 3,
+     "reactants": [{"tag": "vapour"}, {"material": "air"}],
+     "products": [{"material": "air"}, {"material": "air"}]},
+    {"name": "burnout", "probability": 8,
+     "reactants": [{"material": "fire"}],
+     "products": [{"material": "air"}]}
+  ]
+}

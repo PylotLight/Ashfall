@@ -5,6 +5,13 @@ extends SceneTree
 
 func _init() -> void:
 	var world := AshfallWorld.new()
+	# P2.5: reactions are data — the bare bridge needs the canonical rules
+	# before the settling play-level boot, exactly like the host _ready
+	# (bridge defaults match data/materials.json, so names resolve).
+	var rx := FileAccess.open("res://data/reactions.json", FileAccess.READ)
+	assert(rx != null, "canonical reaction data present")
+	assert(world.load_reactions(rx.get_as_text()), "canonical reactions load through bridge")
+	rx.close()
 	world.setup_play_level()
 	assert(world.get_occupied_cell_count() > 1000, "play level populated")
 
@@ -23,6 +30,19 @@ func _init() -> void:
 			if world.get_cell(x, y) == AshfallWorld.MATERIAL_WATER:
 				leaks += 1
 	assert(leaks == 0, "pocket water contained until dug")
+
+	# P2.5 fire pit: the tub survives the settled burn; nothing still burns.
+	assert(world.get_cell(440, 320) == AshfallWorld.MATERIAL_STONE, "pit floor survives")
+	assert(world.get_cell(455, 320) == AshfallWorld.MATERIAL_STONE, "pit floor center survives")
+	assert(world.get_cell(440, 315) == AshfallWorld.MATERIAL_STONE, "pit west wall survives")
+	assert(world.get_cell(470, 315) == AshfallWorld.MATERIAL_STONE, "pit east wall survives")
+	var embers := 0
+	for y in range(310, 321):
+		for x in range(440, 471):
+			var m: int = world.get_cell(x, y)
+			if m == AshfallWorld.MATERIAL_FIRE or m == AshfallWorld.MATERIAL_STEAM:
+				embers += 1
+	assert(embers == 0, "pit fire burns out during settle")
 
 	var saved := world.save_to_bytes()
 	assert(saved.size() > 100, "save bytes non-empty")

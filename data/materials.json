@@ -2,8 +2,13 @@
   "version": 1,
   "materials": [
     {"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [18, 20, 24]},
-    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 99, "color": [128, 133, 138]},
-    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 2, "color": [230, 175, 50]},
-    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 1, "color": [86, 178, 214]}
+    {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 2000, "color": [128, 133, 138], "tags": ["static"], "hardness": 3},
+    {"id": 2, "name": "sand", "movement": "powder", "solid": false, "density": 160, "color": [230, 175, 50], "tags": ["powder"]},
+    {"id": 3, "name": "water", "movement": "liquid", "solid": false, "density": 100, "color": [86, 178, 214], "tags": ["liquid"]},
+    {"id": 4, "name": "steam", "movement": "gas", "solid": false, "density": 1, "color": [205, 205, 210], "tags": ["vapour"]},
+    {"id": 5, "name": "fire", "movement": "gas", "solid": false, "density": 1, "color": [255, 180, 40], "tags": ["fire"]},
+    {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2},
+    {"id": 7, "name": "lava", "movement": "liquid", "solid": false, "density": 140, "color": [255, 80, 10], "tags": ["liquid"]},
+    {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3}
   ]
 }

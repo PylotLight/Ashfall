@@ -25,6 +25,11 @@ public:
         MATERIAL_STONE = ashfall::kStone,
         MATERIAL_SAND = ashfall::kSand,
         MATERIAL_WATER = ashfall::kWater,
+        MATERIAL_STEAM = ashfall::kSteam,
+        MATERIAL_FIRE = ashfall::kFire,
+        MATERIAL_WOOD = ashfall::kWood,
+        MATERIAL_LAVA = ashfall::kLava,
+        MATERIAL_ROCK = ashfall::kRock,
     };
 
 private:
@@ -91,6 +96,11 @@ public:
     // Load a versioned material table (see data/materials.json). Resets the
     // world; returns false (world untouched) on parse/validation failure.
     bool load_materials(const String &p_json_text);
+    // Load versioned reaction rules (see data/reactions.json). Rules resolve
+    // against the current material table; returns false (rules untouched) on
+    // parse/validation failure. Loading a material table clears reactions,
+    // so the host loads reactions after materials every boot.
+    bool load_reactions(const String &p_json_text);
     // Presentation view of the loaded table (table order). Names/colors
     // come from data/materials.json; the renderer caches them per load.
     int get_material_count() const;

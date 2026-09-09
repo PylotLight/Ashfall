@@ -124,6 +124,74 @@ bool SimulationWorld::load_material_table(const MaterialTable& table) {
         material_order_.push_back(spec.id);
     }
     reset();
+    reactions_.clear();
+    return true;
+}
+
+bool SimulationWorld::material_id_by_name(const std::string& name, MaterialId& out) const {
+    for (const auto& [id, spec] : materials_) {
+        if (spec.name == name) {
+            out = id;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SimulationWorld::matches_reactant(MaterialId id, const ReactionSlot& slot) const {
+    if (slot.is_tag) {
+        for (const std::string& tag : material(id).tags) {
+            if (tag == slot.tag) return true;
+        }
+        return false;
+    }
+    return id == slot.id;
+}
+
+std::uint32_t SimulationWorld::reaction_roll(
+    CellPosition position, std::uint64_t tick, std::uint32_t rule) {
+    // Position-keyed (never iteration-keyed): identical worlds built in
+    // different insertion orders roll identically, and save/load round-trips
+    // preserve behavior. Same mix family as prefers_left.
+    std::uint64_t hash = static_cast<std::uint32_t>(position.x) * 0x9E3779B1u;
+    hash ^= static_cast<std::uint32_t>(position.y) * 0x85EBCA77u;
+    hash ^= tick * 0xC2B2AE3Du;
+    hash ^= static_cast<std::uint64_t>(rule + 1) * 0x27D4EB2Du;
+    hash ^= hash >> 16;
+    return static_cast<std::uint32_t>(hash % 100u);
+}
+
+bool SimulationWorld::load_reactions(const ReactionTable& table) {
+    std::string error;
+    if (!validate_reaction_table(table, error)) return false;
+    std::vector<ResolvedReaction> resolved;
+    resolved.reserve(table.reactions.size());
+    for (const ReactionSpec& spec : table.reactions) {
+        ResolvedReaction rule;
+        rule.name = spec.name;
+        rule.probability = spec.probability;
+        rule.reactant_count = static_cast<int>(spec.reactants.size());
+        for (int i = 0; i < rule.reactant_count; ++i) {
+            if (spec.reactants[i].is_tag) {
+                rule.reactants[i].is_tag = true;
+                rule.reactants[i].tag = spec.reactants[i].name;
+            } else if (!material_id_by_name(spec.reactants[i].name, rule.reactants[i].id)) {
+                return false;
+            }
+        }
+        rule.product_count = static_cast<int>(spec.products.size());
+        for (int i = 0; i < rule.product_count; ++i) {
+            if (!material_id_by_name(spec.products[i].material, rule.products[i].id)) return false;
+        }
+        rule.has_min = spec.gate.has_min;
+        rule.min_temp = spec.gate.min_value;
+        rule.has_max = spec.gate.has_max;
+        rule.max_temp = spec.gate.max_value;
+        rule.has_product_temp = spec.has_product_temperature;
+        rule.product_temp = spec.product_temperature;
+        resolved.push_back(std::move(rule));
+    }
+    reactions_ = std::move(resolved);
     return true;
 }
 
@@ -141,6 +209,7 @@ void SimulationWorld::reset() {
     temps_.clear();
     temp_scratch_.clear();
     temp_prune_scratch_.clear();
+    heat_carry_scratch_.clear();
     tick_ = 0;
 }
 
@@ -226,7 +295,96 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
 }
 
 
+void SimulationWorld::run_reactions() {
+    // Reaction pre-pass: evaluates every rule against the tick-start
+    // snapshot, stages transforms, then applies once. Staging (never
+    // in-place edits) plus position-keyed rolls make outcomes independent of
+    // FlatMap scan order: the same logical world reacts identically however
+    // its cells were inserted. Cost is O(cells x rules) only while rules
+    // are loaded; reactionless worlds pay one branch.
+    if (reactions_.empty()) return;
+    struct Hit {
+        CellPosition pos;
+        MaterialId product;
+        std::uint32_t rule;
+        bool own; // primary-cell transform beats neighbor-imposed claims
+        CellPosition primary;
+    };
+    std::vector<Hit> hits;
+    hits.reserve(cells_.size());
+    cells_.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+        for (std::uint32_t rule_idx = 0; rule_idx < reactions_.size(); ++rule_idx) {
+            const ResolvedReaction& rule = reactions_[rule_idx];
+            if (!matches_reactant(material_id, rule.reactants[0])) continue;
+            const int heat = temperature_at(position);
+            if (rule.has_min && heat < rule.min_temp) continue;
+            if (rule.has_max && heat > rule.max_temp) continue;
+            const auto roll = reaction_roll(position, tick_, rule_idx);
+            if (rule.reactant_count == 1) {
+                if (roll < static_cast<std::uint32_t>(rule.probability)) {
+                    hits.push_back({position, rule.products[0].id, rule_idx, true, position});
+                }
+                break;
+            }
+            const bool left_first = prefers_left(position, tick_);
+            const std::array<CellPosition, 4> neighbors = {
+                CellPosition{position.x, position.y - 1},
+                CellPosition{position.x, position.y + 1},
+                left_first ? CellPosition{position.x - 1, position.y}
+                           : CellPosition{position.x + 1, position.y},
+                left_first ? CellPosition{position.x + 1, position.y}
+                           : CellPosition{position.x - 1, position.y}};
+            bool owned = false;
+            for (const CellPosition neighbor : neighbors) {
+                const MaterialId* found = cells_.find(neighbor);
+                const bool empty = found == nullptr;
+                const ReactionSlot& want = rule.reactants[1];
+                const bool match = (want.id == kAir && !want.is_tag)
+                                       ? empty
+                                       : (!empty && matches_reactant(*found, want));
+                if (!match) continue;
+                // Full match (R1 + R2 + gate): this rule owns the primary
+                // this tick, whether or not the roll lands. R1-only matches
+                // must NOT consume the primary, or an inapplicable rule
+                // would shadow every lower-priority rule forever (e.g. wet
+                // quench shadowing burnout for a dry fire).
+                if (roll < static_cast<std::uint32_t>(rule.probability)) {
+                    hits.push_back({position, rule.products[0].id, rule_idx, true, position});
+                    if (rule.product_count == 2) {
+                        hits.push_back({neighbor, rule.products[1].id, rule_idx, false, position});
+                    }
+                }
+                owned = true;
+                break;
+            }
+            if (owned) break; // a fully-matching rule owns the primary this tick
+        }
+    });
+    // Deterministic conflict resolution: total sort order (position, own
+    // first, rule priority, primary position) — first hit per cell wins.
+    std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) {
+        if (left.pos.x != right.pos.x) return left.pos.x < right.pos.x;
+        if (left.pos.y != right.pos.y) return left.pos.y < right.pos.y;
+        if (left.own != right.own) return left.own > right.own;
+        if (left.rule != right.rule) return left.rule < right.rule;
+        if (left.primary.x != right.primary.x) return left.primary.x < right.primary.x;
+        return left.primary.y < right.primary.y;
+    });
+    bool have_applied = false;
+    CellPosition applied{0, 0};
+    for (const Hit& hit : hits) {
+        if (have_applied && hit.pos == applied) continue;
+        set_cell(hit.pos, hit.product);
+        const ResolvedReaction& rule = reactions_[hit.rule];
+        if (rule.has_product_temp) set_temperature(hit.pos, rule.product_temp);
+        applied = hit.pos;
+        have_applied = true;
+    }
+}
+
 void SimulationWorld::step() {
+    // Reactions transform the tick-start state before movement sees it.
+    run_reactions();
     // cells_ IS the tick-start state: no collect copy. next replaces it.
     const FlatCells& current = cells_;
     FlatCells& next = next_scratch_;
@@ -281,10 +439,13 @@ void SimulationWorld::step() {
                 MaterialId* occupant = next.find(dest);
                 if (occupant == nullptr) {
                     next.insert_or_assign(dest, material_id);
+                    stage_heat_carry(source, dest);
                 } else if (*occupant != kAir && stayed.contains(dest)) {
                     MaterialId displaced = *occupant;
                     next.insert_or_assign(dest, material_id);
                     next.insert_or_assign(source, displaced);
+                    stage_heat_carry(source, dest);
+                    stage_heat_carry(dest, source);
                 } else {
                     return false;
                 }
@@ -329,10 +490,32 @@ void SimulationWorld::step() {
             };
 
             bool moved = false;
-            if (is_empty_down(down)) {
-                next.insert_or_assign(down, material_id);
-                moved = true;
-            } else {
+            {
+                // Density-ordered displacement (docs/NOITA_MATERIALS.md §2):
+                // a heavier liquid/gas sinks through a settled lighter one
+                // (lava through water, water through steam); lighter stays
+                // floating (oil on water — P2.6). Only settled occupants are
+                // swapped; in-flight arrivals block, as with powder.
+                MaterialId* occupant = next.find(down);
+                if (occupant == nullptr) {
+                    next.insert_or_assign(down, material_id);
+                    stage_heat_carry(source, down);
+                    moved = true;
+                } else if (*occupant != kAir && stayed.contains(down)) {
+                    const auto& occupant_def = material(*occupant);
+                    if ((occupant_def.movement == Movement::Liquid ||
+                         occupant_def.movement == Movement::Gas) &&
+                        occupant_def.density < mat_def.density) {
+                        const MaterialId displaced = *occupant;
+                        next.insert_or_assign(down, material_id);
+                        next.insert_or_assign(source, displaced);
+                        stage_heat_carry(source, down);
+                        stage_heat_carry(down, source);
+                        moved = true;
+                    }
+                }
+            }
+            if (!moved) {
                 for (CellPosition diag : diags) {
                     const int dx = diag.x - source.x;
                     const CellPosition horiz{source.x + dx, source.y};
@@ -341,6 +524,7 @@ void SimulationWorld::step() {
                     }
                     if (is_empty_down(diag)) {
                         next.insert_or_assign(diag, material_id);
+                        stage_heat_carry(source, diag);
                         moved = true;
                         break;
                     }
@@ -377,6 +561,7 @@ void SimulationWorld::step() {
                                     if (current.contains(target)) continue;
                                     if (!next.contains(target)) {
                                         next.insert_or_assign(target, material_id);
+                                        stage_heat_carry(source, target);
                                         moved = true;
                                         break;
                                     }
@@ -416,8 +601,82 @@ void SimulationWorld::step() {
                             (escapable(seep_l) || escapable(seep_r))) {
                             next.insert_or_assign(down, material_id);
                             next.insert_or_assign(source, below_id);
+                            stage_heat_carry(source, down);
+                            stage_heat_carry(down, source);
                             moved = true;
                         }
+                    }
+                }
+            }
+            if (!moved) {
+                next.insert_or_assign(source, material_id);
+                stayed.insert_or_assign(source, 1);
+            }
+        } else if (mat_def.movement == Movement::Gas) {
+            // Gases rise, pool under ceilings, and disperse sideways — all
+            // table-driven, no id branches. An upward target is only free
+            // when NOBODY owns it: cells above are still unprocessed in
+            // bottom-up order (present in current, absent from next), so
+            // taking their home now would overwrite their later decision
+            // and destroy mass. Blocked gas waits a tick; columns still
+            // rise coherently at one cell per tick, top first. Bubbles
+            // through liquid emerge from the liquid side (density
+            // down-swaps); gas never swaps upward itself. Dissipation is a
+            // data reaction (vapour + adjacent air), not movement.
+            const CellPosition up{source.x, source.y - 1};
+            const CellPosition diag_l{source.x - 1, source.y - 1};
+            const CellPosition diag_r{source.x + 1, source.y - 1};
+            const CellPosition side_l{source.x - 1, source.y};
+            const CellPosition side_r{source.x + 1, source.y};
+
+            const std::array<CellPosition, 2> diags = left_first
+                ? std::array<CellPosition, 2>{diag_l, diag_r}
+                : std::array<CellPosition, 2>{diag_r, diag_l};
+            const std::array<CellPosition, 2> sides = left_first
+                ? std::array<CellPosition, 2>{side_l, side_r}
+                : std::array<CellPosition, 2>{side_r, side_l};
+
+            auto gas_free = [&](CellPosition p) -> bool {
+                return !next.contains(p) && !current.contains(p);
+            };
+
+            bool moved = false;
+            auto try_gas_target = [&](CellPosition dest) -> bool {
+                if (!gas_free(dest)) return false;
+                next.insert_or_assign(dest, material_id);
+                stage_heat_carry(source, dest);
+                return true;
+            };
+            if (try_gas_target(up)) {
+                moved = true;
+            } else {
+                for (CellPosition diag : diags) {
+                    const int dx = diag.x - source.x;
+                    const CellPosition side{source.x + dx, source.y};
+                    if (is_solid(side) && is_solid(up)) {
+                        continue;
+                    }
+                    if (try_gas_target(diag)) {
+                        moved = true;
+                        break;
+                    }
+                }
+                if (!moved) {
+                    constexpr int kDispersion = 4;
+                    for (CellPosition side : sides) {
+                        const int step_x = side.x - source.x;
+                        for (int dist = 1; dist <= kDispersion; ++dist) {
+                            const CellPosition target{source.x + step_x * dist, source.y};
+                            if (is_solid(target)) break;
+                            if (current.contains(target)) continue;
+                            if (!next.contains(target)) {
+                                next.insert_or_assign(target, material_id);
+                                stage_heat_carry(source, target);
+                                moved = true;
+                                break;
+                            }
+                        }
+                        if (moved) break;
                     }
                 }
             }
@@ -457,6 +716,8 @@ void SimulationWorld::step() {
 
     std::swap(cells_, next);
     ++tick_;
+    for (const auto& [dest, temp] : heat_carry_scratch_) temps_.insert_or_assign(dest, temp);
+    heat_carry_scratch_.clear();
     conduct_temperature();
 }
 
@@ -651,6 +912,20 @@ void SimulationWorld::build_play_level() {
     fill_rect({412, 200}, {420, 262}, kStone);
     fill_rect({300, 212}, {344, 250}, kSand);
     fill_rect({346, 212}, {410, 250}, kWater);
+    // Fire pit demo (P2.5): sealed stone kiln with a tall wood pile, starter
+    // flames embedded in its heart, and a water cup. Spread and conducted
+    // heat burn the pile, quench turns edge flames to steam, condense rains
+    // lid water back down, and burnout clears the last strays during the
+    // 200-tick setup settle; fuel is finite so extinction is guaranteed and
+    // the stone shell keeps it deterministic. (An open tub fizzles: starter
+    // flames rise away from the pile before the p=40 spread roll lands.)
+    fill_rect({440, 320}, {470, 320}, kStone); // kiln floor (31)
+    fill_rect({440, 310}, {440, 319}, kStone); // west wall (10)
+    fill_rect({470, 310}, {470, 319}, kStone); // east wall (10)
+    fill_rect({441, 310}, {469, 310}, kStone); // lid (29)
+    fill_rect({446, 317}, {452, 319}, kWood);  // wood pile (21)
+    fill_rect({449, 318}, {450, 318}, kFire);  // starter, embedded (2; wood left 19)
+    fill_rect({458, 318}, {462, 319}, kWater); // quench cup (10)
 }
 
 bool SimulationWorld::can_move_to(CellPosition min_pos, CellPosition max_pos) const {
@@ -699,6 +974,11 @@ void SimulationWorld::set_temperature(CellPosition position, int temperature) {
 int SimulationWorld::temperature_at(CellPosition position) const {
     const std::int16_t* found = temps_.find(position);
     return found == nullptr ? 0 : static_cast<int>(*found);
+}
+
+void SimulationWorld::stage_heat_carry(CellPosition from, CellPosition to) {
+    const std::int16_t* found = temps_.find(from);
+    if (found != nullptr) heat_carry_scratch_.emplace_back(to, *found);
 }
 
 int SimulationWorld::temperature(CellPosition position) const { return temperature_at(position); }
