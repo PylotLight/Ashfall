@@ -8,6 +8,7 @@
 namespace ashfall {
 
 bool validate_reaction_table(const ReactionTable& table, std::string& error) {
+    error.clear();
     if (table.version != 1) {
         error = "unsupported reaction data version (want 1)";
         return false;
@@ -78,7 +79,11 @@ bool validate_reaction_table(const ReactionTable& table, std::string& error) {
 }
 
 bool parse_reaction_data(std::string_view text, ReactionTable& out, std::string& error) {
-    out = ReactionTable{};
+    // BEHAVIOR(v2-loader): transactional output (P6 core). Old behavior
+    // cleared `out` up front, so a failed parse destroyed the caller's prior
+    // table; now `out` is committed only on success. Pinned by Task T V-battery
+    // (failed reload preserves cells+heat+reactions+tick).
+    error.clear();
     JsonParser parser(text);
     JsonValue root;
     if (!parser.run(root)) {
@@ -102,18 +107,23 @@ bool parse_reaction_data(std::string_view text, ReactionTable& out, std::string&
     }
     ReactionTable table;
     table.version = 1;
-    for (const JsonValue& entry : reactions->items) {
+    for (std::size_t index = 0; index < reactions->items.size(); ++index) {
+        const JsonValue& entry = reactions->items[index];
         if (entry.type != JsonValue::Type::Object) {
-            error = "reaction entry must be an object";
+            // V3-core row context (P7 token offsets deferred to Group 3).
+            error = "reactions[" + std::to_string(index) + "]: reaction entry must be an object";
             return false;
         }
         ReactionSpec spec;
         if (!require_json_string(entry, "name", spec.name, error) || spec.name.empty()) {
-            error = "reaction \"name\" must be a non-empty string";
+            error = "reactions[" + std::to_string(index) + "]: reaction \"name\" must be a non-empty string";
             return false;
         }
         long long probability = 0;
-        if (!require_json_int(entry, "probability", 0, 100, probability, error)) return false;
+        if (!require_json_int(entry, "probability", 0, 100, probability, error)) {
+            error = "reactions[" + std::to_string(index) + "]: " + error;
+            return false;
+        }
         spec.probability = static_cast<int>(probability);
         const JsonValue* reactants = find_json_field(entry, "reactants");
         if (reactants == nullptr || reactants->type != JsonValue::Type::Array ||
@@ -126,14 +136,34 @@ bool parse_reaction_data(std::string_view text, ReactionTable& out, std::string&
                 error = "reaction \"" + spec.name + "\" reactant must be an object";
                 return false;
             }
+            // BEHAVIOR(v2-loader): presence-based reactant exclusivity (P3).
+            // Old behavior tested value validity, so {"material":"", "tag":"x"}
+            // or {"material":5, "tag":"x"} silently accepted the tag arm and
+            // unknown slot keys (e.g. "materail") were ignored. Now exactly
+            // one of "material"/"tag" may be PRESENT and no other key may
+            // appear. Pinned by Task T V-battery (dual-key both-valid reject).
+            for (const auto& [key, _] : slot.fields) {
+                if (key != "material" && key != "tag") {
+                    error = "reaction \"" + spec.name +
+                            "\" reactant has unknown key \"" + key + "\"";
+                    return false;
+                }
+            }
+            const bool has_material = find_json_field(slot, "material") != nullptr;
+            const bool has_tag = find_json_field(slot, "tag") != nullptr;
+            if (has_material == has_tag) {
+                error = "reaction \"" + spec.name +
+                        "\" reactant needs exactly one of \"material\"/\"tag\"";
+                return false;
+            }
             const JsonValue* material = find_json_field(slot, "material");
             const JsonValue* tag = find_json_field(slot, "tag");
-            const bool has_material = material != nullptr &&
-                                      material->type == JsonValue::Type::String &&
-                                      !material->str.empty();
-            const bool has_tag = tag != nullptr && tag->type == JsonValue::Type::String &&
-                                 !tag->str.empty();
-            if (has_material == has_tag) {
+            const bool material_ok = material != nullptr &&
+                                     material->type == JsonValue::Type::String &&
+                                     !material->str.empty();
+            const bool tag_ok = tag != nullptr && tag->type == JsonValue::Type::String &&
+                                !tag->str.empty();
+            if ((has_material && !material_ok) || (has_tag && !tag_ok)) {
                 error = "reaction \"" + spec.name +
                         "\" reactant needs exactly one of \"material\"/\"tag\"";
                 return false;
@@ -172,24 +202,30 @@ bool parse_reaction_data(std::string_view text, ReactionTable& out, std::string&
             if (find_json_field(*temperature, "min_temperature") != nullptr) {
                 long long value = 0;
                 if (!require_json_int(
-                        *temperature, "min_temperature", -32767, 32767, value, error))
+                        *temperature, "min_temperature", -32767, 32767, value, error)) {
+                    error = "reactions[" + std::to_string(index) + "]: " + error;
                     return false;
+                }
                 spec.gate.has_min = true;
                 spec.gate.min_value = static_cast<int>(value);
             }
             if (find_json_field(*temperature, "max_temperature") != nullptr) {
                 long long value = 0;
                 if (!require_json_int(
-                        *temperature, "max_temperature", -32767, 32767, value, error))
+                        *temperature, "max_temperature", -32767, 32767, value, error)) {
+                    error = "reactions[" + std::to_string(index) + "]: " + error;
                     return false;
+                }
                 spec.gate.has_max = true;
                 spec.gate.max_value = static_cast<int>(value);
             }
         }
         if (find_json_field(entry, "product_temperature") != nullptr) {
             long long value = 0;
-            if (!require_json_int(entry, "product_temperature", -32767, 32767, value, error))
+            if (!require_json_int(entry, "product_temperature", -32767, 32767, value, error)) {
+                error = "reactions[" + std::to_string(index) + "]: " + error;
                 return false;
+            }
             spec.has_product_temperature = true;
             spec.product_temperature = static_cast<int>(value);
         }

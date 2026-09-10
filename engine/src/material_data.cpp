@@ -27,6 +27,7 @@ bool movement_from_string(std::string_view name, Movement& out) {
 }
 
 bool validate_material_table(const MaterialTable& table, std::string& error) {
+    error.clear();
     if (table.version != 1) {
         error = "unsupported data version (want 1)";
         return false;
@@ -35,11 +36,17 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
         error = "\"materials\" must be a non-empty array";
         return false;
     }
+    // BEHAVIOR(v2-loader): 256-row count bound (P5). Old behavior accepted
+    // unbounded programmatic tables. Pinned by Task T V-battery.
+    if (table.materials.size() > 256) {
+        error = "\"materials\" must hold at most 256 entries";
+        return false;
+    }
     bool seen_id[256] = {};
     bool has_air = false;
     for (const MaterialSpec& spec : table.materials) {
         if (seen_id[spec.id]) {
-            error = "duplicate material id";
+            error = "duplicate material id " + std::to_string(spec.id);
             return false;
         }
         seen_id[spec.id] = true;
@@ -57,8 +64,27 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
             error = "material \"" + spec.name + "\" is solid but not static";
             return false;
         }
-        if (spec.movement == Movement::Gas && spec.solid) {
-            error = "material \"" + spec.name + "\" is gas but solid";
+        // BEHAVIOR(v2-loader): exhaustive Movement check (P5). Old behavior
+        // let a forged enum (e.g. static_cast<Movement>(7)) fall through every
+        // branch in step() so the cell silently disappeared. Pinned by Task T
+        // V-battery. NOTE: the old gas+solid duplicate branch was deleted here
+        // (unreachable — the solid-nonstatic check above already rejects it).
+        switch (spec.movement) {
+            case Movement::Static:
+            case Movement::Powder:
+            case Movement::Liquid:
+            case Movement::Gas:
+                break;
+            default:
+                error = "material \"" + spec.name + "\" has unknown movement";
+                return false;
+        }
+        // BEHAVIOR(v2-loader): density bound mirrored from the JSON route
+        // (P5; mirrors the 0..100000 require_json_int bound below). Old
+        // programmatic route accepted any int. Pinned by Task T V-battery.
+        // Zero-density dynamic and static-nonsolid stay legal (no new rules).
+        if (spec.density < 0 || spec.density > 100000) {
+            error = "material \"" + spec.name + "\" density must be 0..100000";
             return false;
         }
         if (spec.hardness < 0 || spec.hardness > 6) {
@@ -114,7 +140,11 @@ MaterialTable default_material_table() {
 }
 
 bool parse_material_data(std::string_view text, MaterialTable& out, std::string& error) {
-    out = MaterialTable{};
+    // BEHAVIOR(v2-loader): transactional output (P6 core). Old behavior
+    // cleared `out` up front, so a failed parse destroyed the caller's prior
+    // table; now `out` is committed only on success. Pinned by Task T V-battery
+    // (failed reload preserves cells+heat+reactions+tick).
+    error.clear();
     JsonParser parser(text);
     JsonValue root;
     if (!parser.run(root)) {
@@ -139,53 +169,68 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
     std::vector<std::string> seen_names;
     MaterialTable table;
     table.version = 1;
-    for (const JsonValue& entry : materials->items) {
+    for (std::size_t index = 0; index < materials->items.size(); ++index) {
+        // V3-core row context (P7 token offsets deferred to Group 3).
+        const std::string row = "materials[" + std::to_string(index) + "]: ";
+        const JsonValue& entry = materials->items[index];
         if (entry.type != JsonValue::Type::Object) {
-            error = "material entry must be an object";
+            error = row + "material entry must be an object";
             return false;
         }
         long long id = 0;
-        if (!require_json_int(entry, "id", 0, 255, id, error)) return false;
+        if (!require_json_int(entry, "id", 0, 255, id, error)) {
+            error = row + error;
+            return false;
+        }
         if (seen_id[static_cast<std::size_t>(id)]) {
-            error = "duplicate material id";
+            error = row + "duplicate material id " + std::to_string(id);
             return false;
         }
         std::string name;
         if (!require_json_string(entry, "name", name, error) || name.empty()) {
-            error = "material \"name\" must be a non-empty string";
+            error = row + "material \"name\" must be a non-empty string";
             return false;
         }
         for (const std::string& taken : seen_names) {
             if (taken == name) {
-                error = "duplicate material name \"" + name + "\"";
+                error = row + "duplicate material name \"" + name + "\"";
                 return false;
             }
         }
         std::string movement_name;
-        if (!require_json_string(entry, "movement", movement_name, error)) return false;
+        if (!require_json_string(entry, "movement", movement_name, error)) {
+            error = row + error;
+            return false;
+        }
         Movement movement = Movement::Static;
         if (!movement_from_string(movement_name, movement)) {
-            error = "unknown movement \"" + movement_name + "\" (want static/powder/liquid/gas)";
+            error = row + "unknown movement \"" + movement_name + "\" (want static/powder/liquid/gas)";
             return false;
         }
         bool solid = false;
-        if (!require_json_bool(entry, "solid", solid, error)) return false;
+        if (!require_json_bool(entry, "solid", solid, error)) {
+            error = row + error;
+            return false;
+        }
         if (solid && movement != Movement::Static) {
-            error = "material \"" + name + "\" is solid but not static";
+            error = row + "material \"" + name + "\" is solid but not static";
             return false;
         }
         long long density = 0;
-        if (!require_json_int(entry, "density", 0, 100000, density, error)) return false;
+        if (!require_json_int(entry, "density", 0, 100000, density, error)) {
+            error = row + error;
+            return false;
+        }
         const JsonValue* color = find_json_field(entry, "color");
         if (color == nullptr || color->type != JsonValue::Type::Array || color->items.size() != 3) {
-            error = "material \"color\" must be an array of 3 integers";
+            error = row + "material \"color\" must be an array of 3 integers";
             return false;
         }
         std::array<std::uint8_t, 3> rgb = {0, 0, 0};
         for (std::size_t c = 0; c < 3; ++c) {
             if (color->items[c].type != JsonValue::Type::Int || color->items[c].integer < 0 ||
                 color->items[c].integer > 255) {
-                error = "material \"color\" channels must be integers 0..255";
+                error = row + "material \"color\" channels must be integers 0..255";
                 return false;
             }
             rgb[c] = static_cast<std::uint8_t>(color->items[c].integer);
@@ -200,12 +245,12 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         const JsonValue* tags = find_json_field(entry, "tags");
         if (tags != nullptr) {
             if (tags->type != JsonValue::Type::Array) {
-                error = "material \"tags\" must be an array of strings";
+                error = row + "material \"tags\" must be an array of strings";
                 return false;
             }
             for (const JsonValue& tag : tags->items) {
                 if (tag.type != JsonValue::Type::String || tag.str.empty()) {
-                    error = "material \"tags\" must be non-empty strings";
+                    error = row + "material \"tags\" must be non-empty strings";
                     return false;
                 }
                 spec.tags.push_back(tag.str);
@@ -214,7 +259,10 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         const JsonValue* hardness_field = find_json_field(entry, "hardness");
         if (hardness_field != nullptr) {
             long long hardness = 0;
-            if (!require_json_int(entry, "hardness", 0, 6, hardness, error)) return false;
+            if (!require_json_int(entry, "hardness", 0, 6, hardness, error)) {
+                error = row + error;
+                return false;
+            }
             spec.hardness = static_cast<int>(hardness);
         }
         table.materials.push_back(std::move(spec));
