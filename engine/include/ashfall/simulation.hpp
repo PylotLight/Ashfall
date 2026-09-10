@@ -61,9 +61,9 @@ public:
     // Deterministic integer conduction runs each step(); queries read the
     // settled post-step state. Setting 0 erases the entry. Out-of-range
     // values clamp to int16. Heat may be set on any position (even air);
-    // P2.5 carries heat with moving material via `stage_heat_carry`
-    // (destination-keyed, applied post-swap); temps whose cell is gone are
-    // pruned pre-conduction.
+    // P2.5 carries heat with moving material via staged next-state temps
+    // (heat_next_scratch_, committed post-swap); temps whose cell is gone
+    // are pruned pre-conduction (backstop — see conduct_temperature).
     void set_temperature(CellPosition position, int temperature);
     [[nodiscard]] int temperature(CellPosition position) const;
     [[nodiscard]] std::size_t temperature_count() const noexcept { return temps_.size(); }
@@ -122,8 +122,7 @@ public:
     // infiltration swaps (gas never swaps). `changed_positions` = removals +
     // changes + additions counted in the two reconcile diff loops.
     // `dirty_chunk_marks` = mark_chunk_dirty calls at the three reconcile
-    // call sites (not global). `carried_heat` = heat_carry_scratch_.size()
-    // at apply time. `nonzero_temps` = temps_.size() post-step.
+    // call sites (not global). `carried_heat` = heat_next_scratch_.size() at commit time. `nonzero_temps` = temps_.size() post-step.
     [[nodiscard]] const StepCounters& last_step_counters() const noexcept { return last_counters_; }
 #endif
 
@@ -172,18 +171,36 @@ private:
     std::vector<MaterialId> material_order_;
     [[nodiscard]] int temperature_at(CellPosition position) const;
     void conduct_temperature();
-    // Heat advection: movement stages each mover's tick-start temperature
-    // keyed by destination; step() applies the stages post-swap (before
-    // conduction), so heat rides the material instead of pruning at the
-    // vacated cell. Destinations are unique per tick (mass conservation),
-    // so last-write conflicts cannot occur.
+    // Heat advection, cell-owned (Group 2, Task H, 2026-09-10).
+    // OLD behavior: stage_heat_carry read temps_[from] (tick-start, coordinate
+    // key) into a vector of (dest, temp) pairs applied post-swap, and old
+    // source entries were never cleared. A cold cell moving into the old
+    // location of a hot cell inherited the stale coordinate temp (duplication:
+    // heat stuck to the old coordinate AND followed the material), and an
+    // infiltration-displaced in-flight arrival staged the old coordinate's
+    // temp instead of the arrival's. Pinned by BEHAVIOR(v2-heat) tests (Task T).
+    // NEW behavior: movement stages every cell it writes into heat_next_scratch_
+    // (next-state temps shadowing temps_); a written cell with no staged entry
+    // implicitly reads ambient 0, which is CORRECT by construction (nothing
+    // stale survives — the bug class is eliminated structurally, not by
+    // clearing). heat_of reads staged-next FIRST (the §3.2 infiltration fix:
+    // an in-flight arrival's staged temp wins over the old coordinate's temp).
+    // stage_heat_carry moves one payload; stage_heat_swap moves two atomically
+    // (both heats are read before either is written — sequential stages would
+    // read back the just-staged partner). step() commits heat_next_scratch_
+    // into temps_ post-swap; conduct_temperature() is unchanged.
+    [[nodiscard]] int heat_of(CellPosition position) const;
     void stage_heat_carry(CellPosition from, CellPosition to);
-
-    std::vector<std::pair<CellPosition, std::int16_t>> heat_carry_scratch_;
+    void stage_heat_swap(CellPosition first, CellPosition second);
 
     using FlatTemps = FlatMap<CellPosition, std::int16_t, CellPositionHash>;
     FlatTemps temps_;
     FlatTemps temp_scratch_;
+    // Next-state temperatures staged by movement, committed into temps_ after
+    // the cells_ swap. Cleared + reserve_for(temps_.size() + 16) at step top
+    // (F3 spirit: sized from the working set). Sparse invariant: only nonzero
+    // is stored, mirroring temps_.
+    FlatTemps heat_next_scratch_;
     std::vector<CellPosition> temp_prune_scratch_;
     struct ReactionSlot {
         bool is_tag = false;

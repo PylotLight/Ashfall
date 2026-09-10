@@ -237,7 +237,7 @@ void SimulationWorld::reset() {
     temps_.clear();
     temp_scratch_.clear();
     temp_prune_scratch_.clear();
-    heat_carry_scratch_.clear();
+    heat_next_scratch_.clear();
     tick_ = 0;
 }
 
@@ -472,6 +472,10 @@ void SimulationWorld::step() {
     FlatMarks& stayed = stayed_scratch_;
     stayed.clear();
     stayed.reserve_for(cells_.size());
+    // Next-state heat staging (Group 2, Task H): cleared + sized from the
+    // working set every tick, mirroring next_ above (F3 spirit).
+    heat_next_scratch_.clear();
+    heat_next_scratch_.reserve_for(temps_.size() + 16);
 #ifdef ASHFALL_STEP_INSTRUMENT
     // clear_reserve covers next.clear/reserve + scratch clears/reserves at
     // the top of step().
@@ -482,6 +486,9 @@ void SimulationWorld::step() {
     current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
         if (material(material_id).movement == Movement::Static) {
             next.insert_or_assign(position, material_id);
+            // Every written cell stages (Task H): a static home with no staged
+            // entry would implicitly read ambient 0 at commit and lose heat.
+            stage_heat_carry(position, position);
         } else {
             dynamic_cells.push_back({position, material_id});
         }
@@ -544,8 +551,11 @@ void SimulationWorld::step() {
                     MaterialId displaced = *occupant;
                     next.insert_or_assign(dest, material_id);
                     next.insert_or_assign(source, displaced);
-                    stage_heat_carry(source, dest);
-                    stage_heat_carry(dest, source);
+                    // Atomic swap (Task H): sequential stages would read back
+                    // the just-staged partner via heat_of's staged-next-first
+                    // rule. Same pattern at the liquid density swap and the
+                    // infiltration pair below.
+                    stage_heat_swap(source, dest);
 #ifdef ASHFALL_STEP_INSTRUMENT
                     ++swaps;
 #endif
@@ -572,6 +582,7 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
                 ++powder_moves;
@@ -616,8 +627,8 @@ void SimulationWorld::step() {
                         const MaterialId displaced = *occupant;
                         next.insert_or_assign(down, material_id);
                         next.insert_or_assign(source, displaced);
-                        stage_heat_carry(source, down);
-                        stage_heat_carry(down, source);
+                        // Atomic swap (Task H): see the powder swap above.
+                        stage_heat_swap(source, down);
                         moved = true;
 #ifdef ASHFALL_STEP_INSTRUMENT
                         ++swaps;
@@ -711,8 +722,11 @@ void SimulationWorld::step() {
                             (escapable(seep_l) || escapable(seep_r))) {
                             next.insert_or_assign(down, material_id);
                             next.insert_or_assign(source, below_id);
-                            stage_heat_carry(source, down);
-                            stage_heat_carry(down, source);
+                            // Atomic swap (Task H): `down` may hold an in-flight
+                            // arrival whose staged temp must win over the old
+                            // coordinate's temp (§3.2 fix) — and sequential
+                            // stages would clobber it. See the powder swap.
+                            stage_heat_swap(source, down);
                             moved = true;
 #ifdef ASHFALL_STEP_INSTRUMENT
                             ++swaps;
@@ -724,6 +738,7 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
                 ++liquid_moves;
@@ -803,6 +818,7 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
                 ++gas_moves;
@@ -876,11 +892,28 @@ void SimulationWorld::step() {
 #endif
     ++tick_;
 #ifdef ASHFALL_STEP_INSTRUMENT
-    const std::size_t carried_heat = heat_carry_scratch_.size();
+    // Group 2, Task H: carried_heat is the staged next-state temp count at
+    // commit (was heat_carry_scratch_.size() at apply time).
+    const std::size_t carried_heat = heat_next_scratch_.size();
     const auto heat_carry_t0 = std::chrono::steady_clock::now();
 #endif
-    for (const auto& [dest, temp] : heat_carry_scratch_) temps_.insert_or_assign(dest, temp);
-    heat_carry_scratch_.clear();
+    // Cell-owned heat commit (Group 2, Task H): temps_ is rebuilt from the
+    // staged next-state temps — every staged key accompanies a written `next`
+    // cell, because every movement write site stages every cell it writes
+    // (place-backs stage source→source; swaps stage atomically). A written
+    // cell with no staged entry reads ambient 0 by construction. Old
+    // coordinate entries cannot survive: the old table is discarded, not
+    // patched (this structural discard is what eliminates the §3.1
+    // duplication class — no explicit source-clearing pass exists).
+#ifndef NDEBUG
+    heat_next_scratch_.for_each([&](const CellPosition& position, const std::int16_t&) {
+        assert(cells_.contains(position));
+    });
+#endif
+    temps_.clear();
+    std::swap(temps_, heat_next_scratch_);
+    // heat_next_scratch_ now holds the cleared old table (empty, with its
+    // capacity retained); step top re-clears + re-reserves it per tick.
 #ifdef ASHFALL_STEP_INSTRUMENT
     timings.heat_carry_ms = step_ms_between(heat_carry_t0, std::chrono::steady_clock::now());
     const auto conduct_t0 = std::chrono::steady_clock::now();
@@ -1348,9 +1381,41 @@ int SimulationWorld::temperature_at(CellPosition position) const {
     return found == nullptr ? 0 : static_cast<int>(*found);
 }
 
+int SimulationWorld::heat_of(CellPosition position) const {
+    // Staged-next FIRST (the §3.2 infiltration fix): an in-flight arrival's
+    // staged temp wins over the old coordinate's temp in temps_.
+    if (const std::int16_t* staged = heat_next_scratch_.find(position)) return *staged;
+    return temperature_at(position);
+}
+
 void SimulationWorld::stage_heat_carry(CellPosition from, CellPosition to) {
-    const std::int16_t* found = temps_.find(from);
-    if (found != nullptr) heat_carry_scratch_.emplace_back(to, *found);
+    // Stage `to ← heat_of(from)`, storing ONLY nonzero (sparse invariant, mirroring
+    // temps_). Staging ambient erases any entry: destinations are written at most
+    // once per tick except infiltration overwrites (handled atomically via
+    // stage_heat_swap), so an erase here only removes a same-tick stale entry.
+    const int heat = heat_of(from);
+    if (heat != 0) {
+        heat_next_scratch_.insert_or_assign(to, static_cast<std::int16_t>(heat));
+    } else {
+        heat_next_scratch_.erase(to);
+    }
+}
+
+void SimulationWorld::stage_heat_swap(CellPosition first, CellPosition second) {
+    // Atomic payload swap: both heats are read BEFORE either is written, so
+    // heat_of's staged-next-first rule cannot read back the just-staged partner.
+    const int first_heat = heat_of(first);
+    const int second_heat = heat_of(second);
+    if (first_heat != 0) {
+        heat_next_scratch_.insert_or_assign(second, static_cast<std::int16_t>(first_heat));
+    } else {
+        heat_next_scratch_.erase(second);
+    }
+    if (second_heat != 0) {
+        heat_next_scratch_.insert_or_assign(first, static_cast<std::int16_t>(second_heat));
+    } else {
+        heat_next_scratch_.erase(first);
+    }
 }
 
 int SimulationWorld::temperature(CellPosition position) const { return temperature_at(position); }
@@ -1360,10 +1425,13 @@ void SimulationWorld::conduct_temperature() {
     // branch per tick and the hot loop is untouched (perf note: conduction
     // is O(occupied) integer ops only while heat exists).
     if (temps_.empty()) return;
-    // P2.5 carries heat with moving material via `stage_heat_carry`
-    // (destination-keyed, applied post-swap); temps whose cell is gone are
-    // pruned pre-conduction, or falling hot material would heat its own wake
-    // through the stale snapshot entry.
+    // P2.5 carries heat with moving material via staged next-state temps
+    // (heat_next_scratch_, committed post-swap); the prune below is kept as a
+    // BACKSTOP (Group 2, Task H — do not delete): commit already discards old
+    // coordinate entries structurally, so this is normally a no-op, but
+    // set_temperature on air stays legal until v3 (S4 gate) and temps whose
+    // cell is gone must still be pruned pre-conduction, or falling hot
+    // material would heat its own wake through the stale snapshot entry.
     temp_prune_scratch_.clear();
     temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
         if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);
