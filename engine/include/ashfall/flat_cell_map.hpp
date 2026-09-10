@@ -62,6 +62,10 @@ public:
     // Counting rules: every examined slot counts, including the terminating
     // empty slot on a miss. find/contains walks record hit or miss.
     // insert_or_assign walks record insert or update at completion.
+    // find_or_insert walks record exactly one walk per call: hit when the key
+    // is present (value untouched), insert when the key is absent (value
+    // stored). A growth rehash on miss precedes the recorded walk; rehash
+    // internal re-inserts do NOT record (same exclusion as below).
     // operator[] records its find walk plus (on miss) its insert walk.
     // erase's walk records hit or miss. rehash internal re-inserts do NOT
     // record: they measure table history (growth/shrink choices), not the
@@ -140,6 +144,63 @@ public:
         const std::ptrdiff_t slot = find_slot_impl(key, ignored);
         assert(slot >= 0);
         return values_[static_cast<std::size_t>(slot)];
+    }
+
+    struct FindOrInsertResult { Value* ptr; bool inserted; };
+    // Claim-or-observe WITHOUT overwrite (differs from insert_or_assign):
+    // exactly one probe walk at adequate capacity; no growth on hit; on miss
+    // the table grows first if needed (then a fresh walk). Returned ptr is to
+    // the VALUE only — keys are immutable. Any insert may rehash (same rule as
+    // insert_or_assign); a rehash invalidates previously returned pointers.
+    // Probe accounting: hit walks record as hits, miss walks as inserts
+    // (see the counting-rules comment above probe_counters()).
+    // Old-vs-new behavior (2026-09-10, Group 2 Task F): this primitive is new;
+    // previously callers needing claim-or-observe composed contains/find +
+    // insert (two walks, TOCTOU-shaped duplication risk). Pinned by
+    // test_find_or_insert_* in tests/flat_map_tests.cpp. Task S's duplicate
+    // check (find_or_insert + !inserted → reject) builds on this API.
+    FindOrInsertResult find_or_insert(const Key& key, Value value) {
+        if (capacity_ == 0) rehash(64);
+        for (;;) {
+            std::size_t mask = capacity_ - 1;
+            std::size_t slot = static_cast<std::size_t>(hasher_(key)) & mask;
+            std::ptrdiff_t first_tomb = -1;
+            std::uint64_t examined = 0;
+            for (;;) {
+                ++examined;
+#ifndef NDEBUG
+                // Debug-only probe bound, symmetric with insert_or_assign. (F1)
+                assert(examined <= capacity_);
+#endif
+                const std::uint8_t occ = occupied_[slot];
+                if (occ == 0) {
+                    // Miss: grow first if at threshold (same rule as
+                    // insert_or_assign), then a fresh walk. The walk above is
+                    // discarded unrecorded, so each call records exactly one
+                    // walk. Hits below never reach this branch: no growth on
+                    // hit.
+                    if ((size_ + tombstones_) * 2 >= capacity_) {
+                        rehash(capacity_ * 2);
+                        break; // fresh walk at the new capacity
+                    }
+                    const std::size_t target =
+                        first_tomb >= 0 ? static_cast<std::size_t>(first_tomb) : slot;
+                    keys_[target] = key;
+                    values_[target] = std::move(value);
+                    occupied_[target] = 1;
+                    if (first_tomb >= 0) --tombstones_;
+                    ++size_;
+                    record_write_walk(examined, true);
+                    return {&values_[target], true};
+                }
+                if (occ == 1 && keys_[slot] == key) {
+                    record_read_walk(examined, true);
+                    return {&values_[slot], false};
+                }
+                if (occ == 2 && first_tomb < 0) first_tomb = static_cast<std::ptrdiff_t>(slot);
+                slot = (slot + 1) & mask;
+            }
+        }
     }
 
     void erase(const Key& key) {

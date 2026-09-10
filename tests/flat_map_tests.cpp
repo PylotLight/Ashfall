@@ -178,6 +178,103 @@ void test_miss_counts_terminating_slot() {
     expect(c.hits == 0u && c.inserts == 0u && c.updates == 0u, "no other walks recorded");
 }
 
+void test_find_or_insert_hit_keeps_value() {
+    ashfall::FlatMap<int, int, IntHash> map;
+    map.insert_or_assign(42, 100);
+    map.reset_probe_counters();
+    auto result = map.find_or_insert(42, 999);
+    expect(!result.inserted, "find_or_insert on a present key reports inserted=false");
+    expect(result.ptr != nullptr && *result.ptr == 100,
+        "find_or_insert hit returns the EXISTING value (no overwrite)");
+    expect(map.size() == 1u, "find_or_insert hit does not change size");
+    const auto c = map.probe_counters();
+    expect(c.hits == 1u && c.inserts == 0u && c.updates == 0u && c.misses == 0u,
+        "hit records exactly one hit walk (no insert/update)");
+    expect(histogram_total(c) == walk_total(c), "histogram buckets sum to total walks");
+    // Functional checks after the counter snapshot (their walks are irrelevant now).
+    const int* stored = map.find(42);
+    expect(stored != nullptr && *stored == 100, "stored value unchanged after hit");
+    expect(result.ptr == stored, "returned ptr aliases the table's value slot");
+}
+
+void test_find_or_insert_miss_inserts() {
+    ashfall::FlatMap<int, int, IntHash> map;
+    map.reserve_for(1);
+    map.reset_probe_counters();
+    auto result = map.find_or_insert(7, 70);
+    expect(result.inserted, "find_or_insert on an absent key reports inserted=true");
+    expect(result.ptr != nullptr && *result.ptr == 70, "miss stores the passed value");
+    expect(map.size() == 1u, "miss grows the map by one");
+    const auto c = map.probe_counters();
+    expect(c.inserts == 1u && c.hits == 0u && c.updates == 0u && c.misses == 0u,
+        "miss records exactly one insert walk (no hit/miss/update)");
+    expect(c.insert_probes >= 1u, "insert walk counts its examined slots");
+    // Functional checks after the counter snapshot (their walks are irrelevant now).
+    const int* stored = map.find(7);
+    expect(stored != nullptr && *stored == 70, "missed key is findable afterwards");
+    expect(result.ptr == stored, "returned ptr aliases the inserted slot");
+    // A second claim on the same key observes without overwriting — the Task S
+    // duplicate-check pattern (find_or_insert + !inserted → reject).
+    auto dup = map.find_or_insert(7, 777);
+    expect(!dup.inserted && *dup.ptr == 70, "duplicate claim observes the first value");
+    expect(map.size() == 1u, "duplicate claim does not add an entry");
+}
+
+void test_find_or_insert_growth_rules() {
+    ashfall::FlatMap<int, int, IntHash> map;
+    for (int i = 0; i < 32; ++i) map.insert_or_assign(i, i);
+    // Growth fires when (size+tombstones)*2 >= capacity BEFORE an insert, so
+    // 32 entries still fit the minimum 64-slot table exactly at threshold.
+    expect(map.capacity() == std::size_t{64}, "32 entries sit at the 64-slot threshold");
+    const std::size_t cap = map.capacity();
+    auto hit = map.find_or_insert(5, 5000);
+    expect(!hit.inserted && *hit.ptr == 5, "hit at threshold observes the value");
+    expect(map.capacity() == cap, "hit at threshold never grows the table");
+    auto miss = map.find_or_insert(1000, 7);
+    expect(miss.inserted && *miss.ptr == 7, "miss at threshold still inserts");
+    expect(map.capacity() == cap * 2, "miss at threshold grows first (64 -> 128)");
+    for (int i = 0; i < 32; ++i) {
+        const int* value = map.find(i);
+        expect(value != nullptr && *value == i, "pre-growth entries survive the miss growth");
+    }
+    expect(*map.find(1000) == 7, "threshold-miss entry readable after growth");
+}
+
+void test_find_or_insert_collision_chain() {
+    ashfall::FlatMap<int, int, ConstHash> map;
+    for (int i = 1; i <= 10; ++i) {
+        auto r = map.find_or_insert(i, i * 10);
+        expect(r.inserted && *r.ptr == i * 10, "colliding miss inserts at the chain tail");
+    }
+    expect(map.size() == 10u, "all colliding inserts land");
+    map.reset_probe_counters();
+    auto deep = map.find_or_insert(10, 9999);
+    expect(!deep.inserted && *deep.ptr == 100, "deep-chain hit keeps its value");
+    const auto c = map.probe_counters();
+    expect(c.hits == 1u && c.inserts == 0u, "deep-chain hit records one hit walk");
+    map.erase(3);
+    auto reused = map.find_or_insert(3, 333);
+    expect(reused.inserted && *reused.ptr == 333, "claim reuses a tombstone slot");
+    for (int i = 1; i <= 10; ++i) {
+        const int expected = (i == 3) ? 333 : i * 10;
+        const int* value = map.find(i);
+        expect(value != nullptr && *value == expected, "chain intact across tombstone reuse");
+    }
+}
+
+void test_insert_or_assign_still_overwrites() {
+    ashfall::FlatMap<int, int, IntHash> map;
+    map.insert_or_assign(1, 10);
+    auto observed = map.find_or_insert(1, 20);
+    expect(!observed.inserted && *observed.ptr == 10,
+        "find_or_insert does NOT overwrite (stays distinct from insert_or_assign)");
+    map.reset_probe_counters();
+    map.insert_or_assign(1, 20);
+    expect(*map.find(1) == 20, "insert_or_assign still overwrites the value");
+    const auto c = map.probe_counters();
+    expect(c.updates == 1u && c.inserts == 0u, "overwrite records an update, not an insert");
+}
+
 } // namespace
 
 int main() {
@@ -186,5 +283,10 @@ int main() {
     test_stateful_hash_survives_rehash();
     test_probe_accounting_on_collision_chain();
     test_miss_counts_terminating_slot();
+    test_find_or_insert_hit_keeps_value();
+    test_find_or_insert_miss_inserts();
+    test_find_or_insert_growth_rules();
+    test_find_or_insert_collision_chain();
+    test_insert_or_assign_still_overwrites();
     return 0;
 }
