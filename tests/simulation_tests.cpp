@@ -5,7 +5,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -42,7 +45,10 @@ void test_water_surfer_drains_off_flat_layer() {
     expect(world.occupied_cell_count() == 21 + 11 + 1, "surfer scenario conserves mass");
 }
 
-void test_water_surface_flattens_in_basin() {
+void test_partial_surface_remains_level() {
+    // Honest name for the old flattening fixture: its sparse top row already
+    // differs by at most one per column before stepping, so it pins level
+    // preservation, not genuine flattening (see the uneven test below).
     ashfall::SimulationWorld world;
     world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
     world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
@@ -50,7 +56,6 @@ void test_water_surface_flattens_in_basin() {
     world.fill_rect({1, 9}, {19, 9}, ashfall::kWater); // full bottom layer
     for (int x = 2; x <= 17; x += 3) world.set_cell({x, 8}, ashfall::kWater); // sparse dotted top row
 
-    std::vector<std::uint8_t> previous = world.save();
     for (int i = 0; i < 300; ++i) world.step();
     // NOTE: a partial top row has no sink, so individual cells may still trade
     // places (gentle surface shimmer, smoothed out by the water renderer).
@@ -75,6 +80,52 @@ void test_water_surface_flattens_in_basin() {
     }
     expect(total_water == 19 + 6, "flattening conserves mass");
     expect(max_height - min_height <= 1, "settled surface is level within one cell");
+}
+
+void test_uneven_water_mound_flattens_in_basin() {
+    // Genuinely uneven start: a tall mound on one side (columns differ by 6
+    // up front), so the oracle measures real flattening — topmost-water
+    // descent plus bottom-contiguous columns, with empty columns included
+    // in the height compare (excluding them hides split surfaces).
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
+    world.fill_rect({0, 0}, {0, 10}, ashfall::kStone);
+    world.fill_rect({20, 0}, {20, 10}, ashfall::kStone);
+    world.fill_rect({1, 9}, {19, 9}, ashfall::kWater); // full bottom layer (19)
+    world.fill_rect({1, 3}, {3, 8}, ashfall::kWater);  // mound on the left (3x6=18)
+    const int kTotalWater = 19 + 18;
+
+    int initial_top = 99;
+    for (int y = 0; y <= 9; ++y) {
+        for (int x = 1; x <= 19; ++x) {
+            if (world.cell({x, y}) == ashfall::kWater) initial_top = std::min(initial_top, y);
+        }
+    }
+    expect(initial_top == 3, "mound starts genuinely uneven");
+
+    for (int i = 0; i < 300; ++i) world.step();
+
+    int top = 99, min_height = 99, max_height = 0, total_water = 0;
+    for (int x = 1; x <= 19; ++x) {
+        int height = 0;
+        for (int y = 0; y <= 9; ++y) {
+            if (world.cell({x, y}) == ashfall::kWater) {
+                ++height;
+                ++total_water;
+                top = std::min(top, y);
+            }
+        }
+        // Bottom-contiguous: no floating water or internal air gaps — every
+        // column is a solid stack rising from the floor row.
+        for (int y = 9; y > 9 - height; --y) {
+            expect(world.cell({x, y}) == ashfall::kWater, "settled columns are bottom-contiguous");
+        }
+        min_height = std::min(min_height, height);
+        max_height = std::max(max_height, height);
+    }
+    expect(total_water == kTotalWater, "mound flattening conserves mass");
+    expect(top >= 7, "mound top descends as the surface levels");
+    expect(max_height - min_height <= 1, "leveled heights agree within one cell, empty columns included");
 }
 
 void test_chunks_work_across_negative_boundary() {
@@ -137,10 +188,25 @@ void test_chunk_and_rect_reading() {
     expect(chunk_buffer[10 * ashfall::kChunkSize + 5] == ashfall::kSand, "cell value read in chunk buffer");
     expect(chunk_buffer[0] == ashfall::kAir, "unmodified cells in chunk are air");
 
-    // Reading unallocated chunk fills buffer with air
+    // Reading a missing chunk succeeds and fills the WHOLE output with air.
     std::vector<ashfall::MaterialId> empty_chunk(ashfall::kChunkSize * ashfall::kChunkSize, ashfall::kSand);
     expect(world.read_chunk({1, 1}, empty_chunk), "read unallocated chunk succeeds");
-    expect(empty_chunk[0] == ashfall::kAir, "unallocated chunk filled with air");
+    expect(empty_chunk.size() == 4096, "chunk buffer holds 64x64 cells");
+    expect(std::all_of(empty_chunk.begin(), empty_chunk.end(),
+                       [](ashfall::MaterialId m) { return m == ashfall::kAir; }),
+        "unallocated chunk filled with air");
+    // copy_rect over a mixed populated/missing region with a non-air
+    // prefill: missing cells must read back as air, never prefill residue.
+    world.set_cell({63, 63}, ashfall::kStone);
+    std::vector<ashfall::MaterialId> mixed(64, static_cast<ashfall::MaterialId>(0xFF));
+    world.copy_rect({60, 60}, {67, 67}, mixed);
+    for (int y = 60; y <= 67; ++y) {
+        for (int x = 60; x <= 67; ++x) {
+            const ashfall::MaterialId want = (x == 63 && y == 63) ? ashfall::kStone : ashfall::kAir;
+            const std::size_t index = static_cast<std::size_t>((y - 60) * 8 + (x - 60));
+            expect(mixed[index] == want, "mixed populated/missing rect reads stone amid air");
+        }
+    }
 
     // copy_rect test across a 4x4 area
     std::vector<ashfall::MaterialId> rect_buffer(16, ashfall::kAir);
@@ -265,21 +331,40 @@ void test_settling_reaches_steady_state() {
     // Drop a pile of sand from mid-height
     world.fill_rect({8, 2}, {12, 6}, ashfall::kSand);
 
+    // Semantic cell-state compare over the basin (never sliced save bytes:
+    // the tick header and any future framing would couple the oracle to
+    // the serialization layout).
+    auto snapshot = [&]() {
+        std::vector<ashfall::MaterialId> buf(static_cast<std::size_t>(21 * 21), ashfall::kAir);
+        world.copy_rect({0, 0}, {20, 20}, buf);
+        return buf;
+    };
+    // Bounded evidence, not proof: one unchanged tick is a pause (arbitration
+    // can resume motion later), so demand 10 consecutive unchanged ticks.
     bool reached_steady_state = false;
-    std::vector<std::uint8_t> prev_save = world.save();
-
-    for (int i = 0; i < 200; ++i) {
+    std::vector<ashfall::MaterialId> previous = snapshot();
+    for (int i = 0; i < 200 && !reached_steady_state; ++i) {
         world.step();
-        std::vector<std::uint8_t> cur_save = world.save();
-        // Compare cell payload (ignoring 8-byte tick at offset 8..15)
-        if (cur_save.size() == prev_save.size() &&
-            std::equal(cur_save.begin() + 16, cur_save.end(), prev_save.begin() + 16)) {
+        const std::vector<ashfall::MaterialId> current = snapshot();
+        if (current == previous) {
             reached_steady_state = true;
-            break;
+            for (int w = 0; w < 10; ++w) {
+                world.step();
+                if (snapshot() != previous) {
+                    reached_steady_state = false;
+                    previous = snapshot();
+                    break;
+                }
+            }
+        } else {
+            previous = current;
         }
-        prev_save = cur_save;
     }
     expect(reached_steady_state, "sand reaches steady state / quiescence in basin");
+    // Settled pile fills its footprint row directly above the stone floor.
+    for (int x = 8; x <= 12; ++x) {
+        expect(world.cell({x, 19}) == ashfall::kSand, "settled sand fills the floor footprint row");
+    }
 }
 
 void test_water_reaches_steady_state() {
@@ -289,19 +374,37 @@ void test_water_reaches_steady_state() {
     world.fill_rect({8, 0}, {8, 10}, ashfall::kStone);
     world.fill_rect({4, 1}, {4, 7}, ashfall::kWater);
 
-    std::vector<std::uint8_t> previous = world.save();
+    // Semantic cell-state compare over the basin (never sliced save bytes).
+    auto snapshot = [&]() {
+        std::vector<ashfall::MaterialId> buf(static_cast<std::size_t>(9 * 11), ashfall::kAir);
+        world.copy_rect({0, 0}, {8, 10}, buf);
+        return buf;
+    };
+    // Bounded evidence, not proof: demand 10 consecutive unchanged ticks.
+    std::vector<ashfall::MaterialId> previous = snapshot();
     bool reached_steady_state = false;
-    for (int i = 0; i < 200; ++i) {
+    for (int i = 0; i < 200 && !reached_steady_state; ++i) {
         world.step();
-        const std::vector<std::uint8_t> current = world.save();
-        if (current.size() == previous.size() &&
-            std::equal(current.begin() + 16, current.end(), previous.begin() + 16)) {
+        const std::vector<ashfall::MaterialId> current = snapshot();
+        if (current == previous) {
             reached_steady_state = true;
-            break;
+            for (int w = 0; w < 10; ++w) {
+                world.step();
+                if (snapshot() != previous) {
+                    reached_steady_state = false;
+                    previous = snapshot();
+                    break;
+                }
+            }
+        } else {
+            previous = current;
         }
-        previous = current;
     }
     expect(reached_steady_state, "water reaches steady state in a basin");
+    // The 7-cell column settles into the 7-wide bottom row exactly.
+    for (int x = 1; x <= 7; ++x) {
+        expect(world.cell({x, 9}) == ashfall::kWater, "settled water fills the bottom row");
+    }
 }
 
 void test_lone_water_droplet_rests() {
@@ -366,6 +469,7 @@ void test_play_level_layout() {
     world.build_play_level();
     expect(world.occupied_cell_count() > 0, "play level contains material");
     const ashfall::CellPosition spawn = ashfall::SimulationWorld::play_level_spawn();
+    // CONTENT: pins authored spawn {256,480} — level tuning, not physics.
     expect(spawn.x == 256 && spawn.y == 480, "spawn matches the 512 play level");
     expect(world.cell({spawn.x, spawn.y}) == ashfall::kStone, "spawn stands on the floor");
     expect(world.cell({spawn.x, spawn.y - 1}) == ashfall::kAir, "spawn feet cell is free");
@@ -384,6 +488,7 @@ void test_play_level_layout() {
     expect(world.cell({455, 320}) == ashfall::kStone, "fire pit kiln floor present");
     expect(world.cell({440, 315}) == ashfall::kStone, "fire pit west wall present");
     expect(world.cell({455, 310}) == ashfall::kStone, "fire pit lid present");
+    // CONTENT: authored kiln geometry pin — level tuning, not physics.
     std::size_t pit_wood = 0, pit_fire = 0;
     for (int y = 310; y <= 320; ++y) {
         for (int x = 440; x <= 470; ++x) {
@@ -394,39 +499,50 @@ void test_play_level_layout() {
     }
     expect(pit_wood == 19, "pit wood pile built");
     expect(pit_fire == 2, "pit starter built");
+    // CONTENT: pit holds exactly 19 wood + 2 fire — authored content pin.
     ashfall::SimulationWorld again;
     again.build_play_level();
     expect(again.save() == world.save(), "play level builds deterministically");
 }
 
 void test_water_trickles_down_sand_slope() {
-    ashfall::SimulationWorld world;
-    // Closed basin so cell counts are exact (nothing escapes the window).
-    world.fill_rect({0, 31}, {40, 31}, ashfall::kStone); // floor
-    world.fill_rect({0, 0}, {0, 31}, ashfall::kStone);   // left wall
-    world.fill_rect({40, 0}, {40, 31}, ashfall::kStone); // right wall
-    for (int i = 0; i < 10; ++i) world.fill_rect({20 + i, 20 + i}, {20 + i, 30}, ashfall::kSand); // staircase
-    world.set_cell({20, 19}, ashfall::kWater);
-    for (int i = 0; i < 300; ++i) world.step();
-    std::vector<ashfall::MaterialId> area(static_cast<std::size_t>(41 * 32), ashfall::kAir);
-    world.copy_rect({0, 0}, {40, 31}, area);
-    std::size_t slope_water = 0, total_water = 0, total_sand = 0;
-    for (int y = 0; y <= 31; ++y) {
-        for (int x = 0; x <= 40; ++x) {
-            const ashfall::MaterialId m = area[static_cast<std::size_t>(y * 41 + x)];
-            if (m == ashfall::kWater) {
-                ++total_water;
-                if (y < 30) ++slope_water;
-            } else if (m == ashfall::kSand) {
-                ++total_sand;
-            }
-        }
+    // (a) Open slope with an escape route: a sand staircase pierced by a
+    // stone-lined shaft open to the floor. The oracle asserts POSITION (the
+    // droplet reaches the shaft floor within budget), not counts:
+    // slope_water is a subset of total_water, so a comparison like
+    // `slope_water <= 1` passes vacuously once mass is conserved. A bare
+    // `== 0` would be equally dishonest — settled sand can cup a droplet
+    // into a legitimate 1-cell puddle — so absence claims always need
+    // pocket analysis (see fixture (b)). The route is a fall path on
+    // purpose: lone droplets rest on flat support by design (see
+    // test_lone_water_droplet_rests), so a lateral-only slope cannot oracle
+    // lone-droplet drainage; only collective water or a fall path moves it.
+    {
+        ashfall::SimulationWorld world;
+        world.fill_rect({0, 31}, {40, 31}, ashfall::kStone); // floor (41)
+        world.fill_rect({0, 0}, {0, 31}, ashfall::kStone);   // left wall (+31)
+        world.fill_rect({40, 0}, {40, 31}, ashfall::kStone); // right wall (+31)
+        world.fill_rect({24, 20}, {24, 30}, ashfall::kStone); // shaft west lining (+11)
+        world.fill_rect({26, 20}, {26, 30}, ashfall::kStone); // shaft east lining (+11)
+        for (int x : {20, 21, 22, 23, 27, 28, 29}) world.fill_rect({x, x}, {x, 30}, ashfall::kSand); // split staircase (47)
+        world.set_cell({25, 19}, ashfall::kWater); // over the shaft mouth
+        for (int i = 0; i < 100; ++i) world.step();
+        expect(world.occupied_cell_count() == 125 + 47 + 1, "open slope conserves mass");
+        expect(world.cell({25, 30}) == ashfall::kWater, "droplet drains through the slope shaft to the floor");
     }
-    expect(total_water == 1, "slope water mass conserved");
-    expect(total_sand == 65, "slope sand mass conserved");
-    // A dot cupped in a fully-enclosed 1-cell pit is a puddle and stays;
-    // anything on open slope must drain (no swap-cycle flicker either).
-    expect(slope_water <= 1, "open slope drains instead of dotting up");
+    // (b) Fully enclosed one-cell pocket: the droplet has no legal move,
+    // so it must remain. This is the pocket analysis absence claims need.
+    {
+        ashfall::SimulationWorld world;
+        world.fill_rect({4, 4}, {6, 4}, ashfall::kStone); // lid
+        world.set_cell({4, 5}, ashfall::kStone);          // west wall
+        world.set_cell({6, 5}, ashfall::kStone);          // east wall
+        world.fill_rect({4, 6}, {6, 6}, ashfall::kStone); // floor
+        world.set_cell({5, 5}, ashfall::kWater);
+        for (int i = 0; i < 100; ++i) world.step();
+        expect(world.cell({5, 5}) == ashfall::kWater, "pocketed droplet cannot leave its cell");
+        expect(world.occupied_cell_count() == 8 + 1, "pocket fixture conserves mass");
+    }
 }
 
 void test_command_replay() {
@@ -559,6 +675,62 @@ void test_save_load_varied_topology() {
     expect(holder.save() == empty_save, "empty round-trip is exact");
 }
 
+void test_save_golden_empty_v2() {
+    // GOLDEN: v2 framing for the empty world at tick 0, hand-computed (no
+    // save()-generated input — matching encoder/decoder mistakes could
+    // otherwise round-trip cleanly). Layout formula: magic(8) | tick u64le
+    // | ncell u32le | cells x (x u32le, y u32le, id u8) | ntemp u32le |
+    // temps x (x u32le, y u32le, temp i16le).
+    // Empty world, tick 0: magic 41 53 48 46 41 4C 4C 02 + u64 tick + u32
+    // ncell=0 + u32 ntemp=0 = 24 bytes.
+    const std::vector<std::uint8_t> kEmptyV2 = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    ashfall::SimulationWorld world;
+    expect(world.save() == kEmptyV2, "empty world saves 24 golden bytes");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kEmptyV2), "golden empty payload loads");
+    expect(restored.tick() == 0 && restored.occupied_cell_count() == 0, "golden empty round-trips state");
+    expect(restored.save() == kEmptyV2, "golden empty re-save is byte-exact");
+}
+
+void test_save_golden_single_stone() {
+    // GOLDEN: one stone at (1,2), tick 0: header + u32 count=1 + x=1 + y=2
+    // + id=1 + u32 ntemp=0 = 37 bytes.
+    const std::vector<std::uint8_t> kOneStone = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0};
+    ashfall::SimulationWorld world;
+    world.set_cell({1, 2}, ashfall::kStone);
+    expect(world.save() == kOneStone, "single stone saves 37 golden bytes");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kOneStone), "golden single-stone payload loads");
+    expect(restored.cell({1, 2}) == ashfall::kStone, "golden stone cell preserved");
+    expect(restored.tick() == 0, "golden tick preserved");
+    expect(restored.save() == kOneStone, "golden single-stone re-save is byte-exact");
+}
+
+void test_save_golden_negative_coords_and_temps() {
+    // GOLDEN: little-endian codec edges — x=-1 stores FF FF FF FF (C++20
+    // two's-complement bit pattern); temp -1 stores FF FF, 32767 stores
+    // FF 7F. Two stones ((-1,0) at -1 heat, (2,3) at max heat), tick 0.
+    const std::vector<std::uint8_t> kNegTemp = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
+        0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 1,
+        2, 0, 0, 0, 3, 0, 0, 0, 1, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0,
+        0xFF, 0xFF, 2, 0, 0, 0, 3, 0, 0, 0, 0xFF, 0x7F};
+    ashfall::SimulationWorld world;
+    world.set_cell({-1, 0}, ashfall::kStone);
+    world.set_cell({2, 3}, ashfall::kStone);
+    world.set_temperature({-1, 0}, -1);
+    world.set_temperature({2, 3}, 32767);
+    expect(world.save() == kNegTemp, "negative coords and temp edges save golden bytes");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kNegTemp), "golden negative/temp payload loads");
+    expect(restored.cell({-1, 0}) == ashfall::kStone && restored.cell({2, 3}) == ashfall::kStone,
+        "golden negative-coord cells preserved");
+    expect(restored.temperature({-1, 0}) == -1 && restored.temperature({2, 3}) == 32767,
+        "golden temp edges preserved");
+    expect(restored.save() == kNegTemp, "golden negative/temp re-save is byte-exact");
+}
+
 void test_player_collision_and_dirty_tracking() {
     ashfall::SimulationWorld world;
     world.fill_rect({10, 0}, {10, 20}, ashfall::kStone);
@@ -590,9 +762,16 @@ void test_player_collision_and_dirty_tracking() {
     expect(loaded_dirty[0] == ashfall::CellPosition{0, 0} && loaded_dirty[1] == ashfall::CellPosition{2, 0},
            "load dirty chunks include old and new positions");
 
+    // Membership, not exact equality: the contract only guarantees the
+    // removed populated chunk is dirtied, so extra invalidations would be
+    // legal. The clear first isolates reset's own dirtiness — without it a
+    // do-nothing reset would still pass on stale load dirt.
+    world.clear_dirty_chunks();
     world.reset();
     expect(world.tick() == 0 && world.occupied_cell_count() == 0, "reset clears world state and tick");
-    expect(world.dirty_chunks().size() == 2, "reset marks removed chunks dirty");
+    const auto reset_dirty = world.dirty_chunks();
+    expect(std::find(reset_dirty.begin(), reset_dirty.end(), ashfall::CellPosition{2, 0}) != reset_dirty.end(),
+        "reset dirties the removed populated chunk");
 }
 void test_material_data_parses_table() {
     const char* kJson = R"JSON({
@@ -806,7 +985,7 @@ void test_temperature_set_and_query() {
     world.set_temperature({0, 0}, 40000);
     expect(world.temperature({0, 0}) == 32767, "heat clamps to int16 max");
     world.set_temperature({1, 1}, -40000);
-    expect(world.temperature({1, 1}) == -32767, "cold clamps to int16 min");
+    expect(world.temperature({1, 1}) == -32767, "cold clamps to symmetric min -32767 (keeps negation symmetry)");
 }
 
 void test_temperature_single_cell_cools_exact() {
@@ -1235,8 +1414,10 @@ void test_reaction_inapplicable_rule_does_not_shadow() {
     table.reactions = {quench, burnout};
     expect(world.load_reactions(table), "quench+burnout load");
     world.step();
+    expect(world.occupied_cell_count() == 1,
+        "burnout removes fire despite inapplicable higher-priority rule");
     expect(world.cell({0, 0}) == ashfall::kAir, "dry fire burns out despite quench priority");
-    expect(world.cell({1, 0}) == ashfall::kWood, "wood untouched without spread");
+    expect(world.cell({1, 0}) == ashfall::kWood, "wood survives");
 }
 
 void test_reaction_quench_conserves_cells() {
@@ -1489,10 +1670,11 @@ void test_loading_table_clears_reactions() {
 }
 
 void test_play_level_fire_pit_burns_out() {
-    // Reactions are data, not state: the test loads the canonical rule set
-    // (literal mirrors data/reactions.json field-for-field; godot_p2_verify
-    // loads the real file through the bridge), exactly like the host boot.
-    const char* kReactions = R"JSON({
+    // Reactions are data, not state: the test loads a FROZEN 8-row copy of
+    // the rule set — not production (production data/reactions.json has 9
+    // rows including oil-flash); godot_p2_verify loads the real file
+    // through the bridge. Exactly like the host boot otherwise.
+    const char* kFrozenReactions = R"JSON({
   "version": 1,
   "reactions": [
     {"name": "quench", "probability": 20,
@@ -1527,7 +1709,7 @@ void test_play_level_fire_pit_burns_out() {
 })JSON";
     ashfall::ReactionTable rules;
     std::string error;
-    expect(ashfall::parse_reaction_data(kReactions, rules, error), "canonical reactions parse");
+    expect(ashfall::parse_reaction_data(kFrozenReactions, rules, error), "frozen reactions parse");
     ashfall::SimulationWorld world;
     world.build_play_level();
     expect(world.load_reactions(rules), "pit rules load");
@@ -1543,6 +1725,7 @@ void test_play_level_fire_pit_burns_out() {
     for (int x = 441; x <= 469; ++x) {
         expect(world.cell({x, 310}) == ashfall::kStone, "kiln lid survives");
     }
+    // CONTENT: kiln geometry above survives the burn — authored layout pin.
     std::vector<ashfall::MaterialId> full(static_cast<std::size_t>(512 * 512), ashfall::kAir);
     world.copy_rect({0, 0}, {511, 511}, full);
     std::size_t fire = 0, steam = 0, wood = 0;
@@ -1553,6 +1736,7 @@ void test_play_level_fire_pit_burns_out() {
     }
     expect(fire == 0, "all pit fire burns out during settle");
     expect(steam == 0, "all pit steam dissipates or condenses");
+    // GOLDEN: 200-tick extinction schedule under the frozen 8-row rules.
     expect(wood <= 19, "no reaction creates wood");
     ashfall::SimulationWorld again;
     again.build_play_level();
@@ -1591,9 +1775,12 @@ void test_oil_floats_on_water() {
     expect(oil_bottom < water_top, "oil rises and layers cleanly above water");
 }
 
-void test_oil_flash_ignites() {
-    // Data-only rule proof: a material-addressed row ignites oil with no
-    // engine change; p=90 means ignition within a few deterministic rolls.
+void test_oil_flash_reacts_and_heats() {
+    // Generic oil-to-fire behavior: p=100 with the temperature flag set
+    // explicitly (the declared flag-based API needs BOTH fields — setting
+    // product_temperature alone requests no heat). Asserts products AND heat.
+    // Single tick only: if ignition failed, fire would rise and oil slosh
+    // apart, so later ticks would test movement eligibility, not reaction.
     ashfall::SimulationWorld world;
     world.set_cell({0, 0}, ashfall::kFire);
     world.set_cell({1, 0}, ashfall::kOil);
@@ -1601,14 +1788,15 @@ void test_oil_flash_ignites() {
     table.version = 1;
     ashfall::ReactionSpec flash;
     flash.name = "oil-flash";
-    flash.probability = 90;
+    flash.probability = 100;
     flash.reactants = {{false, "fire"}, {false, "oil"}};
     flash.products = {{"fire"}, {"fire"}};
+    flash.has_product_temperature = true;
     flash.product_temperature = 150;
     table.reactions = {flash};
     expect(world.load_reactions(table), "oil-flash loads");
     world.step();
-    // Fire is gas: the product rises away the same tick it ignites, so
+    // Fire is gas: the products rise away the same tick they ignite, so
     // count the neighborhood (Task 6 spread style), not the origin cell.
     std::size_t oil = 0, fire = 0;
     for (int y = -2; y <= 2; ++y) {
@@ -1620,6 +1808,81 @@ void test_oil_flash_ignites() {
     }
     expect(oil == 0, "oil flashes on the first tick");
     expect(fire == 2, "flash conserves the pair as fire");
+    // Both flames carry 150 to their risen homes and conduct together:
+    // (150 + 150 from the twin flame) / 5 = 60, mirroring spread heat.
+    expect(world.temperature({1, -1}) == 60, "flash products carry heat to their new home");
+}
+
+void test_oil_flash_first_tick_golden() {
+    // GOLDEN: production oil-flash row (p=90) ignites this exact adjacency
+    // on tick 0. Pins the deterministic hash-roll schedule, not the general
+    // reaction semantics (those are covered at p=100 above).
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kOil);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec flash;
+    flash.name = "oil-flash";
+    flash.probability = 90;
+    flash.reactants = {{false, "fire"}, {false, "oil"}};
+    flash.products = {{"fire"}, {"fire"}};
+    flash.has_product_temperature = true;
+    flash.product_temperature = 150;
+    table.reactions = {flash};
+    expect(world.load_reactions(table), "oil-flash loads");
+    world.step();
+    std::size_t oil = 0, fire = 0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -1; x <= 2; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kOil) ++oil;
+            else if (m == ashfall::kFire) ++fire;
+        }
+    }
+    expect(oil == 0, "p=90 golden ignites on the first tick");
+    expect(fire == 2, "golden flash conserves the pair as fire");
+}
+
+void test_oil_flash_production_row() {
+    // Production-content integration: loads the actual oil-flash row from
+    // data/reactions.json (9 production rows) instead of a hand-built
+    // literal, so data edits that break ignition fail here.
+    // CWD assumption: tests run from the repo root (`./build/ashfall_sim_tests`)
+    // or under ctest (CWD is `build/`); no existing C++ test reads data
+    // files, so both relative candidates are tried. Single tick only —
+    // eligibility moves (see above).
+    std::string json_text;
+    for (const char* candidate : {"data/reactions.json", "../data/reactions.json"}) {
+        std::ifstream file(candidate);
+        if (file) {
+            std::ostringstream stream;
+            stream << file.rdbuf();
+            json_text = stream.str();
+            break;
+        }
+    }
+    expect(!json_text.empty(), "production reactions.json opens");
+    ashfall::ReactionTable rules;
+    std::string error;
+    expect(ashfall::parse_reaction_data(json_text, rules, error), "production reactions parse");
+    expect(rules.reactions.size() == 9, "production table holds 9 rows");
+    expect(rules.reactions[0].name == "oil-flash", "oil-flash leads the production table");
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kOil);
+    expect(world.load_reactions(rules), "production rules load");
+    world.step();
+    std::size_t oil = 0, fire = 0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -1; x <= 2; ++x) {
+            const ashfall::MaterialId m = world.cell({x, y});
+            if (m == ashfall::kOil) ++oil;
+            else if (m == ashfall::kFire) ++fire;
+        }
+    }
+    expect(oil == 0, "production oil-flash ignites on the first tick");
+    expect(fire == 2, "production flash conserves the pair as fire");
 }
 
 } // namespace
@@ -1639,7 +1902,8 @@ int main() {
     test_lone_water_droplet_rests();
     test_thin_water_film_stays_connected();
     test_water_surfer_drains_off_flat_layer();
-    test_water_surface_flattens_in_basin();
+    test_partial_surface_remains_level();
+    test_uneven_water_mound_flattens_in_basin();
     test_water_mound_levels_quickly();
     test_chunk_boundaries_crossing();
     test_play_level_layout();
@@ -1648,6 +1912,9 @@ int main() {
     test_step_marks_dirty_chunks();
     test_save_load_rejects_malformed();
     test_save_load_varied_topology();
+    test_save_golden_empty_v2();
+    test_save_golden_single_stone();
+    test_save_golden_negative_coords_and_temps();
     test_player_collision_and_dirty_tracking();
     test_material_data_parses_table();
     test_material_data_rejects_bad_input();
@@ -1677,7 +1944,9 @@ int main() {
     test_loading_table_clears_reactions();
     test_play_level_fire_pit_burns_out();
     test_oil_floats_on_water();
-    test_oil_flash_ignites();
+    test_oil_flash_reacts_and_heats();
+    test_oil_flash_first_tick_golden();
+    test_oil_flash_production_row();
     test_temperature_set_and_query();
     test_temperature_single_cell_cools_exact();
     test_temperature_two_cells_equalize_exact();

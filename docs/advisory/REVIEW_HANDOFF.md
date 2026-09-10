@@ -64,9 +64,9 @@ and verified — all 7 suites green (sim tests, P0/P1/P2 headless verifies, visu
 
 All layers reviewed. Execution order from the backlogs:
 
-1. **Group 1 — instrument + contracts, no behavior change:** harness + phase
-   counters, probe counters, T1–T6 oracle fixes, F1 hygiene, S2 cleanup, golden
-   bytes, migration-prep doc contracts, content-labeling.
+1. **Group 1 — instrument + contracts, no behavior change:** DONE (`da5e170`
+   harness + phase/probe counters + F1 + S2 + bridge timer split;
+   test/docs commit below for T1–T6 + golden bytes + contracts doc).
 2. **Group 2 — correctness, versioned:** heat-transport ownership (+ cell-owned
    heat), reactant exclusivity, validator parity, save duplicates + policy,
    transactional output, `find_or_insert`, commit-phase safety.
