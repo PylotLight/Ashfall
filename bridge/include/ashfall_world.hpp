@@ -41,6 +41,9 @@ private:
     int world_width_ = 512;
     int world_height_ = 512;
     std::vector<ashfall::MaterialId> cell_buffer_;
+    // Partial-path paint tile (Group 4, Task B7): per-chunk scratch (chunk
+    // width x 64 + vertical halo), reused across flushes (grown-only).
+    std::vector<ashfall::MaterialId> tile_scratch_;
     PackedByteArray pixel_bytes_;
     // Water-only layer: shaded RGB + coverage alpha, everything else
     // transparent. Sampled with linear filtering + a smoothing shader so the
