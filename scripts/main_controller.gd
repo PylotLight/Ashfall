@@ -310,7 +310,8 @@ func _update_hud() -> void:
 		status_label.text = "RUNNING" if world.is_auto_step() else "PAUSED"
 	else:
 		status_label.text = _transient_msg
-	fps_label.text = "%d fps" % Engine.get_frames_per_second()
+	fps_label.text = "%d fps%s" % [Engine.get_frames_per_second(),
+		"" if DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED else " (uncapped)"]
 	frame_label.text = "%.2f ms" % _frame_ms_ema
 	sim_label.text = "%.2f ms" % world.get_last_step_ms()
 	player_label.text = "(%d, %d)" % [roundi(player_pos.x), roundi(player_pos.y)]
@@ -396,6 +397,19 @@ func _unhandled_input(event: InputEvent) -> void:
 				_save_game()
 			KEY_F9:
 				_load_game()
+			KEY_V:
+				# Perf probe: the 120 figure is display vsync (ProMotion), not a
+				# setting. Uncap render fps to expose true frame overhead and
+				# future-load headroom. Sim stepping is physics-driven (max 2
+				# steps per physics frame), so render rate never changes sim
+				# speed; _process still flushes exactly once per rendered frame.
+				if DisplayServer.window_get_vsync_mode() == DisplayServer.VSYNC_DISABLED:
+					DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED)
+					_set_transient("VSYNC ON — render capped to display (V to uncap)")
+				else:
+					DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+					_set_transient("VSYNC OFF — render uncapped (V to re-cap)")
+				_update_hud()
 			KEY_1:
 				_select_palette(0)
 			KEY_2:
