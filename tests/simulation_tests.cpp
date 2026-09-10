@@ -1885,6 +1885,67 @@ void test_oil_flash_production_row() {
     expect(fire == 2, "production flash conserves the pair as fire");
 }
 
+void test_reaction_shared_reactant_double_transform() {
+    // Option A case (a): two primaries sharing one neighbor reactant BOTH
+    // transform while one neighbor claim wins (first hit per cell: same
+    // position, both neighbor-imposed, lower rule index, then lower primary
+    // x). Gateless p=100 rules on static materials only, so no temperature
+    // state is read and the Round-2 heat-transport change cannot shift this
+    // pin (reactions run before conduction; static products never move).
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kWood);  // left primary
+    world.set_cell({1, 0}, ashfall::kStone); // shared neighbor reactant
+    world.set_cell({2, 0}, ashfall::kRock);  // right primary
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec left;
+    left.name = "left-claim";
+    left.probability = 100;
+    left.reactants = {{false, "wood"}, {false, "stone"}};
+    left.products = {{"rock"}, {"rock"}};
+    ashfall::ReactionSpec right;
+    right.name = "right-claim";
+    right.probability = 100;
+    right.reactants = {{false, "rock"}, {false, "stone"}};
+    right.products = {{"wood"}, {"wood"}};
+    table.reactions = {left, right};
+    expect(world.load_reactions(table), "shared-reactant rules load");
+    world.step();
+    expect(world.cell({0, 0}) == ashfall::kRock, "left primary transforms despite sharing its reactant");
+    expect(world.cell({2, 0}) == ashfall::kWood, "right primary transforms despite sharing its reactant");
+    expect(world.cell({1, 0}) == ashfall::kRock, "shared neighbor shows the lower-rule-index winner");
+    expect(world.occupied_cell_count() == 3, "shared-reactant pin conserves mass");
+}
+
+void test_reaction_half_applied_instance() {
+    // Option A case (b): the primary wins its own cell (own claim,
+    // uncontested) while its neighbor product loses to the neighbor's own
+    // reaction (own beats neighbor-imposed) — HALF the instance applies.
+    // Gateless p=100 rules on static materials only: immune to the Round-2
+    // heat-transport change (no temperature gates, no movement).
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kWood);
+    world.set_cell({1, 0}, ashfall::kStone);
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec pair;
+    pair.name = "pair";
+    pair.probability = 100;
+    pair.reactants = {{false, "wood"}, {false, "stone"}};
+    pair.products = {{"rock"}, {"rock"}};
+    ashfall::ReactionSpec self;
+    self.name = "self";
+    self.probability = 100;
+    self.reactants = {{false, "stone"}};
+    self.products = {{"wood"}};
+    table.reactions = {pair, self};
+    expect(world.load_reactions(table), "half-apply rules load");
+    world.step();
+    expect(world.cell({0, 0}) == ashfall::kRock, "primary half of the instance applies");
+    expect(world.cell({1, 0}) == ashfall::kWood, "neighbor shows its own reaction, not the pair product");
+    expect(world.occupied_cell_count() == 2, "half-applied pin conserves mass");
+}
+
 } // namespace
 
 int main() {
@@ -1947,6 +2008,8 @@ int main() {
     test_oil_flash_reacts_and_heats();
     test_oil_flash_first_tick_golden();
     test_oil_flash_production_row();
+    test_reaction_shared_reactant_double_transform();
+    test_reaction_half_applied_instance();
     test_temperature_set_and_query();
     test_temperature_single_cell_cools_exact();
     test_temperature_two_cells_equalize_exact();
