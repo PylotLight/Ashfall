@@ -18,6 +18,7 @@ if(ASHFALL_BUILD_TESTS)
     enable_testing()
     add_executable(ashfall_sim_tests tests/simulation_tests.cpp)
     target_link_libraries(ashfall_sim_tests PRIVATE ashfall_sim)
+    target_include_directories(ashfall_sim_tests PRIVATE tests)
     add_test(NAME ashfall_sim_tests COMMAND ashfall_sim_tests)
     add_executable(ashfall_flat_tests tests/flat_map_tests.cpp)
     target_link_libraries(ashfall_flat_tests PRIVATE ashfall_sim)
@@ -25,6 +26,10 @@ if(ASHFALL_BUILD_TESTS)
     # Step benchmark harness (Group 1): manual tool, not part of ctest.
     add_executable(ashfall_bench bench/bench_step.cpp)
     target_link_libraries(ashfall_bench PRIVATE ashfall_sim)
+    # Oracle recorder (Group 4, O0): regenerates tests/oracle/*.hash; manual tool.
+    add_executable(oracle_record bench/oracle_record.cpp)
+    target_link_libraries(oracle_record PRIVATE ashfall_sim)
+    target_include_directories(oracle_record PRIVATE tests)
 endif()
 
 # GDExtension bridge using godot-cpp

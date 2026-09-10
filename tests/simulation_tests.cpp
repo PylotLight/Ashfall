@@ -2,6 +2,7 @@
 #include "ashfall/json_subset.hpp"
 #include "ashfall/material_data.hpp"
 #include "ashfall/reaction_data.hpp"
+#include "oracle_scenarios.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -3883,6 +3884,107 @@ void test_b2_copy_rect_full_overwrite() {
     }
 }
 
+// Group 4 (Task O0) identity oracle replay: rebuild each scenario via the
+// shared tests/oracle_scenarios.hpp builders, step, and compare the
+// per-tick FNV-1a-64 of save() bytes against tests/oracle/<name>.hash.
+// Fails before the hash files exist (files ship alongside); passes after.
+// Any mismatch after an optimization = behavior change = bug. Hash files
+// load via the T6 test-data path pattern (tests/oracle/, then
+// ../tests/oracle/ for build-dir ctest runs); `#` header lines are skipped.
+std::uint64_t oracle_fnv1a64(const std::vector<std::uint8_t>& bytes) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (std::uint8_t byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+bool oracle_load_hashes(const char* name, std::vector<std::uint64_t>& out) {
+    out.clear();
+    std::string text;
+    const std::string candidates[] = {
+        std::string("tests/oracle/") + name + ".hash",
+        std::string("../tests/oracle/") + name + ".hash",
+    };
+    for (const std::string& candidate : candidates) {
+        std::ifstream file(candidate);
+        if (file) {
+            std::ostringstream stream;
+            stream << file.rdbuf();
+            text = stream.str();
+            break;
+        }
+    }
+    if (text.empty()) {
+        return false;
+    }
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        int tick = -1;
+        unsigned long long want = 0;
+        if (std::sscanf(line.c_str(), "%d %llx", &tick, &want) != 2) {
+            return false;
+        }
+        if (tick != static_cast<int>(out.size())) {
+            return false;
+        }
+        out.push_back(static_cast<std::uint64_t>(want));
+    }
+    return !out.empty();
+}
+
+void test_oracle_replay() {
+    struct Case {
+        const char* name;
+        bool (*build)(ashfall::SimulationWorld&);
+        int ticks;
+    };
+    const Case cases[] = {
+        {"A", oracle::build_oracle_A, oracle::kMeasureTicksA},
+        {"B", oracle::build_oracle_B, oracle::kMeasureTicksB},
+        {"C", oracle::build_oracle_C, oracle::kMeasureTicksC},
+        {"D", oracle::build_oracle_D, oracle::kMeasureTicksD},
+        {"E", oracle::build_oracle_E, oracle::kMeasureTicksE},
+        {"F", oracle::build_oracle_F, oracle::kMeasureTicksF},
+    };
+    for (const Case& c : cases) {
+        std::vector<std::uint64_t> want;
+        {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "oracle %s hash file opens", c.name);
+            expect(oracle_load_hashes(c.name, want), msg);
+        }
+        {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "oracle %s hash file holds %d ticks", c.name, c.ticks);
+            expect(want.size() == static_cast<std::size_t>(c.ticks), msg);
+        }
+        ashfall::SimulationWorld world;
+        {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "oracle %s scenario builds", c.name);
+            expect(c.build(world), msg);
+        }
+        for (int tick = 0; tick < c.ticks; ++tick) {
+            world.step();
+            const std::uint64_t actual = oracle_fnv1a64(world.save());
+            if (actual != want[static_cast<std::size_t>(tick)]) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                    "oracle %s tick %d mismatch: expected %016llx actual %016llx", c.name, tick,
+                    static_cast<unsigned long long>(want[static_cast<std::size_t>(tick)]),
+                    static_cast<unsigned long long>(actual));
+                expect(false, msg);
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -4003,5 +4105,6 @@ int main() {
     test_b2_reset_dirtiness();
     test_b2_load_invalidates_old_and_new();
     test_b2_copy_rect_full_overwrite();
+    test_oracle_replay();
     std::cout << "All simulation tests passed.\n";
 }
