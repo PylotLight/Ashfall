@@ -104,7 +104,14 @@ public:
         BadTempSection,
         UnknownMaterial,
         AirCellStored,
-        AmbientTempStored
+        AmbientTempStored,
+        Oversize,
+        DuplicateCell,
+        DuplicateTemp,
+        UnsortedCells,
+        UnsortedTemps,
+        TooManyChunks,
+        CoordOutOfRange
     };
     [[nodiscard]] bool load_with_diagnostic(std::span<const std::uint8_t> bytes, LoadError& error);
 #ifdef ASHFALL_STEP_INSTRUMENT

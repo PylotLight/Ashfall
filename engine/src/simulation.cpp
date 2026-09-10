@@ -75,6 +75,18 @@ CellPosition chunk_pos_of(CellPosition pos) {
     return {floor_divide(pos.x, kChunkSize), floor_divide(pos.y, kChunkSize)};
 }
 
+// (Group 2, Task S1 chunk-bomb guard:) sortable chunk identity for a cell:
+// ((uint64_t)(uint32_t)cx << 32) | (uint32_t)cy with floor-divided chunk
+// coords (negative cells map to negative chunks, matching rebuild_chunks).
+// load() collects one key per cell into a vector, sorts + uniques it, and
+// rejects over kMaxSaveChunks. Transient is bounded by the cell cap
+// (<= (1<<22) keys x 8 B = 32 MiB worst case).
+std::uint64_t load_chunk_key(CellPosition pos) {
+    const auto chunk_x = static_cast<std::uint32_t>(floor_divide(pos.x, kChunkSize));
+    const auto chunk_y = static_cast<std::uint32_t>(floor_divide(pos.y, kChunkSize));
+    return (static_cast<std::uint64_t>(chunk_x) << 32) | chunk_y;
+}
+
 // Bottom-up (y desc), x asc within a row: the exact order the old full
 // std::sort produced. Counting sort by y (O(n + rows)), then sorts each
 // short row by x. Falls back to std::sort on degenerate y-spread.
@@ -318,6 +330,12 @@ void SimulationWorld::run_reactions() {
     // FlatMap scan order: the same logical world reacts identically however
     // its cells were inserted. Cost is O(cells x rules) only while rules
     // are loaded; reactionless worlds pay one branch.
+    // Option A semantics (adopted 2026-09-10): rules are competing
+    // transformations, not atomic consumption. (a) Two primaries sharing
+    // one neighbor reactant BOTH transform while one neighbor claim wins
+    // (first hit per cell). (b) A primary winning its own cell while its
+    // neighbor product loses to the neighbor's own reaction applies HALF
+    // the instance. Revisit transactional iff consumption rules are scoped.
 #ifdef ASHFALL_STEP_INSTRUMENT
     // reaction_cells/reaction_hits are stored directly here (run_reactions
     // runs inside step()'s reactions phase); step() fills every other
@@ -1005,9 +1023,33 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
     // untouched. The host wrapper is unchanged — old user saves load.
     // Transient memory note: pre-commit the live tables, `loaded` /
     // `loaded_temps`, and the rebuilt chunk map coexist (~2.2x steady-state
-    // tables); a streaming loader is later work.
+    // tables); a streaming loader is later work. The chunk-key vector below
+    // is bounded by the cell cap ((1<<22) x 8 B <= 32 MiB), so the note
+    // stays accurate.
+    // v2-strict (Group 2, Task S1; version byte stays 2): load() newly
+    // REJECTS only malformed/foreign inputs — canonical saves (what save()
+    // emits: ascending, unique, within caps) still load, so honest saves are
+    // unaffected. Newly-rejected classes: oversize files/counts (Oversize),
+    // out-of-range coords (CoordOutOfRange), duplicate cells/temps
+    // (DuplicateCell/DuplicateTemp), non-ascending sections
+    // (UnsortedCells/UnsortedTemps — save() always emits ascending), and
+    // chunk-count bombs (TooManyChunks). Temps-on-air stay ACCEPTED (the S4
+    // set-on-air rejection waits for v3).
+    //
+    // (Owner caps 2026-09-10: kMaxSaveBytes = 64 MiB,
+    // kMaxSaveCells = kMaxSaveTemps = 1<<22, kMaxSaveChunks = 4096,
+    // kMaxSaveCoord = 1<<24 (|x|,|y| bound; play level is 0..511).)
     error = LoadError::Ok;
     constexpr std::size_t kHeaderBytes = 7 + 1 + 12; // prefix + version + tick + ncell
+    constexpr std::size_t kMaxSaveBytes = 64u * 1024u * 1024u;
+    constexpr std::uint32_t kMaxSaveCells = 1u << 22;
+    constexpr std::uint32_t kMaxSaveTemps = 1u << 22;
+    constexpr std::size_t kMaxSaveChunks = 4096;
+    constexpr std::int32_t kMaxSaveCoord = 1 << 24;
+    if (bytes.size() > kMaxSaveBytes) {
+        error = LoadError::Oversize;
+        return false;
+    }
     if (bytes.size() < kHeaderBytes) {
         error = LoadError::TooShort;
         return false;
@@ -1028,6 +1070,13 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
         error = LoadError::BadCellSection;
         return false;
     }
+    if (count > kMaxSaveCells) {
+        // Count cap BEFORE reserve_for AND before the section-size extent
+        // math below: an oversized count in a tiny file rejects here
+        // (Oversize) with no large allocation and no throw.
+        error = LoadError::Oversize;
+        return false;
+    }
     // Load-bearing: the cast to std::size_t happens BEFORE the multiply, so
     // the extent is overflow-safe on 64-bit. Do not "simplify" this into a
     // 32-bit multiply.
@@ -1041,6 +1090,15 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
     }
     FlatCells loaded;
     loaded.reserve_for(static_cast<std::size_t>(count) + 16);
+    // v2-strict ordering: save() always emits ascending (x, y), so only
+    // foreign/hand-corrupted inputs newly reject here. Two agreeing
+    // mechanisms: the prev-compare names the failure kind (equality ->
+    // Duplicate*, descent -> Unsorted*) while find_or_insert on the local
+    // table belt-and-braces rejects any duplicate the compare could miss.
+    // They always agree: strictly-ascending pairs are pairwise distinct, so
+    // !inserted is unreachable when the compare passes.
+    bool have_prev_cell = false;
+    CellPosition prev_cell{0, 0};
     for (std::uint32_t index = 0; index < count; ++index) {
         std::uint32_t raw_x = 0;
         std::uint32_t raw_y = 0;
@@ -1057,9 +1115,35 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
             error = LoadError::UnknownMaterial;
             return false;
         }
-        // Duplicates policy UNCHANGED: last-write-wins accept via
-        // insert_or_assign. Strict (S1) rejection is Group 2/3 work.
-        loaded.insert_or_assign({static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, material_id);
+        // C++20 two's-complement: the u32 payload round-trips exactly via
+        // static_cast<std::int32_t> (same convention as save()).
+        const CellPosition position{static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)};
+        if (position.x > kMaxSaveCoord || position.x < -kMaxSaveCoord || position.y > kMaxSaveCoord ||
+            position.y < -kMaxSaveCoord) {
+            error = LoadError::CoordOutOfRange;
+            return false;
+        }
+        if (have_prev_cell) {
+            if (position == prev_cell) {
+                error = LoadError::DuplicateCell;
+                return false;
+            }
+            if (position < prev_cell) {
+                error = LoadError::UnsortedCells;
+                return false;
+            }
+        }
+        // Task F contract: FindOrInsertResult find_or_insert(const Key& key,
+        // Value value) with .ptr/.inserted; claim-or-observe WITHOUT
+        // overwrite. !inserted -> DuplicateCell (same outcome as the
+        // equality check above).
+        const auto cell_claim = loaded.find_or_insert(position, material_id);
+        if (!cell_claim.inserted) {
+            error = LoadError::DuplicateCell;
+            return false;
+        }
+        prev_cell = position;
+        have_prev_cell = true;
     }
     FlatTemps loaded_temps;
     if (version == kSaveVersion2) {
@@ -1068,10 +1152,18 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
             error = LoadError::BadTempSection;
             return false;
         }
+        if (temp_count > kMaxSaveTemps) {
+            error = LoadError::Oversize;
+            return false;
+        }
         if (bytes.size() - offset != static_cast<std::size_t>(temp_count) * 10) {
             error = LoadError::BadTempSection;
             return false;
         }
+        // Same v2-strict ordering pair as the cell section above
+        // (prev-compare names it, find_or_insert belt-and-braces).
+        bool have_prev_temp = false;
+        CellPosition prev_temp{0, 0};
         for (std::uint32_t index = 0; index < temp_count; ++index) {
             std::uint32_t raw_x = 0;
             std::uint32_t raw_y = 0;
@@ -1086,25 +1178,79 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
                 error = LoadError::AmbientTempStored; // canonical saves never store ambient
                 return false;
             }
-            // Duplicates policy UNCHANGED (see cell loop above).
-            loaded_temps.insert_or_assign(
-                {static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, temp);
+            const CellPosition position{static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)};
+            if (position.x > kMaxSaveCoord || position.x < -kMaxSaveCoord || position.y > kMaxSaveCoord ||
+                position.y < -kMaxSaveCoord) {
+                error = LoadError::CoordOutOfRange;
+                return false;
+            }
+            if (have_prev_temp) {
+                if (position == prev_temp) {
+                    error = LoadError::DuplicateTemp;
+                    return false;
+                }
+                if (position < prev_temp) {
+                    error = LoadError::UnsortedTemps;
+                    return false;
+                }
+            }
+            // Temps-on-air STILL ACCEPTED: the S4 set-on-air rejection
+            // (temps subset of cells) waits for v3; prune stays the backstop.
+            const auto temp_claim = loaded_temps.find_or_insert(position, temp);
+            if (!temp_claim.inserted) {
+                error = LoadError::DuplicateTemp;
+                return false;
+            }
+            prev_temp = position;
+            have_prev_temp = true;
         }
     }
+    // Chunk-bomb guard: N far-apart cells x 4 KiB chunk vectors is the hole
+    // the "no thin-file blowup" proof missed. Count distinct chunks BEFORE
+    // building the mirror; reject over kMaxSaveChunks (TooManyChunks).
+    {
+        std::vector<std::uint64_t> chunk_keys;
+        chunk_keys.reserve(loaded.size());
+        loaded.for_each([&](const CellPosition& position, const MaterialId&) {
+            chunk_keys.push_back(load_chunk_key(position));
+        });
+        std::sort(chunk_keys.begin(), chunk_keys.end());
+        chunk_keys.erase(std::unique(chunk_keys.begin(), chunk_keys.end()), chunk_keys.end());
+        if (chunk_keys.size() > kMaxSaveChunks) {
+            error = LoadError::TooManyChunks;
+            return false;
+        }
+    }
+    // (Group 2, Task S5 commit-phase safety:) the chunk mirror is built into
+    // a LOCAL map first, so a bad_alloc during rebuild leaves the live world
+    // untouched ("failed load => untouched" holds even under bad_alloc).
+    // Commit uses only non-throwing moves, tick_ LAST. The dirty marks run
+    // post-commit and may throw: sim state already holds, the presentational
+    // dirty set is best-effort (accepted limitation).
+    std::map<CellPosition, std::vector<MaterialId>> fresh_chunks;
+    loaded.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+        const CellPosition chunk_position{
+            floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
+        auto [chunk, inserted] = fresh_chunks.try_emplace(chunk_position);
+        if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
+        const int local_x = positive_modulo(position.x, kChunkSize);
+        const int local_y = positive_modulo(position.y, kChunkSize);
+        chunk->second[static_cast<std::size_t>(local_y * kChunkSize + local_x)] = material_id;
+    });
     std::set<CellPosition> changed_chunks;
     for (const auto& [chunk_position, _] : chunks_) {
         changed_chunks.insert(chunk_position);
     }
-    rebuild_chunks(loaded);
+    for (const auto& [chunk_position, _] : fresh_chunks) {
+        changed_chunks.insert(chunk_position);
+    }
+    chunks_ = std::move(fresh_chunks);
     cells_ = std::move(loaded);
     temps_ = std::move(loaded_temps);
-    for (const auto& [chunk_pos, _] : chunks_) {
-        changed_chunks.insert(chunk_pos);
-    }
+    tick_ = saved_tick;
     for (const CellPosition chunk_position : changed_chunks) {
         mark_chunk_dirty(chunk_position);
     }
-    tick_ = saved_tick;
     return true;
 }
 
