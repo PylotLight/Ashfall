@@ -26,12 +26,12 @@ Design decisions to make before/during (reviewer gives options, we choose):
 
 ## Patches (§14 — scope + exit criterion each)
 
-- [ ] **1. Resource limits.** `JsonLimits` (max input bytes, depth 32/64, nodes,
+- [x] **1. Resource limits.** `JsonLimits` (max input bytes, depth 32/64, nodes,
       string bytes, array items, object fields; reaction count + 256 material cap).
       Enforce BEFORE allocating/descending, not post-parse. Plus: explicit
       allocation-failure policy at the host boundary (no blanket `catch (...)`).
       Exit: deep/large malformed inputs reject safely.
-- [ ] **2. Numeric grammar.** Reject leading zeros (`01`, `-01`, `00`; accept `0`,
+- [x] **2. Numeric grammar.** Reject leading zeros (`01`, `-01`, `00`; accept `0`,
       `-0`); reject `.`/`e` continuations explicitly; precondition-style
       accumulation (`(kMax - digit)/10`); document −1e9..+1e9 token policy; optional
       `assert(low <= high)` hygiene. Full boundary corpus in §12 table. Exit:
@@ -41,7 +41,7 @@ Design decisions to make before/during (reviewer gives options, we choose):
       subtle case: `{"material":"water","tag":"liquid"}` must FAIL (both keys
       present) even though each value is valid. Exit: all malformed dual-key cases
       reject.
-- [ ] **4. Strict unknown-key validation (§6).** Allowed-key lists per object
+- [x] **4. Strict unknown-key validation (§6).** Allowed-key lists per object
       (material/reactant/product/temperature/documents as listed in §6); typo'd
       optionals (`min_temperatue`, `hardnes`, `product_temperatur`) must fail loudly
       — today they silently disable gates/outputs. Explicit `metadata` object if
@@ -55,9 +55,9 @@ Design decisions to make before/during (reviewer gives options, we choose):
       Exit: invalid C++ enums/densities reject.
 - [x] **6. Transactional output + error contract** — see Design decisions above.
       Exit: failed reload preserves prior table.
-- [ ] **7. Path/location diagnostics** — see Design decisions above. Exit: errors
+- [x] **7. Path/location diagnostics** — see Design decisions above. Exit: errors
       identify row + field.
-- [ ] **8. Bounded semantic linking/lint (§8).** Three stages (parse → structure →
+- [x] **8. Bounded semantic linking/lint (§8).** Three stages (parse → structure →
       link vs. material table). At link: unknown material names reject w/ context;
       tags matching nothing reject-or-prominent-report (watch `vapor`/`vapour`);
       primary-`air` rules reject-or-separate-mechanism (executor only iterates

@@ -72,7 +72,8 @@ All layers reviewed. Execution order from the backlogs:
     transactional output, `find_or_insert`, commit-phase safety. Status 2026-09-10:
     DONE (F/V/R/S/H committed; T pins green, uncommitted — integrator commits).
 3. **Group 3 — hardening + formats:** limits everywhere, strict unknown keys, v3
-   design→implement, P1–P4 tests, sweeps, presentation tests §F 1–7.
+   design→implement, P1–P4 tests, sweeps, presentation tests §F 1–7. Status
+   2026-09-10: DONE (J+S+B committed; T battery green — integrator commits).
 4. **Group 4 — measured optimizations:** runtime table, scratch sizing, compiled
    matching, static fast path, sparse conduction, changed-position diff.
 5. **Group 5 — storage migration:** oracle + differential replay + §7 additions.

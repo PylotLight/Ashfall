@@ -256,7 +256,7 @@ do the dense-chunk migration BEFORE that cliff, not after.
       test: hand-computed LE vectors (`x=-1 → FF FF FF FF`, `tick=0x0102… →
       08 07…`, temp −1/32767) locking the format. Exit: v1/v2 still load, failures
       named.
-- [ ] **S3. Canonical-payload contract (SETTLED — adopt P1–P4).** P1 serialization
+- [x] **S3. Canonical-payload contract (SETTLED — adopt P1–P4).** P1 serialization
       purity (sort enforces today); P2 state round-trip + continuation equality
       (add a FlatMap-capacity-boundary crossing test for the §F2 layout concern);
       P3 payload round-trip (`save(load(b)) == b`, false today for non-canonical —
@@ -264,7 +264,7 @@ do the dense-chunk migration BEFORE that cliff, not after.
       byte-identity of the canonical payload. Compression later = versioned
       container around the payload (pinned params, no trained dictionaries) —
       replay tests target the payload, always. Exit: properties tested.
-- [ ] **S4. v3 format design (DO FIRST as design, implement after S1–S3).**
+- [x] **S4. v3 format design (DO FIRST as design, implement after S1–S3).**
       Embedded roster (id + name → REMAP by name on load; chosen over hash-only
       because roster additions keep working, only removals/renames reject) +
       reaction-table hash/count (continuation contract — reject-on-mismatch default
@@ -278,7 +278,7 @@ do the dense-chunk migration BEFORE that cliff, not after.
 - [x] **S5. Commit-phase exception safety.** Build chunk map into a local, commit
       with non-throwing moves, tick last — "failed load ⇒ untouched" holds even
       under `bad_alloc`. Exit: holds under injection.
-- [ ] **S6. Serializer sweeps in CI.** Truncation sweep (every prefix → false +
+- [x] **S6. Serializer sweeps in CI.** Truncation sweep (every prefix → false +
       unchanged) + bit-flip sweep (reject, or accept-consistent + resave-canonical)
       + round-trip matrix (empty/single/kiln/hot-moving/negative/max-id) +
       continuation-across-boundary + v3 skew + policy fixtures. [R2] Loader fuzz

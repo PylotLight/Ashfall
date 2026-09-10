@@ -1,4 +1,5 @@
 #include "ashfall/simulation.hpp"
+#include "ashfall/json_subset.hpp"
 #include "ashfall/material_data.hpp"
 #include "ashfall/reaction_data.hpp"
 
@@ -14,6 +15,53 @@
 namespace {
 void expect(bool condition, const char* message) {
     if (!condition) { std::cerr << "FAILED: " << message << '\n'; std::exit(EXIT_FAILURE); }
+}
+
+// Group 3 (Task T) v3 helpers: IEEE CRC32 (polynomial 0xEDB88320, matching
+// engine/src/simulation.cpp) + minimal v3 section walkers. The walkers parse
+// only the roster framing (no semantic checks), so mutated-payload tests can
+// locate the cell_count/cell/temp fields of a save() snapshot. Semantic
+// mutants must re-seal the CRC (verified BEFORE parsing) via g3_fix_v3_crc,
+// otherwise the loader reports BadCrc instead of the targeted fault.
+std::uint32_t g3_crc32(const std::uint8_t* data, std::size_t length) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 1u) != 0u ? (0xEDB88320u ^ (crc >> 1)) : (crc >> 1);
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+std::uint32_t g3_read_u32_le(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
+void g3_write_u32_le(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
+    bytes[offset] = static_cast<std::uint8_t>(value & 0xFFu);
+    bytes[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFFu);
+    bytes[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xFFu);
+    bytes[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xFFu);
+}
+
+// v3 layout recap (writer emits v3 ONLY): prefix(7) ver(1) tick(8)
+// roster_count(4) roster(old_id u8, name_len u8, name) reaction_count(4)
+// hash(4) extents(16) cell_count(4) cells(x u32, y u32, old_id u8)
+// temp_count(4) temps(x u32, y u32, temp i16) crc32(4).
+std::size_t g3_v3_cell_count_offset(const std::vector<std::uint8_t>& bytes) {
+    std::size_t off = 16; // prefix + version + tick
+    const std::uint32_t roster = g3_read_u32_le(bytes, off);
+    off += 4;
+    for (std::uint32_t i = 0; i < roster; ++i) off += 2 + bytes[off + 1];
+    return off + 4 + 4 + 16; // skip reaction_count + hash + extents
+}
+
+void g3_fix_v3_crc(std::vector<std::uint8_t>& bytes) {
+    g3_write_u32_le(bytes, bytes.size() - 4, g3_crc32(bytes.data(), bytes.size() - 4));
 }
 
 void test_sand_falls_and_stops() {
@@ -602,6 +650,8 @@ void test_save_load_rejects_malformed() {
     world.set_cell({5, 5}, ashfall::kSand);
     world.step();
     const auto valid = world.save();
+    expect(valid.size() > 8 && valid[7] == ashfall::SimulationWorld::kSaveVersion3,
+        "writer emits v3");
     const auto snapshot = valid;
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
@@ -630,16 +680,32 @@ void test_save_load_rejects_malformed() {
         expect_rejected(extra, "trailing byte (count mismatch) is rejected");
     }
     {
-        // v2 layout ends with a 4-byte temp count: the last cell material
-        // byte sits 5 from the end.
+        // v3 seals the payload with CRC32 (verified BEFORE parsing), so a
+        // semantic mutant must re-seal first: corrupt the first cell record's
+        // old-id byte (cells start 4 past the cell_count field; the id is the
+        // 9th byte of the record), fix the CRC, then load.
         auto bad_material = valid;
-        bad_material[bad_material.size() - 5] = 99;
-        expect_rejected(bad_material, "unknown material is rejected");
+        const std::size_t cells = g3_v3_cell_count_offset(bad_material) + 4;
+        bad_material[cells + 8] = 99; // no roster row carries old-id 99
+        g3_fix_v3_crc(bad_material);
+        expect(!world.load(bad_material), "unknown material is rejected");
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(bad_material, error), "unknown material diagnosed");
+        expect(error == ashfall::SimulationWorld::LoadError::RosterUnknownMaterial,
+            "unknown old-id names RosterUnknownMaterial");
+        expect(world.save() == snapshot, "failed load preserves exact state");
     }
     {
         auto air_material = valid;
-        air_material[air_material.size() - 5] = ashfall::kAir;
-        expect_rejected(air_material, "air material entry is rejected");
+        const std::size_t cells = g3_v3_cell_count_offset(air_material) + 4;
+        air_material[cells + 8] = ashfall::kAir; // roster old-id 0 is air
+        g3_fix_v3_crc(air_material);
+        expect(!world.load(air_material), "air material entry is rejected");
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(air_material, error), "air entry diagnosed");
+        expect(error == ashfall::SimulationWorld::LoadError::AirCellStored,
+            "stored air names AirCellStored");
+        expect(world.save() == snapshot, "failed load preserves exact state");
     }
 }
 
@@ -675,60 +741,134 @@ void test_save_load_varied_topology() {
     expect(holder.save() == empty_save, "empty round-trip is exact");
 }
 
-void test_save_golden_empty_v2() {
-    // GOLDEN: v2 framing for the empty world at tick 0, hand-computed (no
-    // save()-generated input — matching encoder/decoder mistakes could
-    // otherwise round-trip cleanly). Layout formula: magic(8) | tick u64le
-    // | ncell u32le | cells x (x u32le, y u32le, id u8) | ntemp u32le |
-    // temps x (x u32le, y u32le, temp i16le).
-    // Empty world, tick 0: magic 41 53 48 46 41 4C 4C 02 + u64 tick + u32
-    // ncell=0 + u32 ntemp=0 = 24 bytes.
+void test_save_golden_empty_v3() {
+    // GOLDEN (v3): empty world, tick 0, default table (air..oil ids 0..9), 0
+    // reactions. Layout: prefix(7) ver(1)=3 tick u64 roster_count=10 roster
+    // (old_id u8, len u8, name) reaction_count=0 hash=0 extents(0,0,0,0)
+    // cell_count=0 temp_count=0 crc32 = 16+65+8+16+4+0+4+4 = 117 bytes. The
+    // CRC F6 BD C5 75 is engine-computed; the non-CRC prefix is hand-verified
+    // (roster bytes spell the ten default names; all counts/extents zero).
+    const std::vector<std::uint8_t> kEmptyV3 = {
+        0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x03, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x03, 0x61, 0x69,
+        0x72, 0x01, 0x05, 0x73, 0x74, 0x6F, 0x6E, 0x65, 0x02, 0x04, 0x73, 0x61,
+        0x6E, 0x64, 0x03, 0x05, 0x77, 0x61, 0x74, 0x65, 0x72, 0x04, 0x05, 0x73,
+        0x74, 0x65, 0x61, 0x6D, 0x05, 0x04, 0x66, 0x69, 0x72, 0x65, 0x06, 0x04,
+        0x77, 0x6F, 0x6F, 0x64, 0x07, 0x04, 0x6C, 0x61, 0x76, 0x61, 0x08, 0x04,
+        0x72, 0x6F, 0x63, 0x6B, 0x09, 0x03, 0x6F, 0x69, 0x6C, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xF6, 0xBD, 0xC5, 0x75};
+    expect(kEmptyV3.size() == 117, "empty v3 vector is 117 bytes");
+    ashfall::SimulationWorld world;
+    expect(world.save() == kEmptyV3, "empty world saves 117 golden v3 bytes");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kEmptyV3), "golden empty v3 payload loads");
+    expect(restored.tick() == 0 && restored.occupied_cell_count() == 0, "golden empty round-trips state");
+    expect(restored.save() == kEmptyV3, "golden empty re-save is byte-exact");
+    // Self-check: the test-local CRC re-seal is identity on pristine bytes
+    // (pins the helper against the engine's CRC32).
+    auto probe = kEmptyV3;
+    g3_fix_v3_crc(probe);
+    expect(probe == kEmptyV3, "test CRC helper agrees with engine CRC");
+}
+
+void test_save_v2_reader_empty() {
+    // READER fixture (v2): the Group-1/2 24-byte golden still loads under the
+    // retained v1/v2 reader. Load-only: save() now emits v3, so no save pin.
     const std::vector<std::uint8_t> kEmptyV2 = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    ashfall::SimulationWorld world;
-    expect(world.save() == kEmptyV2, "empty world saves 24 golden bytes");
     ashfall::SimulationWorld restored;
-    expect(restored.load(kEmptyV2), "golden empty payload loads");
-    expect(restored.tick() == 0 && restored.occupied_cell_count() == 0, "golden empty round-trips state");
-    expect(restored.save() == kEmptyV2, "golden empty re-save is byte-exact");
+    expect(restored.load(kEmptyV2), "v2 empty payload loads");
+    expect(restored.tick() == 0 && restored.occupied_cell_count() == 0, "v2 empty state intact");
 }
 
-void test_save_golden_single_stone() {
-    // GOLDEN: one stone at (1,2), tick 0: header + u32 count=1 + x=1 + y=2
-    // + id=1 + u32 ntemp=0 = 37 bytes.
-    const std::vector<std::uint8_t> kOneStone = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0};
+void test_save_golden_single_stone_v3() {
+    // GOLDEN (v3): one stone at (1,2), tick 0. Same header/roster as the empty
+    // vector, then extents(1,1,2,2) cell_count=1 cell(1,2,old-id 1)
+    // temp_count=0 CRC 91 3C 2D E3 = 126 bytes. Non-CRC prefix hand-verified
+    // (extents match the lone cell; cell bytes are x=1 y=2 id=1).
+    const std::vector<std::uint8_t> kOneStoneV3 = {
+        0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x03, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x03, 0x61, 0x69,
+        0x72, 0x01, 0x05, 0x73, 0x74, 0x6F, 0x6E, 0x65, 0x02, 0x04, 0x73, 0x61,
+        0x6E, 0x64, 0x03, 0x05, 0x77, 0x61, 0x74, 0x65, 0x72, 0x04, 0x05, 0x73,
+        0x74, 0x65, 0x61, 0x6D, 0x05, 0x04, 0x66, 0x69, 0x72, 0x65, 0x06, 0x04,
+        0x77, 0x6F, 0x6F, 0x64, 0x07, 0x04, 0x6C, 0x61, 0x76, 0x61, 0x08, 0x04,
+        0x72, 0x6F, 0x63, 0x6B, 0x09, 0x03, 0x6F, 0x69, 0x6C, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x91, 0x3C, 0x2D, 0xE3};
+    expect(kOneStoneV3.size() == 126, "single-stone v3 vector is 126 bytes");
     ashfall::SimulationWorld world;
     world.set_cell({1, 2}, ashfall::kStone);
-    expect(world.save() == kOneStone, "single stone saves 37 golden bytes");
+    expect(world.save() == kOneStoneV3, "single stone saves 126 golden v3 bytes");
     ashfall::SimulationWorld restored;
-    expect(restored.load(kOneStone), "golden single-stone payload loads");
+    expect(restored.load(kOneStoneV3), "golden single-stone v3 payload loads");
     expect(restored.cell({1, 2}) == ashfall::kStone, "golden stone cell preserved");
     expect(restored.tick() == 0, "golden tick preserved");
-    expect(restored.save() == kOneStone, "golden single-stone re-save is byte-exact");
+    expect(restored.save() == kOneStoneV3, "golden single-stone re-save is byte-exact");
 }
 
-void test_save_golden_negative_coords_and_temps() {
-    // GOLDEN: little-endian codec edges — x=-1 stores FF FF FF FF (C++20
-    // two's-complement bit pattern); temp -1 stores FF FF, 32767 stores
-    // FF 7F. Two stones ((-1,0) at -1 heat, (2,3) at max heat), tick 0.
-    const std::vector<std::uint8_t> kNegTemp = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
-        0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 1,
-        2, 0, 0, 0, 3, 0, 0, 0, 1, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0,
-        0xFF, 0xFF, 2, 0, 0, 0, 3, 0, 0, 0, 0xFF, 0x7F};
+void test_save_v2_reader_single_stone() {
+    // READER fixture (v2): Group-1/2 golden, load-only (no save pin).
+    const std::vector<std::uint8_t> kOneStone = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0};
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kOneStone), "v2 single-stone payload loads");
+    expect(restored.cell({1, 2}) == ashfall::kStone, "v2 stone cell preserved");
+    expect(restored.tick() == 0, "v2 tick preserved");
+}
+
+void test_save_golden_negative_coords_and_temps_v3() {
+    // GOLDEN (v3): two stones ((-1,0) at -1 heat, (2,3) at max heat), tick 0.
+    // Chunk-major order: (-1,0) lives in chunk {-1,0}, so it sorts first;
+    // extents(-1,2,0,3); temps follow the same cell-walk order; CRC 6A C3 D0
+    // F0 is engine-computed, non-CRC prefix hand-verified (little-endian
+    // two's-complement coords, temp -1 = FF FF, 32767 = FF 7F). 155 bytes.
+    const std::vector<std::uint8_t> kNegTempV3 = {
+        0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x03, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x03, 0x61, 0x69,
+        0x72, 0x01, 0x05, 0x73, 0x74, 0x6F, 0x6E, 0x65, 0x02, 0x04, 0x73, 0x61,
+        0x6E, 0x64, 0x03, 0x05, 0x77, 0x61, 0x74, 0x65, 0x72, 0x04, 0x05, 0x73,
+        0x74, 0x65, 0x61, 0x6D, 0x05, 0x04, 0x66, 0x69, 0x72, 0x65, 0x06, 0x04,
+        0x77, 0x6F, 0x6F, 0x64, 0x07, 0x04, 0x6C, 0x61, 0x76, 0x61, 0x08, 0x04,
+        0x72, 0x6F, 0x63, 0x6B, 0x09, 0x03, 0x6F, 0x69, 0x6C, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00,
+        0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0xFF,
+        0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x02, 0x00, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x00, 0xFF, 0x7F, 0x6A, 0xC3, 0xD0, 0xF0};
+    expect(kNegTempV3.size() == 155, "negative/temp v3 vector is 155 bytes");
     ashfall::SimulationWorld world;
     world.set_cell({-1, 0}, ashfall::kStone);
     world.set_cell({2, 3}, ashfall::kStone);
-    world.set_temperature({-1, 0}, -1);
-    world.set_temperature({2, 3}, 32767);
-    expect(world.save() == kNegTemp, "negative coords and temp edges save golden bytes");
+    expect(world.set_temperature({-1, 0}, -1), "cold stored on stone");
+    expect(world.set_temperature({2, 3}, 32767), "max heat stored on stone");
+    expect(world.save() == kNegTempV3, "negative coords and temp edges save golden v3 bytes");
     ashfall::SimulationWorld restored;
-    expect(restored.load(kNegTemp), "golden negative/temp payload loads");
+    expect(restored.load(kNegTempV3), "golden negative/temp v3 payload loads");
     expect(restored.cell({-1, 0}) == ashfall::kStone && restored.cell({2, 3}) == ashfall::kStone,
         "golden negative-coord cells preserved");
     expect(restored.temperature({-1, 0}) == -1 && restored.temperature({2, 3}) == 32767,
         "golden temp edges preserved");
-    expect(restored.save() == kNegTemp, "golden negative/temp re-save is byte-exact");
+    expect(restored.save() == kNegTempV3, "golden negative/temp re-save is byte-exact");
+}
+
+void test_save_v2_reader_negative_coords_and_temps() {
+    // READER fixture (v2): Group-1/2 golden, load-only (no save pin).
+    const std::vector<std::uint8_t> kNegTemp = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C, 0x02,
+        0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 1,
+        2, 0, 0, 0, 3, 0, 0, 0, 1, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0,
+        0xFF, 0xFF, 2, 0, 0, 0, 3, 0, 0, 0, 0xFF, 0x7F};
+    ashfall::SimulationWorld restored;
+    expect(restored.load(kNegTemp), "v2 negative/temp payload loads");
+    expect(restored.cell({-1, 0}) == ashfall::kStone && restored.cell({2, 3}) == ashfall::kStone,
+        "v2 negative-coord cells preserved");
+    expect(restored.temperature({-1, 0}) == -1 && restored.temperature({2, 3}) == 32767,
+        "v2 temp edges preserved");
 }
 
 void test_player_collision_and_dirty_tracking() {
@@ -973,18 +1113,25 @@ void test_temperature_set_and_query() {
     ashfall::SimulationWorld world;
     expect(world.temperature({0, 0}) == 0, "ambient reads zero");
     expect(world.temperature_count() == 0, "fresh world stores nothing");
-    world.set_temperature({3, -2}, 100);
+    // v3 cell-owned heat: setting heat on air is rejected (false, nothing
+    // stored); every address below is occupied before it is heated.
+    expect(!world.set_temperature({3, -2}, 100), "set-temperature on air rejects");
+    expect(world.temperature_count() == 0, "rejected set stores nothing");
+    world.set_cell({3, -2}, ashfall::kStone);
+    expect(world.set_temperature({3, -2}, 100), "heat stored returns true");
     expect(world.temperature({3, -2}) == 100, "heat stored and read");
     expect(world.temperature_count() == 1, "one entry stored");
-    world.set_temperature({3, -2}, -40);
+    expect(world.set_temperature({3, -2}, -40), "cold overwrite returns true");
     expect(world.temperature({3, -2}) == -40, "cold overwrites heat");
     expect(world.temperature_count() == 1, "overwrite keeps one entry");
-    world.set_temperature({3, -2}, 0);
+    expect(world.set_temperature({3, -2}, 0), "zero erase returns true");
     expect(world.temperature({3, -2}) == 0, "zero reads ambient");
     expect(world.temperature_count() == 0, "zero erases the entry");
-    world.set_temperature({0, 0}, 40000);
+    world.set_cell({0, 0}, ashfall::kStone);
+    expect(world.set_temperature({0, 0}, 40000), "clamped store returns true");
     expect(world.temperature({0, 0}) == 32767, "heat clamps to int16 max");
-    world.set_temperature({1, 1}, -40000);
+    world.set_cell({1, 1}, ashfall::kStone);
+    expect(world.set_temperature({1, 1}, -40000), "clamped cold returns true");
     expect(world.temperature({1, 1}) == -32767, "cold clamps to symmetric min -32767 (keeps negation symmetry)");
 }
 
@@ -1017,17 +1164,18 @@ void test_temperature_two_cells_equalize_exact() {
     expect(world.temperature({0, 0}) == 1 && world.temperature({1, 0}) == 1, "pair conducts to 1");
     world.step();
     expect(world.temperature_count() == 0, "pair fully cools to ambient");
-    // Cold mirror: truncation toward zero is symmetric.
-    world.set_temperature({5, 5}, -100);
+    // Cold mirror: truncation toward zero is symmetric (cells first: heat on
+    // air would reject and store nothing).
     world.set_cell({5, 5}, ashfall::kStone);
     world.set_cell({6, 5}, ashfall::kStone);
+    expect(world.set_temperature({5, 5}, -100), "cold stored on stone");
     world.step();
     expect(world.temperature({5, 5}) == -20 && world.temperature({6, 5}) == -20, "cold spreads symmetrically");
 }
 
 void test_temperature_ambient_world_stays_sparse() {
     ashfall::SimulationWorld empty;
-    expect(empty.save().size() == 8 + 8 + 4 + 0 + 4, "empty v2 save is header plus zero counts");
+    expect(empty.save().size() == 117, "empty v3 save is roster framing plus zero counts");
     ashfall::SimulationWorld world;
     world.fill_rect({0, 10}, {20, 10}, ashfall::kStone);
     world.fill_rect({1, 9}, {19, 9}, ashfall::kWater);
@@ -1035,11 +1183,11 @@ void test_temperature_ambient_world_stays_sparse() {
     for (int i = 0; i < 50; ++i) world.step();
     expect(world.temperature_count() == 0, "ambient play never allocates heat");
     ashfall::SimulationWorld restored;
-    expect(restored.load(world.save()), "ambient v2 save loads");
+    expect(restored.load(world.save()), "ambient v3 save loads");
     expect(restored.temperature_count() == 0, "ambient load stores nothing");
 }
 
-void test_temperature_save_round_trip_v2() {
+void test_temperature_save_round_trip_v3() {
     ashfall::SimulationWorld source;
     source.fill_rect({0, 2}, {2, 2}, ashfall::kStone);
     source.set_cell({1, 0}, ashfall::kSand);
@@ -1056,13 +1204,13 @@ void test_temperature_save_round_trip_v2() {
     expect(source.temperature_count() == 4, "four entries conducted");
     const auto saved = source.save();
     ashfall::SimulationWorld restored;
-    expect(restored.load(saved), "v2 save with heat loads");
+    expect(restored.load(saved), "v3 save with heat loads");
     expect(restored.tick() == 1, "tick preserved");
     expect(restored.cell({1, 1}) == ashfall::kSand, "cells preserved");
     expect(restored.temperature({0, 2}) == 10 && restored.temperature({1, 2}) == 10 &&
             restored.temperature({2, 2}) == -9 && restored.temperature({1, 1}) == -10,
         "heat preserved across round-trip");
-    expect(restored.save() == saved, "v2 round-trip is byte-exact");
+    expect(restored.save() == saved, "v3 round-trip is byte-exact");
 }
 
 void test_temperature_v1_save_still_loads() {
@@ -1075,7 +1223,7 @@ void test_temperature_v1_save_still_loads() {
         ashfall::kStone,
     };
     ashfall::SimulationWorld world;
-    expect(world.load(v1), "v1 save loads under v2 reader");
+    expect(world.load(v1), "v1 save loads under the retained v1 reader");
     expect(world.cell({3, 4}) == ashfall::kStone, "v1 cell preserved");
     expect(world.tick() == 7, "v1 tick preserved");
     expect(world.temperature({3, 4}) == 0, "v1 world reads ambient");
@@ -2141,8 +2289,10 @@ void test_heat_infiltration_save_load_continuation() {
 }
 
 void test_save_rejects_duplicate_cell() {
-    // v2-strict S1: a repeated cell coordinate rejects with DuplicateCell
-    // (prev-compare equality arm AND the find_or_insert claim agree).
+    // v3 policy: save() emits chunk-major ascending cells, so a repeated
+    // coordinate (foreign/hand-corrupted) rejects with BadChunkOrder (the key
+    // compare names dup and descent alike; v1/v2 readers keep the
+    // DuplicateCell/UnsortedCells split). CRC re-sealed after the splice.
     ashfall::SimulationWorld world;
     world.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
     world.set_cell({5, 5}, ashfall::kSand);
@@ -2152,14 +2302,15 @@ void test_save_rejects_duplicate_cell() {
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
     auto dup = snapshot;
-    const std::uint32_t cells = read_u32_le(dup, 16);
-    const std::vector<std::uint8_t> first(dup.begin() + kSaveHeaderBytes,
-        dup.begin() + kSaveHeaderBytes + kSaveCellRecord);
-    dup.insert(dup.begin() + kSaveHeaderBytes + kSaveCellRecord, first.begin(), first.end());
-    write_u32_le(dup, 16, cells + 1);
+    const std::size_t cells_off = g3_v3_cell_count_offset(dup) + 4;
+    const std::uint32_t cell_count = g3_read_u32_le(dup, cells_off - 4);
+    const std::vector<std::uint8_t> first(dup.begin() + cells_off, dup.begin() + cells_off + 9);
+    dup.insert(dup.begin() + cells_off + 9, first.begin(), first.end());
+    g3_write_u32_le(dup, cells_off - 4, cell_count + 1);
+    g3_fix_v3_crc(dup);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(dup, error), "duplicate cell rejected");
-    expect(error == ashfall::SimulationWorld::LoadError::DuplicateCell, "duplicate cell names DuplicateCell");
+    expect(error == ashfall::SimulationWorld::LoadError::BadChunkOrder, "duplicate cell names BadChunkOrder");
     expect(!world.load(dup), "load() agrees on rejection");
     expect(world.occupied_cell_count() == occupied_before, "failed load preserves cell count");
     expect(world.tick() == tick_before, "failed load preserves tick");
@@ -2167,8 +2318,8 @@ void test_save_rejects_duplicate_cell() {
 }
 
 void test_save_rejects_unsorted_cells() {
-    // v2-strict S1: save() always emits ascending cells, so a descending
-    // adjacent pair (foreign/hand-corrupted) rejects with UnsortedCells.
+    // v3 policy: a descending adjacent pair (foreign/hand-corrupted) rejects
+    // with BadChunkOrder. CRC re-sealed after the swap.
     ashfall::SimulationWorld world;
     world.set_cell({0, 0}, ashfall::kStone);
     world.set_cell({2, 0}, ashfall::kStone);
@@ -2177,14 +2328,15 @@ void test_save_rejects_unsorted_cells() {
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
     auto unsorted = snapshot;
-    std::vector<std::uint8_t> first(unsorted.begin() + kSaveHeaderBytes,
-        unsorted.begin() + kSaveHeaderBytes + kSaveCellRecord);
-    std::copy(unsorted.begin() + kSaveHeaderBytes + kSaveCellRecord,
-        unsorted.begin() + kSaveHeaderBytes + 2 * kSaveCellRecord, unsorted.begin() + kSaveHeaderBytes);
-    std::copy(first.begin(), first.end(), unsorted.begin() + kSaveHeaderBytes + kSaveCellRecord);
+    const std::size_t cells_off = g3_v3_cell_count_offset(unsorted) + 4;
+    std::vector<std::uint8_t> first(unsorted.begin() + cells_off, unsorted.begin() + cells_off + 9);
+    std::copy(unsorted.begin() + cells_off + 9, unsorted.begin() + cells_off + 18,
+        unsorted.begin() + cells_off);
+    std::copy(first.begin(), first.end(), unsorted.begin() + cells_off + 9);
+    g3_fix_v3_crc(unsorted);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(unsorted, error), "unsorted cells rejected");
-    expect(error == ashfall::SimulationWorld::LoadError::UnsortedCells, "descent names UnsortedCells");
+    expect(error == ashfall::SimulationWorld::LoadError::BadChunkOrder, "descent names BadChunkOrder");
     expect(!world.load(unsorted), "load() agrees on rejection");
     expect(world.occupied_cell_count() == occupied_before, "failed load preserves cell count");
     expect(world.tick() == tick_before, "failed load preserves tick");
@@ -2192,7 +2344,8 @@ void test_save_rejects_unsorted_cells() {
 }
 
 void test_save_rejects_duplicate_temp() {
-    // v2-strict S1: a repeated temp coordinate rejects with DuplicateTemp.
+    // v3 policy: a repeated temp coordinate rejects with BadChunkOrder
+    // (temps follow the same chunk-major key subsequence as cells).
     ashfall::SimulationWorld world;
     world.set_cell({0, 0}, ashfall::kStone);
     world.set_cell({1, 0}, ashfall::kStone);
@@ -2201,17 +2354,20 @@ void test_save_rejects_duplicate_temp() {
     const auto snapshot = world.save();
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
-    const std::size_t temp_count_offset = kSaveHeaderBytes + 2 * kSaveCellRecord;
+    const std::size_t cells_off = g3_v3_cell_count_offset(snapshot) + 4;
+    const std::uint32_t cell_count = g3_read_u32_le(snapshot, cells_off - 4);
+    const std::size_t temp_count_off = cells_off + static_cast<std::size_t>(cell_count) * 9;
     auto dup = snapshot;
-    const std::uint32_t temps = read_u32_le(dup, temp_count_offset);
-    expect(temps == 2, "fixture holds two temps");
-    const std::size_t first_offset = temp_count_offset + 4;
-    const std::vector<std::uint8_t> first(dup.begin() + first_offset, dup.begin() + first_offset + kSaveTempRecord);
-    dup.insert(dup.begin() + first_offset + kSaveTempRecord, first.begin(), first.end());
-    write_u32_le(dup, temp_count_offset, temps + 1);
+    const std::uint32_t temp_count = g3_read_u32_le(dup, temp_count_off);
+    expect(temp_count == 2, "fixture holds two temps");
+    const std::size_t first_off = temp_count_off + 4;
+    const std::vector<std::uint8_t> first(dup.begin() + first_off, dup.begin() + first_off + 10);
+    dup.insert(dup.begin() + first_off + 10, first.begin(), first.end());
+    g3_write_u32_le(dup, temp_count_off, temp_count + 1);
+    g3_fix_v3_crc(dup);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(dup, error), "duplicate temp rejected");
-    expect(error == ashfall::SimulationWorld::LoadError::DuplicateTemp, "duplicate temp names DuplicateTemp");
+    expect(error == ashfall::SimulationWorld::LoadError::BadChunkOrder, "duplicate temp names BadChunkOrder");
     expect(!world.load(dup), "load() agrees on rejection");
     expect(world.occupied_cell_count() == occupied_before, "failed load preserves cell count");
     expect(world.tick() == tick_before, "failed load preserves tick");
@@ -2219,8 +2375,7 @@ void test_save_rejects_duplicate_temp() {
 }
 
 void test_save_rejects_unsorted_temps() {
-    // v2-strict S1: a descending adjacent temp pair rejects with
-    // UnsortedTemps (temps sort by (x, y) like cells).
+    // v3 policy: a descending adjacent temp pair rejects with BadChunkOrder.
     ashfall::SimulationWorld world;
     world.set_cell({0, 0}, ashfall::kStone);
     world.set_cell({1, 0}, ashfall::kStone);
@@ -2229,17 +2384,19 @@ void test_save_rejects_unsorted_temps() {
     const auto snapshot = world.save();
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
-    const std::size_t temp_count_offset = kSaveHeaderBytes + 2 * kSaveCellRecord;
+    const std::size_t cells_off = g3_v3_cell_count_offset(snapshot) + 4;
+    const std::uint32_t cell_count = g3_read_u32_le(snapshot, cells_off - 4);
+    const std::size_t temp_count_off = cells_off + static_cast<std::size_t>(cell_count) * 9;
     auto unsorted = snapshot;
-    const std::size_t first_offset = temp_count_offset + 4;
-    std::vector<std::uint8_t> first(unsorted.begin() + first_offset,
-        unsorted.begin() + first_offset + kSaveTempRecord);
-    std::copy(unsorted.begin() + first_offset + kSaveTempRecord,
-        unsorted.begin() + first_offset + 2 * kSaveTempRecord, unsorted.begin() + first_offset);
-    std::copy(first.begin(), first.end(), unsorted.begin() + first_offset + kSaveTempRecord);
+    const std::size_t first_off = temp_count_off + 4;
+    std::vector<std::uint8_t> first(unsorted.begin() + first_off, unsorted.begin() + first_off + 10);
+    std::copy(unsorted.begin() + first_off + 10, unsorted.begin() + first_off + 20,
+        unsorted.begin() + first_off);
+    std::copy(first.begin(), first.end(), unsorted.begin() + first_off + 10);
+    g3_fix_v3_crc(unsorted);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(unsorted, error), "unsorted temps rejected");
-    expect(error == ashfall::SimulationWorld::LoadError::UnsortedTemps, "descent names UnsortedTemps");
+    expect(error == ashfall::SimulationWorld::LoadError::BadChunkOrder, "descent names BadChunkOrder");
     expect(!world.load(unsorted), "load() agrees on rejection");
     expect(world.occupied_cell_count() == occupied_before, "failed load preserves cell count");
     expect(world.tick() == tick_before, "failed load preserves tick");
@@ -2247,20 +2404,23 @@ void test_save_rejects_unsorted_temps() {
 }
 
 void test_save_rejects_ambient_temp() {
-    // v2-strict S1: canonical saves never store ambient zeros, so a stored
-    // zero rejects with AmbientTempStored.
+    // Canonical saves never store ambient zeros, so a stored zero rejects
+    // with AmbientTempStored (v2 and v3 agree on the name).
     ashfall::SimulationWorld world;
     world.set_cell({3, 3}, ashfall::kStone);
     world.set_temperature({3, 3}, 50);
     const auto snapshot = world.save();
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
+    const std::size_t cells_off = g3_v3_cell_count_offset(snapshot) + 4;
+    const std::uint32_t cell_count = g3_read_u32_le(snapshot, cells_off - 4);
+    const std::size_t temp_count_off = cells_off + static_cast<std::size_t>(cell_count) * 9;
     auto zeroed = snapshot;
-    const std::size_t temp_count_offset = kSaveHeaderBytes + kSaveCellRecord;
-    expect(read_u32_le(zeroed, temp_count_offset) == 1, "fixture holds one temp");
-    const std::size_t temp_offset = temp_count_offset + 4;
-    zeroed[temp_offset + 8] = 0;
-    zeroed[temp_offset + 9] = 0;
+    expect(g3_read_u32_le(zeroed, temp_count_off) == 1, "fixture holds one temp");
+    const std::size_t temp_off = temp_count_off + 4;
+    zeroed[temp_off + 8] = 0;
+    zeroed[temp_off + 9] = 0;
+    g3_fix_v3_crc(zeroed);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(zeroed, error), "stored ambient temp rejected");
     expect(error == ashfall::SimulationWorld::LoadError::AmbientTempStored,
@@ -2272,8 +2432,9 @@ void test_save_rejects_ambient_temp() {
 }
 
 void test_save_rejects_oversize_count() {
-    // v2-strict S1: the count cap fires BEFORE reserve_for, so a 5M-count
-    // header in a 20-byte file rejects with Oversize (no large alloc, fast).
+    // The count cap fires BEFORE reserve_for, so a 5M cell_count in a small
+    // file rejects with Oversize (no large alloc, fast). CRC re-sealed so the
+    // cap — not the integrity check — is what fires.
     ashfall::SimulationWorld world;
     world.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
     world.set_cell({5, 5}, ashfall::kSand);
@@ -2282,8 +2443,9 @@ void test_save_rejects_oversize_count() {
     const auto snapshot = world.save();
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
-    std::vector<std::uint8_t> huge(snapshot.begin(), snapshot.begin() + kSaveHeaderBytes);
-    write_u32_le(huge, 16, 5000000u);
+    auto huge = snapshot;
+    g3_write_u32_le(huge, g3_v3_cell_count_offset(huge), 5000000u);
+    g3_fix_v3_crc(huge);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(huge, error), "oversize count rejected");
     expect(error == ashfall::SimulationWorld::LoadError::Oversize, "oversize count names Oversize");
@@ -2294,15 +2456,16 @@ void test_save_rejects_oversize_count() {
 }
 
 void test_save_rejects_out_of_range_coord() {
-    // v2-strict S1: |x|,|y| beyond kMaxSaveCoord (1<<24) reject with
-    // CoordOutOfRange (play level is 0..511; x here is (1<<24)+1).
+    // |x|,|y| beyond kMaxSaveCoord (1<<24) reject with CoordOutOfRange (play
+    // level is 0..511; x here is (1<<24)+1). CRC re-sealed.
     ashfall::SimulationWorld world;
     world.set_cell({5, 5}, ashfall::kStone);
     const auto snapshot = world.save();
     const std::size_t occupied_before = world.occupied_cell_count();
     const std::uint64_t tick_before = world.tick();
     auto far = snapshot;
-    write_u32_le(far, kSaveHeaderBytes, (1u << 24) + 1);
+    g3_write_u32_le(far, g3_v3_cell_count_offset(far) + 4, (1u << 24) + 1);
+    g3_fix_v3_crc(far);
     ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
     expect(!world.load_with_diagnostic(far, error), "out-of-range coord rejected");
     expect(error == ashfall::SimulationWorld::LoadError::CoordOutOfRange,
@@ -2314,13 +2477,14 @@ void test_save_rejects_out_of_range_coord() {
 }
 
 void test_save_rejects_chunk_bomb() {
-    // v2-strict S1: 4097 cells 64 apart land in 4097 distinct chunks (chunk
-    // size 64), tripping the kMaxSaveChunks (4096) guard with a ~37KB file.
-    // Cells sort ascending by construction, so only the bomb guard can fire.
+    // 4097 cells 64 apart land in 4097 distinct chunks (chunk size 64),
+    // tripping the kMaxSaveChunks (4096) guard. save() emits them chunk-major
+    // ascending by construction with a valid CRC, so only the bomb guard fires.
+    // v3 file: 117-byte empty framing + 9 bytes per cell, no temps.
     ashfall::SimulationWorld bomb_source;
     for (int i = 0; i < 4097; ++i) bomb_source.set_cell({64 * i, 0}, ashfall::kStone);
     const auto bomb = bomb_source.save();
-    expect(bomb.size() == kSaveHeaderBytes + 4097 * kSaveCellRecord + 4, "bomb file stays thin");
+    expect(bomb.size() == 117 + 4097 * 9, "bomb file stays thin");
     ashfall::SimulationWorld world;
     world.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
     world.set_cell({5, 5}, ashfall::kSand);
@@ -2507,6 +2671,1218 @@ void test_loader_parse_output_is_transactional() {
     expect(!error.empty(), "failed reaction parse names the fault");
 }
 
+// Group 3 (Task T) JSON corpus: syntax table + material list + reaction list
+// (backlog §12). Table-driven where mechanical; every case asserts
+// accept/reject, rejects spot-check path-prefixed messages using CURRENT
+// code strings (identifier class `[a-z][a-z0-9_-]*` — hyphen allowed).
+void test_json_syntax_corpus() {
+    struct Case {
+        const char* name;
+        std::string input;
+        bool accept;
+        const char* want;
+    };
+    const std::vector<Case> cases = {
+        {"empty", "", false, "unexpected end of input"},
+        {"garbage", "{unterminated", false, "expected string key"},
+        {"trailing-comma-object", "{\"a\": 1,}", false, "expected string key"},
+        {"trailing-comma-array", "[1, 2,]", false, "unexpected character"},
+        {"dup-key", "{\"a\": 1, \"a\": 2}", false, "duplicate key \"a\""},
+        {"unterminated-string", "\"abc", false, "unterminated string"},
+        {"bad-escape-n", "\"a\\nb\"", false, "unsupported escape"},
+        {"bad-escape-u", "\"\\u0041\"", false, "unsupported escape"},
+        {"good-escapes", "\"a\\\"b\\\\c\"", true, ""},
+        {"truex", "truex", false, "trailing characters after top-level value"},
+        {"bare-true-suffix", "tru", false, "expected 'true' or 'false'"},
+        {"null", "null", false, "unexpected character 'n'"},
+        {"leading-zero", "01", false, "leading zeros are not allowed"},
+        {"negative-leading-zero", "-01", false, "leading zeros are not allowed"},
+        {"double-zero", "00", false, "leading zeros are not allowed"},
+        {"zero", "0", true, ""},
+        {"negative-zero", "-0", true, ""},
+        {"max-int", "1000000000", true, ""},
+        {"min-int", "-1000000000", true, ""},
+        {"over-max", "1000000001", false, "limit: integer magnitude exceeds"},
+        {"under-min", "-1000000001", false, "limit: integer magnitude exceeds"},
+        {"float-dot", "1.5", false, "unsupported number continuation '.'"},
+        {"float-exp", "1e3", false, "unsupported number continuation 'e'"},
+        {"float-Exp", "1E3", false, "unsupported number continuation 'E'"},
+        {"control-char", std::string("\"a\x01b\""), false, "unescaped control character in string"},
+        {"utf8-passthrough", "\"caf\xc3\xa9\"", true, ""},
+        {"trailing-ws", "1 ", true, ""},
+        {"nested", "{\"a\": {\"b\": [1, {\"c\": true}]}}", true, ""},
+        {"top-array", "[1]", true, ""},
+    };
+    for (const Case& c : cases) {
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser(c.input);
+        const bool ok = parser.run(root);
+        if (c.accept) {
+            if (!ok) std::cerr << "SYNTAX ACCEPT-FAIL [" << c.name << "]: " << parser.error() << '\n';
+            expect(ok, c.name);
+            expect(parser.error().empty(), c.name);
+        } else {
+            if (ok) std::cerr << "SYNTAX ACCEPTED BAD [" << c.name << "]: " << c.input << '\n';
+            expect(!ok, c.name);
+            expect(parser.error().find(c.want) != std::string::npos, c.name);
+        }
+    }
+}
+
+void test_json_parser_limits() {
+    // Default input-byte boundary: 1MiB+1 rejects fast, before any parsing.
+    {
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser(std::string((1u << 20) + 1, 'x'));
+        expect(!parser.run(root), "1MiB+1 input rejects");
+        expect(parser.error().find("limit: input exceeds 1048576 bytes") != std::string::npos,
+            "input cap names the limit");
+    }
+    // Depth ±1 around max_depth 64 (nested arrays).
+    {
+        std::string deep64, deep65;
+        for (int i = 0; i < 64; ++i) deep64 += '[';
+        deep64 += '0';
+        for (int i = 0; i < 64; ++i) deep64 += ']';
+        deep65 = '[' + deep64 + ']';
+        ashfall::JsonValue root;
+        ashfall::JsonParser ok_parser(deep64);
+        expect(ok_parser.run(root), "depth 64 accepts");
+        ashfall::JsonParser bad_parser(deep65);
+        expect(!bad_parser.run(root), "depth 65 rejects");
+        expect(bad_parser.error().find("limit: nesting depth exceeds 64") != std::string::npos,
+            "depth cap names the limit");
+    }
+    // Custom small budgets pin each pre-allocation check directly.
+    {
+        ashfall::JsonLimits limits;
+        limits.max_nodes = 3; // "[1, 2, 3]" needs 4 (array + 3 ints)
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser("[1, 2, 3]", limits);
+        expect(!parser.run(root), "tiny node budget rejects");
+        expect(parser.error().find("limit: node count exceeds 3") != std::string::npos,
+            "node cap names the limit");
+    }
+    {
+        ashfall::JsonLimits limits;
+        limits.max_array_items = 2;
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser("[1, 2, 3]", limits);
+        expect(!parser.run(root), "tiny array budget rejects");
+        expect(parser.error().find("limit: array exceeds 2 items") != std::string::npos,
+            "array cap names the limit");
+    }
+    {
+        ashfall::JsonLimits limits;
+        limits.max_object_fields = 1;
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser("{\"a\": 1, \"b\": 2}", limits);
+        expect(!parser.run(root), "tiny object budget rejects");
+        expect(parser.error().find("limit: object exceeds 1 fields") != std::string::npos,
+            "object cap names the limit");
+    }
+    {
+        ashfall::JsonLimits limits;
+        limits.max_string_bytes = 2;
+        ashfall::JsonValue root;
+        ashfall::JsonParser parser("\"abcdef\"", limits);
+        expect(!parser.run(root), "tiny string budget rejects");
+        expect(parser.error().find("limit: string data exceeds 2 bytes") != std::string::npos,
+            "string cap names the limit");
+    }
+    // Schema-level caps (checked before row decoding allocates any spec).
+    {
+        std::string materials = "{\"version\": 1, \"materials\": [";
+        for (int i = 0; i < 257; ++i) {
+            if (i > 0) materials += ',';
+            materials += "{\"id\": " + std::to_string(i % 256) + ", \"name\": \"m" +
+                         std::to_string(i) +
+                         "\", \"movement\": \"static\", \"solid\": false, \"density\": 0, "
+                         "\"color\": [1, 2, 3]}";
+        }
+        materials += "]}";
+        ashfall::MaterialTable table;
+        std::string error;
+        expect(!ashfall::parse_material_data(materials, table, error), "257 materials reject");
+        expect(error == "limit: materials array exceeds 256 entries", "material cap names the limit");
+    }
+    {
+        std::string reactions = "{\"version\": 1, \"reactions\": [";
+        for (int i = 0; i < 4097; ++i) {
+            if (i > 0) reactions += ',';
+            reactions += "{\"name\": \"r" + std::to_string(i) +
+                         "\", \"probability\": 100, \"reactants\": [{\"material\": \"fire\"}], "
+                         "\"products\": [{\"material\": \"air\"}]}";
+        }
+        reactions += "]}";
+        ashfall::ReactionTable table;
+        std::string error;
+        expect(!ashfall::parse_reaction_data(reactions, table, error), "4097 reactions reject");
+        expect(error == "limit: reactions array exceeds 4096 entries", "reaction cap names the limit");
+    }
+}
+
+void test_json_material_corpus() {
+    const char* kAir =
+        "{\"id\": 0, \"name\": \"air\", \"movement\": \"static\", \"solid\": false, \"density\": 0, "
+        "\"color\": [18, 20, 24]}";
+    const char* kStone =
+        "{\"id\": 1, \"name\": \"stone\", \"movement\": \"static\", \"solid\": true, \"density\": 2000, "
+        "\"color\": [128, 133, 138], \"tags\": [\"static\"], \"hardness\": 3}";
+    auto doc = [&](const std::string& rows) {
+        return std::string("{\"version\": 1, \"materials\": [") + rows + "]}";
+    };
+    struct Case {
+        const char* name;
+        std::string input;
+        bool accept;
+        const char* want;
+    };
+    const std::vector<Case> cases = {
+        {"minimal", doc(std::string(kAir) + "," + kStone), true, ""},
+        {"hyphen-names", doc(std::string(kAir) +
+                              ",{\"id\": 1, \"name\": \"slag-heap\", \"movement\": \"static\", "
+                              "\"solid\": true, \"density\": 9, \"color\": [1, 2, 3], "
+                              "\"tags\": [\"heavy-stuff\"], \"hardness\": 1}"),
+            true, ""},
+        {"dup-id", doc(std::string(kAir) + "," + kAir), false, "materials[1]: duplicate material id 0"},
+        {"dup-name",
+            doc(std::string(kAir) + "," + kStone +
+                ",{\"id\": 2, \"name\": \"stone\", \"movement\": \"static\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2, 3]}"),
+            false, "materials[2]: duplicate material name \"stone\""},
+        {"missing-air", doc(kStone), false, "material id 0 (air) is required"},
+        {"bad-air",
+            doc("{\"id\": 0, \"name\": \"void\", \"movement\": \"static\", \"solid\": false, "
+                "\"density\": 0, \"color\": [1, 2, 3]}"),
+            false, "material id 0 must be non-solid static air with density 0"},
+        {"bad-movement",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"smoke\", \"movement\": \"plasma\", \"solid\": false, "
+                "\"density\": 0, \"color\": [1, 2, 3]}"),
+            false,
+            "materials[1].movement: unknown movement \"plasma\" (want static/powder/liquid/gas)"},
+        {"density-high",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"heavy\", \"movement\": \"static\", \"solid\": true, "
+                "\"density\": 100001, \"color\": [1, 2, 3]}"),
+            false, "materials[1].density: field \"density\" out of range"},
+        {"density-negative",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"light\", \"movement\": \"static\", \"solid\": false, "
+                "\"density\": -1, \"color\": [1, 2, 3]}"),
+            false, "materials[1].density: field \"density\" out of range"},
+        {"hardness-high",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"hard\", \"movement\": \"static\", \"solid\": true, "
+                "\"density\": 9, \"color\": [1, 2, 3], \"hardness\": 7}"),
+            false, "materials[1].hardness: field \"hardness\" out of range"},
+        {"dup-tags",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"gassy\", \"movement\": \"gas\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2, 3], \"tags\": [\"vapour\", \"vapour\"]}"),
+            false, "material \"gassy\" has a duplicate tag"},
+        {"empty-tag",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"gassy\", \"movement\": \"gas\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2, 3], \"tags\": [\"\"]}"),
+            false, "material \"tags\" must be non-empty strings"},
+        {"unknown-field",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"stone\", \"movement\": \"static\", \"solid\": true, "
+                "\"density\": 9, \"color\": [1, 2, 3], \"hardnes\": 3}"),
+            false, "materials[1]: unknown key \"hardnes\""},
+        {"root-metadata", "{\"version\": 1, \"materials\": [], \"metadata\": {}}", false,
+            "(root): unknown key \"metadata\""},
+        {"bad-identifier",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"Sand\", \"movement\": \"static\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2, 3]}"),
+            false,
+            "materials[1].name: \"Sand\" is not a valid identifier (want [a-z][a-z0-9_-]*)"},
+        {"bad-tag-identifier",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"gassy\", \"movement\": \"gas\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2, 3], \"tags\": [\"Bad Tag\"]}"),
+            false, "\"Bad Tag\" is not a valid identifier (want [a-z][a-z0-9_-]*)"},
+        {"color-short",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"odd\", \"movement\": \"static\", \"solid\": false, "
+                "\"density\": 1, \"color\": [1, 2]}"),
+            false, "materials[1].color: material \"color\" must be an array of 3 integers"},
+        {"solid-powder",
+            doc(std::string(kAir) +
+                ",{\"id\": 1, \"name\": \"brick\", \"movement\": \"powder\", \"solid\": true, "
+                "\"density\": 5, \"color\": [1, 2, 3]}"),
+            false, "materials[1]: material \"brick\" is solid but not static"},
+        {"version", "{\"version\": 2, \"materials\": []}", false, "unsupported data version (want 1)"},
+        {"empty-array", "{\"version\": 1, \"materials\": []}", false,
+            "\"materials\" must be a non-empty array"},
+    };
+    for (const Case& c : cases) {
+        ashfall::MaterialTable table;
+        std::string error;
+        const bool ok = ashfall::parse_material_data(c.input, table, error);
+        if (c.accept) {
+            if (!ok) std::cerr << "MATERIAL ACCEPT-FAIL [" << c.name << "]: " << error << '\n';
+            expect(ok, c.name);
+            expect(error.empty(), c.name);
+        } else {
+            if (ok) std::cerr << "MATERIAL ACCEPTED BAD [" << c.name << "]\n";
+            expect(!ok, c.name);
+            expect(error.find(c.want) != std::string::npos, c.name);
+        }
+    }
+}
+
+void test_json_reaction_corpus() {
+    const char* kQuench =
+        "{\"name\": \"quench\", \"probability\": 20, \"reactants\": [{\"material\": \"fire\"}, "
+        "{\"material\": \"water\"}], \"products\": [{\"material\": \"fire\"}, "
+        "{\"material\": \"steam\"}]}";
+    auto doc = [&](const std::string& rows) {
+        return std::string("{\"version\": 1, \"reactions\": [") + rows + "]}";
+    };
+    struct Case {
+        const char* name;
+        std::string input;
+        bool accept;
+        const char* want;
+    };
+    const std::vector<Case> cases = {
+        {"valid", doc(kQuench), true, ""},
+        {"hyphen-name",
+            doc("{\"name\": \"heat-ignition\", \"probability\": 100, \"reactants\": "
+                "[{\"tag\": \"burnable\"}], \"products\": [{\"material\": \"fire\"}]}"),
+            true, ""},
+        {"dual-both-present",
+            doc("{\"name\": \"dual\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"water\", \"tag\": \"liquid\"}], \"products\": "
+                "[{\"material\": \"water\"}]}"),
+            false, "reactions[0].reactants[0]: specify exactly one of \"material\" or \"tag\""},
+        {"dual-neither",
+            doc("{\"name\": \"empty\", \"probability\": 100, \"reactants\": [{}], \"products\": "
+                "[{\"material\": \"fire\"}]}"),
+            false, "reactions[0].reactants[0]: specify exactly one of \"material\" or \"tag\""},
+        {"dual-unknown-key",
+            doc("{\"name\": \"typo\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\", \"materail\": \"x\"}], \"products\": "
+                "[{\"material\": \"air\"}]}"),
+            false, "reactions[0].reactants[0]: unknown key \"materail\""},
+        {"dual-tag-unknown-key",
+            doc("{\"name\": \"typo\", \"probability\": 100, \"reactants\": "
+                "[{\"tag\": \"burnable\", \"tag2\": \"x\"}], \"products\": "
+                "[{\"material\": \"fire\"}]}"),
+            false, "reactions[0].reactants[0]: unknown key \"tag2\""},
+        {"dual-empty-value",
+            doc("{\"name\": \"empty\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"\"}], \"products\": [{\"material\": \"fire\"}]}"),
+            false, "reactions[0].reactants[0]: specify exactly one of \"material\" or \"tag\""},
+        {"product-temp-wrong-type",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"product_temperature\": \"hot\"}"),
+            false,
+            "reactions[0].product_temperature: field \"product_temperature\" must be an integer"},
+        {"temperature-wrong-type",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"temperature\": 5}"),
+            false, "reactions[0].temperature: temperature must be an object"},
+        {"probability-wrong-type",
+            doc("{\"name\": \"hot\", \"probability\": \"20\", \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}]}"),
+            false, "reactions[0].probability: field \"probability\" must be an integer"},
+        {"root-metadata", "{\"version\": 1, \"reactions\": [], \"metadata\": {}}", false,
+            "(root): unknown key \"metadata\""},
+        {"reaction-unknown-key",
+            doc("{\"name\": \"hot\", \"probablity\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}]}"),
+            false, "reactions[0]: unknown key \"probablity\""},
+        {"product-unknown-key",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\", "
+                "\"extra\": 1}]}"),
+            false, "reactions[0].products[0]: unknown key \"extra\""},
+        {"gate-typo",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"temperature\": {\"min_temperatue\": 25}}"),
+            false, "reactions[0].temperature: unknown key \"min_temperatue\""},
+        {"empty-temp-object",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"temperature\": {}}"),
+            false, "reactions[0].temperature: empty temperature object is not allowed"},
+        {"inverted-gate",
+            doc("{\"name\": \"gate\", \"probability\": 10, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"air\"}], "
+                "\"temperature\": {\"min_temperature\": 50, \"max_temperature\": 10}}"),
+            false, "reactions[0] \"gate\": temperature min exceeds max"},
+        {"temp-max-bound",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"temperature\": {\"min_temperature\": -32767, \"max_temperature\": 32767}}"),
+            true, ""},
+        {"temp-out-of-range",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"temperature\": {\"min_temperature\": -32768}}"),
+            false,
+            "reactions[0].temperature.min_temperature: field \"min_temperature\" out of range"},
+        {"product-temp-out-of-range",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}], "
+                "\"product_temperature\": 32768}"),
+            false,
+            "reactions[0].product_temperature: field \"product_temperature\" out of range"},
+        {"too-many-products",
+            doc("{\"name\": \"wide\", \"probability\": 10, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}, "
+                "{\"material\": \"air\"}]}"),
+            false, "reactions[0].products: need 1 product per reactant slot (missing tail = identity)"},
+        {"dup-names", doc(std::string(kQuench) + "," + kQuench), false,
+            "duplicate reaction name \"quench\""},
+        {"unresolved-reactant-parses",
+            doc("{\"name\": \"weird\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"unobtainium\"}], \"products\": [{\"material\": \"air\"}]}"),
+            true, ""},
+        {"unresolved-product-parses",
+            doc("{\"name\": \"weird\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"unobtainium\"}]}"),
+            true, ""},
+        {"primary-air",
+            doc("{\"name\": \"suck\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"air\"}], \"products\": [{\"material\": \"air\"}]}"),
+            false, "reactions[0] \"suck\": primary reactant cannot be \"air\""},
+        {"air-to-occupied",
+            doc("{\"name\": \"create\", \"probability\": 10, \"reactants\": "
+                "[{\"material\": \"steam\"}, {\"material\": \"air\"}], \"products\": "
+                "[{\"material\": \"air\"}, {\"material\": \"water\"}]}"),
+            false, "reactions[0] \"create\": air reactant cannot yield occupied product"},
+        {"probability-range",
+            doc("{\"name\": \"hot\", \"probability\": 101, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"fire\"}]}"),
+            false, "reactions[0].probability: field \"probability\" out of range"},
+        {"version", "{\"version\": 2, \"reactions\": []}", false,
+            "unsupported reaction data version (want 1)"},
+        {"empty-array", "{\"version\": 1, \"reactions\": []}", false,
+            "\"reactions\" must be a non-empty array"},
+        {"bad-name-identifier",
+            doc("{\"name\": \"Bad Name\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"air\"}]}"),
+            false,
+            "reactions[0].name: \"Bad Name\" is not a valid identifier (want [a-z][a-z0-9_-]*)"},
+        {"bad-reactant-identifier",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"Bad Name\"}], \"products\": [{\"material\": \"air\"}]}"),
+            false,
+            "reactions[0].reactants[0]: \"Bad Name\" is not a valid identifier "
+            "(want [a-z][a-z0-9_-]*)"},
+        {"bad-product-identifier",
+            doc("{\"name\": \"hot\", \"probability\": 100, \"reactants\": "
+                "[{\"material\": \"fire\"}], \"products\": [{\"material\": \"-lead\"}]}"),
+            false,
+            "reactions[0].products[0]: \"-lead\" is not a valid identifier (want [a-z][a-z0-9_-]*)"},
+    };
+    for (const Case& c : cases) {
+        ashfall::ReactionTable table;
+        std::string error;
+        const bool ok = ashfall::parse_reaction_data(c.input, table, error);
+        if (c.accept) {
+            if (!ok) std::cerr << "REACTION ACCEPT-FAIL [" << c.name << "]: " << error << '\n';
+            expect(ok, c.name);
+            expect(error.empty(), c.name);
+        } else {
+            if (ok) std::cerr << "REACTION ACCEPTED BAD [" << c.name << "]\n";
+            expect(!ok, c.name);
+            expect(error.find(c.want) != std::string::npos, c.name);
+        }
+    }
+}
+
+void test_json_identifier_policy() {
+    // Owner decision: `[a-z][a-z0-9_-]*` (hyphen admitted for shipped names
+    // like "oil-flash"). Reaction names ARE identifier-checked.
+    expect(ashfall::is_valid_identifier("oil-flash"), "hyphenated name valid");
+    expect(ashfall::is_valid_identifier("heat-ignition"), "hyphenated name valid");
+    expect(!ashfall::is_valid_identifier("Bad Name"), "caps+space invalid");
+    expect(!ashfall::is_valid_identifier("-lead"), "leading hyphen invalid");
+    expect(!ashfall::is_valid_identifier(""), "empty invalid");
+    expect(!ashfall::is_valid_identifier("0abc"), "leading digit invalid");
+    auto reaction_doc = [](const std::string& name) {
+        return std::string("{\"version\": 1, \"reactions\": [{\"name\": \"") + name +
+               "\", \"probability\": 100, \"reactants\": [{\"material\": \"fire\"}], "
+               "\"products\": [{\"material\": \"air\"}]}]}";
+    };
+    {
+        ashfall::ReactionTable table;
+        std::string error;
+        expect(ashfall::parse_reaction_data(reaction_doc("oil-flash"), table, error),
+            "hyphenated reaction name accepts");
+    }
+    for (const char* bad : {"Bad Name", "-lead"}) {
+        ashfall::ReactionTable table;
+        std::string error;
+        expect(!ashfall::parse_reaction_data(reaction_doc(bad), table, error),
+            "invalid reaction name rejects");
+        expect(error.find("is not a valid identifier (want [a-z][a-z0-9_-]*)") != std::string::npos,
+            "reaction-name fault names the identifier class");
+    }
+    {
+        ashfall::ReactionTable table;
+        std::string error;
+        expect(!ashfall::parse_reaction_data(reaction_doc(""), table, error),
+            "empty reaction name rejects");
+        expect(error.find("must be a non-empty string") != std::string::npos,
+            "empty name names the fault");
+    }
+}
+
+void test_reaction_link_stage() {
+    // Vocabulary straight from the default table (no hand-listed copy to rot).
+    const ashfall::MaterialTable defaults = ashfall::default_material_table();
+    std::vector<std::string> names;
+    std::vector<std::string> tags;
+    for (const ashfall::MaterialSpec& spec : defaults.materials) {
+        names.push_back(spec.name);
+        for (const std::string& tag : spec.tags) {
+            if (std::find(tags.begin(), tags.end(), tag) == tags.end()) tags.push_back(tag);
+        }
+    }
+    auto rule = [](const char* name, ashfall::ReactantSpec reactant, const char* product) {
+        ashfall::ReactionTable table;
+        table.version = 1;
+        ashfall::ReactionSpec spec;
+        spec.name = name;
+        spec.probability = 100;
+        spec.reactants = {reactant};
+        spec.products = {{product}};
+        table.reactions = {spec};
+        return table;
+    };
+    {
+        ashfall::ReactionTable table = rule("quench", {false, "fire"}, "fire");
+        table.reactions[0].reactants.push_back({false, "water"});
+        table.reactions[0].products.push_back({"steam"});
+        std::string error;
+        expect(ashfall::validate_reaction_links(table, names, tags, error), "known names link");
+        expect(error.empty(), "link error cleared on success");
+    }
+    {
+        ashfall::ReactionTable table = rule("quench", {false, "fire"}, "fire");
+        table.reactions[0].reactants.push_back({false, "unobtainium"});
+        table.reactions[0].products.push_back({"steam"});
+        std::string error;
+        expect(!ashfall::validate_reaction_links(table, names, tags, error),
+            "unknown reactant material rejected");
+        expect(error ==
+                "reactions[0] \"quench\": reactants[1]: unknown material \"unobtainium\"",
+            "unknown reactant names rule+field");
+    }
+    {
+        ashfall::ReactionTable table = rule("quench", {false, "fire"}, "unobtainium");
+        std::string error;
+        expect(!ashfall::validate_reaction_links(table, names, tags, error),
+            "unknown product material rejected");
+        expect(error ==
+                "reactions[0] \"quench\": products[0]: unknown material \"unobtainium\"",
+            "unknown product names rule+field");
+    }
+    {
+        // Dead tag ("vapor" vs the shipped "vapour"): a config bug, rejected.
+        ashfall::ReactionTable table = rule("dry", {true, "vapor"}, "air");
+        std::string error;
+        expect(!ashfall::validate_reaction_links(table, names, tags, error), "dead tag rejected");
+        expect(error == "reactions[0] \"dry\": reactants[0]: tag \"vapor\" matches no material",
+            "dead tag names rule+field");
+    }
+    {
+        ashfall::ReactionTable table = rule("suck", {false, "air"}, "air");
+        std::string error;
+        expect(!ashfall::validate_reaction_links(table, names, tags, error),
+            "primary-air rejected at link");
+        expect(error.find("primary reactant cannot be \"air\"") != std::string::npos,
+            "primary-air names the fault");
+    }
+    // The load_reactions path runs the same link stage BEFORE resolve (rules_
+    // untouched on reject): dead tag and primary-air structural rejects both
+    // fail the load with prior rules intact.
+    {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(rule("burnout", {false, "fire"}, "air")), "burnout loads");
+        expect(world.reaction_count() == 1, "one rule stored");
+        expect(!world.load_reactions(rule("dry", {true, "vapor"}, "air")),
+            "dead tag rejected through load_reactions");
+        expect(world.reaction_count() == 1, "dead-tag load keeps previous rules");
+        ashfall::ReactionTable primary_air = rule("suck", {false, "air"}, "air");
+        // NOTE: primary-air is already rejected structurally, so this load
+        // fails at structure validation — the link re-check above covers the
+        // direct-link caller route for the same fault.
+        expect(!world.load_reactions(primary_air), "primary-air rejected through load_reactions");
+        expect(world.reaction_count() == 1, "primary-air load keeps previous rules");
+    }
+}
+
+void test_reaction_p0_warning() {
+    // p=0 rules ACCEPT (legitimate priority-suppressors) and populate the
+    // warnings channel with the exact contract text.
+    ashfall::ReactionTable table;
+    table.version = 1;
+    ashfall::ReactionSpec idle;
+    idle.name = "idle";
+    idle.probability = 0;
+    idle.reactants = {{false, "fire"}};
+    idle.products = {{"air"}};
+    table.reactions = {idle};
+    std::string error;
+    std::vector<std::string> warnings;
+    expect(ashfall::validate_reaction_table(table, error, &warnings), "p=0 validates");
+    expect(error.empty(), "no error for p=0");
+    expect(warnings.size() == 1, "one p=0 warning");
+    expect(warnings[0] ==
+            "reactions[0] \"idle\": p=0 never fires but suppresses lower rules on full match",
+        "p=0 warning text exact");
+    const char* kJson =
+        "{\"version\": 1, \"reactions\": [{\"name\": \"idle\", \"probability\": 0, "
+        "\"reactants\": [{\"material\": \"fire\"}], \"products\": [{\"material\": \"air\"}]}]}";
+    ashfall::ReactionTable parsed;
+    expect(ashfall::parse_reaction_data(kJson, parsed, error), "p=0 parses");
+    ashfall::SimulationWorld world;
+    expect(world.load_reactions(parsed), "p=0 loads");
+    expect(world.reaction_count() == 1, "p=0 rule stored");
+}
+
+// Group 3 (Task T) S3 P1–P4: serialization purity, round-trip + continuation
+// (incl. FlatMap-capacity-boundary straddle sizes), canonical save(load(b))
+// identity (+ documented non-canonical false case), byte-identity acceptance.
+void test_s3_p1_purity_insertion_order_independent() {
+    // P1: the v3 writer walks chunks_ (ordered) row-major — emission order is
+    // canonical by construction, so insertion order never affects the bytes
+    // (this is what kills the sort AND neutralizes layout divergence).
+    const std::vector<std::pair<ashfall::CellPosition, ashfall::MaterialId>> cells = {
+        {{0, 0}, ashfall::kFire}, {{1, 0}, ashfall::kWater}, {{2, 0}, ashfall::kWood},
+        {{0, 1}, ashfall::kStone}, {{1, 1}, ashfall::kSteam}, {{2, 1}, ashfall::kStone},
+        {{-70, -70}, ashfall::kSand}, {{130, 5}, ashfall::kOil},
+    };
+    ashfall::SimulationWorld forward;
+    for (const auto& [pos, mat] : cells) forward.set_cell(pos, mat);
+    ashfall::SimulationWorld backward;
+    for (auto it = cells.rbegin(); it != cells.rend(); ++it) backward.set_cell(it->first, it->second);
+    expect(forward.save() == backward.save(), "insertion order never affects save bytes");
+    expect(forward.save().size() > 8 && forward.save()[7] == ashfall::SimulationWorld::kSaveVersion3,
+        "purity checked on v3 bytes");
+    ashfall::SimulationWorld restored;
+    expect(restored.load(forward.save()), "order-independent bytes load");
+    expect(restored.save() == forward.save(), "order-independent bytes round-trip");
+}
+
+void test_s3_p2_capacity_straddle() {
+    // P2 + flatmap-review §F2: FlatMap layout differs between the saving
+    // session (insertion order) and the loading session (sorted file order),
+    // so save→load→continue must agree at every occupancy, especially across
+    // capacity-growth thresholds — straddle sizes on both sides.
+    const int sizes[] = {1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128,
+        129, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025};
+    for (int n : sizes) {
+        ashfall::SimulationWorld world;
+        for (int x = 0; x < n; ++x) world.set_cell({x, 0}, ashfall::kStone);
+        world.step();
+        ashfall::SimulationWorld twin;
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "straddle n=%d loads", n);
+        expect(twin.load(world.save()), msg);
+        std::snprintf(msg, sizeof(msg), "straddle n=%d starts identical", n);
+        expect(twin.save() == world.save(), msg);
+        for (int tick = 0; tick < 2; ++tick) {
+            world.step();
+            twin.step();
+            std::snprintf(msg, sizeof(msg), "straddle n=%d tracks tick %d", n, tick);
+            expect(twin.save() == world.save(), msg);
+        }
+    }
+    // Dynamic twin across a growth threshold: falling sand + conducted heat.
+    {
+        ashfall::SimulationWorld world;
+        world.fill_rect({0, 70}, {130, 70}, ashfall::kStone);
+        for (int x = 0; x < 65; ++x) world.set_cell({x, 60}, ashfall::kSand);
+        world.set_temperature({3, 60}, 90);
+        world.step();
+        ashfall::SimulationWorld twin;
+        expect(twin.load(world.save()), "dynamic straddle loads");
+        for (int tick = 0; tick < 3; ++tick) {
+            world.step();
+            twin.step();
+            expect(twin.save() == world.save(), "dynamic straddle tracks each tick");
+            expect(twin.tick() == world.tick(), "dynamic straddle tick tracks");
+        }
+    }
+}
+
+void test_s3_p2_twin_continuation() {
+    // P2: build → N ticks → twin via save/load → M ticks, per-tick save
+    // compare, with reactions + heat loaded identically on both sides (the v3
+    // reaction guard requires the same table or the twin load rejects).
+    auto reactions = []() {
+        ashfall::ReactionTable table;
+        table.version = 1;
+        ashfall::ReactionSpec quench;
+        quench.name = "quench";
+        quench.probability = 100;
+        quench.reactants = {{false, "fire"}, {false, "water"}};
+        quench.products = {{"fire"}, {"steam"}};
+        ashfall::ReactionSpec burnout;
+        burnout.name = "burnout";
+        burnout.probability = 100;
+        burnout.reactants = {{false, "fire"}};
+        burnout.products = {{"air"}};
+        table.reactions = {quench, burnout};
+        return table;
+    };
+    ashfall::SimulationWorld world;
+    expect(world.load_reactions(reactions()), "twin reactions load");
+    world.fill_rect({-2, 4}, {2, 4}, ashfall::kStone);
+    world.set_cell({0, 0}, ashfall::kFire);
+    world.set_cell({1, 0}, ashfall::kWater);
+    world.set_cell({-1, 0}, ashfall::kSand);
+    world.set_temperature({0, 4}, 60);
+    for (int i = 0; i < 3; ++i) world.step();
+    ashfall::SimulationWorld twin;
+    expect(twin.load_reactions(reactions()), "twin reactions load on the twin");
+    expect(twin.load(world.save()), "reaction+heat twin loads");
+    expect(twin.save() == world.save(), "twin starts identical");
+    for (int i = 0; i < 5; ++i) {
+        world.step();
+        twin.step();
+        expect(twin.save() == world.save(), "twin tracks each post-load tick");
+        expect(twin.tick() == world.tick(), "twin tick tracks");
+    }
+}
+
+void test_s3_p3_canonical_round_trip() {
+    // P3: save(load(b)) == b for canonical v3 b (ticked worlds included).
+    {
+        ashfall::SimulationWorld world;
+        world.fill_rect({-3, 5}, {3, 5}, ashfall::kStone);
+        world.set_cell({0, 0}, ashfall::kSand);
+        world.set_temperature({0, 0}, 0); // air: rejected, nothing stored
+        world.set_cell({1, 1}, ashfall::kWater);
+        for (int i = 0; i < 7; ++i) world.step();
+        const auto canonical = world.save();
+        ashfall::SimulationWorld restored;
+        expect(restored.load(canonical), "canonical v3 loads");
+        expect(restored.save() == canonical, "save(load(b)) == b for canonical b");
+    }
+    // Documented NON-canonical false case: v2 bytes load fine (reader
+    // retention) but resave as v3 — save(load(v2)) != v2 by design (the writer
+    // is v3-only). This is the one legal P3 exception.
+    {
+        const std::vector<std::uint8_t> kOneStoneV2 = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C,
+            0x4C, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0,
+            0, 0};
+        ashfall::SimulationWorld restored;
+        expect(restored.load(kOneStoneV2), "non-canonical v2 still loads");
+        expect(restored.cell({1, 2}) == ashfall::kStone, "non-canonical state intact");
+        expect(restored.save() != kOneStoneV2, "save(load(v2)) != v2 (writer is v3-only)");
+        expect(restored.save().size() == 126, "non-canonical resaves as the 126-byte v3 golden");
+        ashfall::SimulationWorld reread;
+        expect(reread.load(restored.save()), "resaved canonical loads");
+        expect(reread.save() == restored.save(), "resaved bytes are canonical");
+    }
+}
+
+void test_s3_round_trip_matrix() {
+    // P4 acceptance set: every shape below round-trips with byte identity.
+    auto check_canonical = [](ashfall::SimulationWorld& world, const char* message) {
+        const auto saved = world.save();
+        ashfall::SimulationWorld restored;
+        expect(restored.load(saved), message);
+        expect(restored.save() == saved, message);
+    };
+    { ashfall::SimulationWorld empty; check_canonical(empty, "matrix: empty canonical"); }
+    {
+        ashfall::SimulationWorld single;
+        single.set_cell({1, 2}, ashfall::kStone);
+        check_canonical(single, "matrix: single canonical");
+        expect(single.save().size() == 126, "matrix: single is the 126-byte golden");
+    }
+    {
+        // Kiln: the full authored play level after a short settle.
+        ashfall::SimulationWorld kiln;
+        kiln.build_play_level();
+        for (int i = 0; i < 5; ++i) kiln.step();
+        check_canonical(kiln, "matrix: kiln canonical");
+    }
+    {
+        // Hot-moving: heat riding falling material mid-flight.
+        ashfall::SimulationWorld hot;
+        hot.fill_rect({-1, 4}, {1, 4}, ashfall::kStone);
+        hot.set_cell({0, 0}, ashfall::kSand);
+        hot.set_temperature({0, 0}, 100);
+        hot.step();
+        expect(hot.temperature_count() > 0, "matrix: hot-moving carries heat");
+        check_canonical(hot, "matrix: hot-moving canonical");
+    }
+    {
+        // Negative coords + temp edges.
+        ashfall::SimulationWorld neg;
+        neg.set_cell({-1, 0}, ashfall::kStone);
+        neg.set_cell({2, 3}, ashfall::kStone);
+        neg.set_temperature({-1, 0}, -1);
+        neg.set_temperature({2, 3}, 32767);
+        check_canonical(neg, "matrix: negative canonical");
+        expect(neg.save().size() == 155, "matrix: negative is the 155-byte golden");
+    }
+    {
+        // Max-id: oil (id 9, highest default id) cells.
+        ashfall::SimulationWorld oil;
+        oil.fill_rect({10, 20}, {20, 20}, ashfall::kStone);
+        oil.fill_rect({10, 10}, {10, 19}, ashfall::kStone);
+        oil.fill_rect({20, 10}, {20, 19}, ashfall::kStone);
+        oil.fill_rect({11, 15}, {19, 19}, ashfall::kOil);
+        check_canonical(oil, "matrix: max-id canonical");
+        ashfall::SimulationWorld restored;
+        expect(restored.load(oil.save()), "matrix: max-id loads");
+        expect(restored.cell({15, 17}) == ashfall::kOil, "matrix: max-id cell preserved");
+    }
+}
+
+// Group 3 (Task T) v3 migration: roster remap accept, rename/remove reject,
+// reaction guard (+ override), future-version + CRC rejects.
+void test_v3_skew_remap_accept() {
+    // Same names, moved ids: the roster remaps old-id → current-id by stable
+    // name, so saves cross-load in both directions with equivalent state.
+    ashfall::MaterialTable remapped;
+    remapped.version = 1;
+    const ashfall::MaterialTable defaults = ashfall::default_material_table();
+    const ashfall::MaterialId moved[] = {0, 21, 22, 23, 24, 25, 26, 27, 28, 29};
+    for (std::size_t i = 0; i < defaults.materials.size(); ++i) {
+        ashfall::MaterialSpec spec = defaults.materials[i];
+        spec.id = moved[i];
+        remapped.materials.push_back(spec);
+    }
+    ashfall::SimulationWorld source;
+    source.set_cell({1, 2}, ashfall::kStone);
+    source.set_cell({3, 4}, ashfall::kSand);
+    const auto saved = source.save();
+    ashfall::SimulationWorld moved_world(remapped);
+    expect(moved_world.load(saved), "remapped-id table accepts the save");
+    expect(moved_world.cell({1, 2}) == 21, "stone remapped to moved id");
+    expect(moved_world.cell({3, 4}) == 22, "sand remapped to moved id");
+    expect(moved_world.tick() == source.tick(), "remap preserves tick");
+    // Reaction hashes are NAME-keyed: identical rules under moved ids hash
+    // identically, and the remapped save loads back into defaults.
+    auto quench_table = []() {
+        ashfall::ReactionTable table;
+        table.version = 1;
+        ashfall::ReactionSpec quench;
+        quench.name = "quench";
+        quench.probability = 100;
+        quench.reactants = {{false, "fire"}, {false, "water"}};
+        quench.products = {{"fire"}, {"steam"}};
+        table.reactions = {quench};
+        return table;
+    };
+    expect(source.load_reactions(quench_table()), "rules load on defaults");
+    expect(moved_world.load_reactions(quench_table()), "rules load on moved ids");
+    expect(source.reaction_table_hash() == moved_world.reaction_table_hash(),
+        "reaction hash stable across id remap");
+    const auto moved_saved = moved_world.save();
+    expect(moved_saved != saved, "remapped save bytes differ (roster carries new ids)");
+    ashfall::SimulationWorld back;
+    expect(back.load_reactions(quench_table()), "rules load on the return world");
+    expect(back.load(moved_saved), "remapped save loads back into defaults");
+    expect(back.cell({1, 2}) == ashfall::kStone, "stone maps back to default id");
+    expect(back.cell({3, 4}) == ashfall::kSand, "sand maps back to default id");
+}
+
+void test_v3_skew_roster_rejects() {
+    ashfall::SimulationWorld source;
+    source.set_cell({1, 2}, ashfall::kStone);
+    const auto saved = source.save(); // roster carries the full default table
+    {
+        // Removed material: table without oil rejects (roster name unresolvable).
+        ashfall::MaterialTable pruned;
+        pruned.version = 1;
+        for (const ashfall::MaterialSpec& spec : ashfall::default_material_table().materials) {
+            if (spec.name != "oil") pruned.materials.push_back(spec);
+        }
+        ashfall::SimulationWorld world(pruned);
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(saved, error), "removed-material table rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::RosterUnknownMaterial,
+            "removal names RosterUnknownMaterial");
+        expect(world.occupied_cell_count() == 0, "rejected skew load stores nothing");
+    }
+    {
+        // Renamed material: "stone" → "granite" rejects the same way.
+        ashfall::MaterialTable renamed = ashfall::default_material_table();
+        renamed.materials[1].name = "granite";
+        ashfall::SimulationWorld world(renamed);
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(saved, error), "renamed-material table rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::RosterUnknownMaterial,
+            "rename names RosterUnknownMaterial");
+    }
+}
+
+void test_v3_reaction_guard() {
+    auto burnout = [](int probability) {
+        ashfall::ReactionTable table;
+        table.version = 1;
+        ashfall::ReactionSpec rule;
+        rule.name = "burnout";
+        rule.probability = probability;
+        rule.reactants = {{false, "fire"}};
+        rule.products = {{"air"}};
+        table.reactions = {rule};
+        return table;
+    };
+    ashfall::SimulationWorld bare; // 0 reactions
+    bare.set_cell({1, 2}, ashfall::kStone);
+    const auto bare_save = bare.save();
+    // Same-table load always passes the guard.
+    expect(bare.load(bare_save), "matching empty guard accepts");
+    ashfall::SimulationWorld ruled;
+    expect(ruled.load_reactions(burnout(8)), "burnout loads");
+    ruled.set_cell({1, 2}, ashfall::kStone);
+    // Count skew (0 vs 1) rejects by default, accepts with the dev override.
+    ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+    expect(!ruled.load_with_diagnostic(bare_save, error), "reaction-count skew rejects");
+    expect(error == ashfall::SimulationWorld::LoadError::ReactionTableMismatch,
+        "count skew names ReactionTableMismatch");
+    expect(ruled.cell({1, 2}) == ashfall::kStone, "guard rejection preserves world");
+    expect(ruled.load_with_diagnostic(
+               bare_save, error, ashfall::LoadOptions{true}),
+        "override accepts count skew");
+    expect(error == ashfall::SimulationWorld::LoadError::Ok, "override reports Ok");
+    expect(ruled.cell({1, 2}) == ashfall::kStone, "override load carries cells");
+    expect(ruled.tick() == bare.tick(), "override load carries tick");
+    // Content skew (same count, edited probability → different hash) rejects
+    // too, and accepts with the override.
+    ashfall::SimulationWorld edited;
+    expect(edited.load_reactions(burnout(9)), "edited burnout loads");
+    edited.set_cell({9, 9}, ashfall::kSand);
+    const auto edited_save = edited.save();
+    expect(!ruled.load(edited_save), "reaction-content skew rejects");
+    expect(ruled.load_with_diagnostic(
+               edited_save, error, ashfall::LoadOptions{true}),
+        "override accepts content skew");
+}
+
+void test_v3_version_and_crc() {
+    ashfall::SimulationWorld source;
+    source.set_cell({1, 2}, ashfall::kStone);
+    const auto valid = source.save();
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
+    world.step();
+    const auto snapshot = world.save();
+    auto expect_unchanged = [&]() {
+        expect(world.save() == snapshot, "rejected v3 load preserves exact state");
+    };
+    {
+        auto future = valid;
+        future[7] = 9;
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(future, error), "future version rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::BadVersion,
+            "future version names BadVersion");
+        expect_unchanged();
+    }
+    {
+        auto next_bump = valid;
+        next_bump[7] = 4;
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(next_bump, error), "version 4 rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::BadVersion,
+            "version 4 names BadVersion");
+        expect_unchanged();
+    }
+    {
+        // Corrupt the stored CRC itself: recomputed != stored → BadCrc.
+        auto corrupt_crc = valid;
+        corrupt_crc.back() ^= 0x01;
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(corrupt_crc, error), "CRC-corrupt rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::BadCrc, "corrupt CRC names BadCrc");
+        expect_unchanged();
+    }
+    {
+        // Corrupt one payload bit without re-sealing: integrity fires before
+        // any semantic check → BadCrc (NOT the semantic fault underneath).
+        auto corrupt_payload = valid;
+        corrupt_payload[20] ^= 0x04;
+        ashfall::SimulationWorld::LoadError error = ashfall::SimulationWorld::LoadError::Ok;
+        expect(!world.load_with_diagnostic(corrupt_payload, error), "unsealed mutant rejects");
+        expect(error == ashfall::SimulationWorld::LoadError::BadCrc,
+            "unsealed mutant names BadCrc");
+        expect_unchanged();
+    }
+}
+
+// Group 3 (Task T) S6 sweeps: truncation (every prefix), bit-flips, matrix
+// (above), continuation-across-boundary, v3 order policy (S1 tests above).
+void test_s6_truncation_sweep() {
+    // Every strict prefix of a small v2 AND a small v3 golden rejects, with
+    // the sentinel world (cells + heat + tick) byte-identical afterwards.
+    const std::vector<std::uint8_t> kOneStoneV2 = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C,
+        0x02, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0};
+    ashfall::SimulationWorld probe;
+    probe.set_cell({1, 2}, ashfall::kStone);
+    const auto kOneStoneV3 = probe.save();
+    expect(kOneStoneV3.size() == 126, "sweep uses the 126-byte v3 golden");
+    const std::vector<std::vector<std::uint8_t>> goldens = {kOneStoneV2, kOneStoneV3};
+    for (const auto& golden : goldens) {
+        ashfall::SimulationWorld sentinel;
+        sentinel.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
+        sentinel.set_cell({5, 5}, ashfall::kSand);
+        sentinel.set_temperature({5, 5}, 40);
+        sentinel.step();
+        sentinel.step();
+        const auto snapshot = sentinel.save();
+        const std::uint64_t tick = sentinel.tick();
+        for (std::size_t len = 0; len < golden.size(); ++len) {
+            const std::vector<std::uint8_t> prefix(golden.begin(), golden.begin() + len);
+            if (sentinel.load(prefix)) {
+                std::cerr << "TRUNCATION ACCEPTED len " << len << " of " << golden.size() << '\n';
+                expect(false, "every truncation prefix rejects");
+            }
+            expect(sentinel.save() == snapshot, "truncated load preserves exact state");
+            expect(sentinel.tick() == tick, "truncated load preserves tick");
+        }
+    }
+}
+
+void test_s6_bitflip_sweep() {
+    // v3 single-stone golden (126 bytes): EVERY one of the 1008 single-bit
+    // flips rejects. Framing flips report their own check first (BadMagic for
+    // bytes 0..6; byte-7 flips route into the retained v1/v2 readers or
+    // BadVersion — the loader orders size → magic → version → CRC → payload);
+    // every payload/CRC flip reports BadCrc (CRC32 detects all single-bit
+    // detects all single-bit errors, and a flip inside the stored-CRC field
+    // corrupts the comparison itself). No accept case exists, so nothing
+    // needs documenting beyond this paragraph.
+    {
+        ashfall::SimulationWorld probe;
+        probe.set_cell({1, 2}, ashfall::kStone);
+        const auto golden = probe.save();
+        ashfall::SimulationWorld sentinel;
+        sentinel.fill_rect({0, 10}, {10, 10}, ashfall::kStone);
+        sentinel.set_cell({5, 5}, ashfall::kSand);
+        sentinel.step();
+        const auto snapshot = sentinel.save();
+        for (std::size_t i = 0; i < golden.size(); ++i) {
+            for (int bit = 0; bit < 8; ++bit) {
+                auto mutant = golden;
+                mutant[i] ^= static_cast<std::uint8_t>(1u << bit);
+                ashfall::SimulationWorld::LoadError error =
+                    ashfall::SimulationWorld::LoadError::Ok;
+                if (sentinel.load_with_diagnostic(mutant, error)) {
+                    std::cerr << "V3 FLIP ACCEPTED byte " << i << " bit " << bit << '\n';
+                    expect(false, "every v3 single-bit flip rejects");
+                }
+                // Version-byte flips route into the retained v1/v2 readers
+                // (03^bit can read as 01/02) or BadVersion — either way the
+                // payload never parses as the intended v3, so rejection (already
+                // proven by the load() == false above) is the whole contract.
+                const bool framing_ok = (i < 7 &&
+                        error == ashfall::SimulationWorld::LoadError::BadMagic) ||
+                                        (i == 7 &&
+                        error != ashfall::SimulationWorld::LoadError::Ok) ||
+                                        (i > 7 && error == ashfall::SimulationWorld::LoadError::BadCrc);
+                if (!framing_ok) {
+                    std::cerr << "V3 FLIP byte " << i << " bit " << bit << " gave error "
+                              << static_cast<int>(error) << '\n';
+                    expect(false, "every v3 flip names its stage error");
+                }
+                expect(sentinel.save() == snapshot, "v3 flip preserves exact state");
+            }
+        }
+    }
+    // v2 single-stone golden (33 bytes, no integrity seal): enumerated accept
+    // classes below (measured against the landed loader; each accept is
+    // verified accept-consistent — its v3 resave loads and is byte-canonical).
+    //   - tick bytes 8..15: all 64 flips accept (tick is a free u64);
+    //   - x-coord low bytes 20..22 + y-coord low bytes 24..26: all 48 accept
+    //     (lone cell, coords stay in range, order check is vacuous);
+    //   - id byte 28 bits 1..3: accept (ids 3/5/9 = water/fire/oil — known,
+    //     non-air; bit 0 gives air → AirCellStored, bits 4..7 give unknown ids
+    //     17/33/65/129 → UnknownMaterial);
+    //   - everything else rejects (magic/version/counts/high coord bytes push
+    //     coords out of range or break section sizes/temp count).
+    // Total: exactly 64 + 48 + 3 = 115 accepts out of 264 flips.
+    {
+        const std::vector<std::uint8_t> golden = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C,
+            0x02, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0,
+            0};
+        int accepts = 0;
+        for (std::size_t i = 0; i < golden.size(); ++i) {
+            for (int bit = 0; bit < 8; ++bit) {
+                auto mutant = golden;
+                mutant[i] ^= static_cast<std::uint8_t>(1u << bit);
+                ashfall::SimulationWorld world;
+                if (world.load(mutant)) {
+                    ++accepts;
+                    // Accept-consistent + resave-canonical: the v3 resave of
+                    // the accepted mutant loads and is byte-identical.
+                    const auto resaved = world.save();
+                    ashfall::SimulationWorld reread;
+                    expect(reread.load(resaved), "flipped accept resaves canonically");
+                    expect(reread.save() == resaved, "flipped resave is byte-exact");
+                }
+            }
+        }
+        expect(accepts == 115, "v2 flip accept set is exactly the 115 documented cases");
+    }
+    // Empty v2 golden (24 bytes): exactly the 64 tick-byte flips accept.
+    {
+        const std::vector<std::uint8_t> golden = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C,
+            0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        int accepts = 0;
+        for (std::size_t i = 0; i < golden.size(); ++i) {
+            for (int bit = 0; bit < 8; ++bit) {
+                auto mutant = golden;
+                mutant[i] ^= static_cast<std::uint8_t>(1u << bit);
+                ashfall::SimulationWorld world;
+                if (world.load(mutant)) {
+                    ++accepts;
+                    const auto resaved = world.save();
+                    ashfall::SimulationWorld reread;
+                    expect(reread.load(resaved), "empty flip resaves canonically");
+                    expect(reread.save() == resaved, "empty resave is byte-exact");
+                }
+            }
+        }
+        expect(accepts == 64, "empty v2 flip accept set is exactly the 64 tick cases");
+    }
+    // Targeted pins for the documented classes (not just counts).
+    {
+        const std::vector<std::uint8_t> golden = {0x41, 0x53, 0x48, 0x46, 0x41, 0x4C, 0x4C,
+            0x02, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0,
+            0};
+        ashfall::SimulationWorld tick_flip;
+        auto tick_mutant = golden;
+        tick_mutant[8] ^= 0x01;
+        expect(tick_flip.load(tick_mutant), "tick-bit flip accepts");
+        expect(tick_flip.tick() == 1 && tick_flip.cell({1, 2}) == ashfall::kStone,
+            "tick flip keeps tick=1 and the stone");
+        ashfall::SimulationWorld id_flip;
+        auto id_mutant = golden;
+        id_mutant[28] ^= 0x02; // stone(1) -> water(3)
+        expect(id_flip.load(id_mutant), "id bit-1 flip accepts");
+        expect(id_flip.cell({1, 2}) == ashfall::kWater, "id flip yields water");
+        ashfall::SimulationWorld coord_flip;
+        auto coord_mutant = golden;
+        coord_mutant[20] ^= 0x80; // x: 1 -> 129
+        expect(coord_flip.load(coord_mutant), "coord-bit flip accepts");
+        expect(coord_flip.cell({129, 2}) == ashfall::kStone, "coord flip moves the stone");
+        expect(coord_flip.cell({1, 2}) == ashfall::kAir, "coord flip vacates the old home");
+        auto air_mutant = golden;
+        air_mutant[28] ^= 0x01; // stone(1) -> air(0)
+        ashfall::SimulationWorld air_world;
+        expect(!air_world.load(air_mutant), "id bit-0 flip (air) rejects");
+        auto unknown_mutant = golden;
+        unknown_mutant[28] ^= 0x10; // stone(1) -> id 17
+        ashfall::SimulationWorld unknown_world;
+        expect(!unknown_world.load(unknown_mutant), "id bit-4 flip (unknown id) rejects");
+    }
+}
+
+void test_s6_continuation_across_boundary() {
+    // Save while cells + heat straddle the y=63/64 chunk boundary, twin via
+    // save/load, then per-tick save compare across the crossing.
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 62}, ashfall::kSand);
+    world.set_cell({5, 63}, ashfall::kSand);
+    world.set_temperature({5, 62}, 80);
+    world.step(); // both fall; the leader crosses into chunk {0, 1}
+    expect(world.cell({5, 64}) == ashfall::kSand, "leader crosses the chunk boundary");
+    ashfall::SimulationWorld twin;
+    expect(twin.load(world.save()), "boundary-straddling twin loads");
+    expect(twin.save() == world.save(), "twin starts identical");
+    for (int i = 0; i < 4; ++i) {
+        world.step();
+        twin.step();
+        expect(twin.save() == world.save(), "twin tracks each post-boundary tick");
+        expect(twin.tick() == world.tick(), "twin tick tracks");
+    }
+}
+
+// Group 3 (Task T) B2 engine items (bridge §B2 1–4, engine side): final-cell
+// deletion dirties the former chunk; reset dirtiness; load invalidates
+// old+new regions; copy_rect full overwrite incl. air.
+void test_b2_final_cell_deletion_dirties_chunk() {
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 5}, ashfall::kSand);
+    world.set_cell({200, 200}, ashfall::kStone);
+    world.clear_dirty_chunks();
+    expect(world.dirty_chunks().empty(), "dirty starts empty");
+    world.set_cell({5, 5}, ashfall::kAir); // deletes the last cell of chunk {0, 0}
+    const auto dirty = world.dirty_chunks();
+    expect(dirty.size() == 1 && dirty[0] == ashfall::CellPosition{0, 0},
+        "final-cell deletion dirties exactly the former chunk");
+    expect(!world.has_chunk({0, 0}), "emptied chunk is gone");
+    expect(world.cell({200, 200}) == ashfall::kStone, "distant chunk untouched");
+    // Deleting air from air is a no-op: no dirty mark.
+    world.clear_dirty_chunks();
+    world.set_cell({9, 9}, ashfall::kAir);
+    expect(world.dirty_chunks().empty(), "air-to-air set marks nothing dirty");
+}
+
+void test_b2_reset_dirtiness() {
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 5}, ashfall::kSand);    // chunk {0, 0}
+    world.set_cell({128, 0}, ashfall::kStone); // chunk {2, 0}
+    world.clear_dirty_chunks();
+    world.reset();
+    expect(world.tick() == 0 && world.occupied_cell_count() == 0, "reset clears state");
+    const auto dirty = world.dirty_chunks();
+    expect(std::find(dirty.begin(), dirty.end(), ashfall::CellPosition{0, 0}) != dirty.end(),
+        "reset dirties removed chunk {0, 0}");
+    expect(std::find(dirty.begin(), dirty.end(), ashfall::CellPosition{2, 0}) != dirty.end(),
+        "reset dirties removed chunk {2, 0}");
+    expect(dirty.size() == 2, "reset dirties exactly the removed populated chunks");
+}
+
+void test_b2_load_invalidates_old_and_new() {
+    ashfall::SimulationWorld source;
+    source.set_cell({320, 320}, ashfall::kStone); // chunk {5, 5}
+    const auto saved = source.save();
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kSand); // chunk {0, 0}, disjoint from source
+    world.clear_dirty_chunks();
+    expect(world.load(saved), "disjoint load succeeds");
+    const auto dirty = world.dirty_chunks();
+    expect(std::find(dirty.begin(), dirty.end(), ashfall::CellPosition{0, 0}) != dirty.end(),
+        "load dirties the vacated old region");
+    expect(std::find(dirty.begin(), dirty.end(), ashfall::CellPosition{5, 5}) != dirty.end(),
+        "load dirties the populated new region");
+    expect(world.cell({320, 320}) == ashfall::kStone, "load carries the new cell");
+    expect(world.cell({0, 0}) == ashfall::kAir, "load clears the old cell");
+}
+
+void test_b2_copy_rect_full_overwrite() {
+    // Every output element is written, including air: a 0xFF prefill must
+    // leave no residue anywhere in the rect.
+    ashfall::SimulationWorld world;
+    world.set_cell({0, 0}, ashfall::kStone);
+    world.set_cell({3, 2}, ashfall::kStone);
+    std::vector<ashfall::MaterialId> buffer(12, static_cast<ashfall::MaterialId>(0xFF));
+    world.copy_rect({0, 0}, {3, 2}, buffer);
+    for (int y = 0; y <= 2; ++y) {
+        for (int x = 0; x <= 3; ++x) {
+            const bool stone = (x == 0 && y == 0) || (x == 3 && y == 2);
+            const ashfall::MaterialId want = stone ? ashfall::kStone : ashfall::kAir;
+            const std::size_t index = static_cast<std::size_t>(y * 4 + x);
+            if (buffer[index] != want) {
+                std::cerr << "COPY_RECT RESIDUE at (" << x << "," << y << ")\n";
+                expect(false, "copy_rect fully overwrites including air");
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2534,9 +3910,12 @@ int main() {
     test_step_marks_dirty_chunks();
     test_save_load_rejects_malformed();
     test_save_load_varied_topology();
-    test_save_golden_empty_v2();
-    test_save_golden_single_stone();
-    test_save_golden_negative_coords_and_temps();
+    test_save_golden_empty_v3();
+    test_save_v2_reader_empty();
+    test_save_golden_single_stone_v3();
+    test_save_v2_reader_single_stone();
+    test_save_golden_negative_coords_and_temps_v3();
+    test_save_v2_reader_negative_coords_and_temps();
     test_player_collision_and_dirty_tracking();
     test_material_data_parses_table();
     test_material_data_rejects_bad_input();
@@ -2597,9 +3976,32 @@ int main() {
     test_temperature_single_cell_cools_exact();
     test_temperature_two_cells_equalize_exact();
     test_temperature_ambient_world_stays_sparse();
-    test_temperature_save_round_trip_v2();
+    test_temperature_save_round_trip_v3();
     test_temperature_v1_save_still_loads();
     test_temperature_cleared_by_edits_and_reset();
     test_temperature_follows_falling_sand();
+    test_json_syntax_corpus();
+    test_json_parser_limits();
+    test_json_material_corpus();
+    test_json_reaction_corpus();
+    test_json_identifier_policy();
+    test_reaction_link_stage();
+    test_reaction_p0_warning();
+    test_s3_p1_purity_insertion_order_independent();
+    test_s3_p2_capacity_straddle();
+    test_s3_p2_twin_continuation();
+    test_s3_p3_canonical_round_trip();
+    test_s3_round_trip_matrix();
+    test_v3_skew_remap_accept();
+    test_v3_skew_roster_rejects();
+    test_v3_reaction_guard();
+    test_v3_version_and_crc();
+    test_s6_truncation_sweep();
+    test_s6_bitflip_sweep();
+    test_s6_continuation_across_boundary();
+    test_b2_final_cell_deletion_dirties_chunk();
+    test_b2_reset_dirtiness();
+    test_b2_load_invalidates_old_and_new();
+    test_b2_copy_rect_full_overwrite();
     std::cout << "All simulation tests passed.\n";
 }
