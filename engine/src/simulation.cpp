@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
+#include <string>
+#include <tuple>
 #include <unordered_set>
 #ifdef ASHFALL_STEP_INSTRUMENT
 #include <chrono>
@@ -71,15 +74,84 @@ bool read_u16(std::span<const std::uint8_t> input, std::size_t& offset, std::uin
     return true;
 }
 
+bool read_u64_end(std::span<const std::uint8_t> input, std::size_t& offset, std::size_t end, std::uint64_t& value) {
+    if (offset + 8 > end || offset + 8 > input.size()) return false;
+    value = 0;
+    for (int byte = 0; byte < 8; ++byte) value |= static_cast<std::uint64_t>(input[offset++]) << (byte * 8);
+    return true;
+}
+
+bool read_u32_end(std::span<const std::uint8_t> input, std::size_t& offset, std::size_t end, std::uint32_t& value) {
+    if (offset + 4 > end || offset + 4 > input.size()) return false;
+    value = 0;
+    for (int byte = 0; byte < 4; ++byte) value |= static_cast<std::uint32_t>(input[offset++]) << (byte * 8);
+    return true;
+}
+
+bool read_u16_end(std::span<const std::uint8_t> input, std::size_t& offset, std::size_t end, std::uint16_t& value) {
+    if (offset + 2 > end || offset + 2 > input.size()) return false;
+    value = static_cast<std::uint16_t>(input[offset] | (static_cast<std::uint16_t>(input[offset + 1]) << 8));
+    offset += 2;
+    return true;
+}
+
+bool read_u8(std::span<const std::uint8_t> input, std::size_t& offset, std::size_t end, std::uint8_t& value) {
+    if (offset >= end || offset >= input.size()) return false;
+    value = input[offset++];
+    return true;
+}
+
+bool read_i32(std::span<const std::uint8_t> input, std::size_t& offset, std::size_t end, std::int32_t& value) {
+    std::uint32_t raw = 0;
+    if (offset + 4 > end || offset + 4 > input.size()) return false;
+    for (int byte = 0; byte < 4; ++byte) raw |= static_cast<std::uint32_t>(input[offset++]) << (byte * 8);
+    // C++20 two's-complement: the u32 payload round-trips exactly via
+    // static_cast<std::int32_t> (same convention as append_u32).
+    value = static_cast<std::int32_t>(raw);
+    return true;
+}
+
+// IEEE CRC32 (polynomial 0xEDB88320), table-driven, generated on first use.
+// Byte-wise and deterministic across platforms (no endianness dependence);
+// shared by the v3 save CRC and the reaction-table content hash.
+std::uint32_t crc32_update(std::uint32_t crc, const std::uint8_t* data, std::size_t length) {
+    static std::uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            std::uint32_t entry = i;
+            for (int bit = 0; bit < 8; ++bit) entry = (entry & 1u) != 0u ? (0xEDB88320u ^ (entry >> 1)) : (entry >> 1);
+            table[i] = entry;
+        }
+        ready = true;
+    }
+    for (std::size_t i = 0; i < length; ++i) crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+    return crc;
+}
+
+std::uint32_t crc32_bytes(std::span<const std::uint8_t> data) {
+    return crc32_update(0xFFFFFFFFu, data.data(), data.size()) ^ 0xFFFFFFFFu;
+}
+
+// v3 chunk-major order key (cx, cy, ly, lx): chunk position first, then the
+// row-major offset within the dense chunk vector. The writer walks chunks_
+// (std::map, ordered) with ascending vector indices, so emission is
+// ascending by construction; the reader requires strict ascent.
+std::tuple<int, int, int, int> save_order_key(CellPosition position) {
+    const int chunk_x = floor_divide(position.x, kChunkSize);
+    const int chunk_y = floor_divide(position.y, kChunkSize);
+    return {chunk_x, chunk_y, positive_modulo(position.y, kChunkSize), positive_modulo(position.x, kChunkSize)};
+}
+
 CellPosition chunk_pos_of(CellPosition pos) {
     return {floor_divide(pos.x, kChunkSize), floor_divide(pos.y, kChunkSize)};
 }
 
 // (Group 2, Task S1 chunk-bomb guard:) sortable chunk identity for a cell:
 // ((uint64_t)(uint32_t)cx << 32) | (uint32_t)cy with floor-divided chunk
-// coords (negative cells map to negative chunks, matching rebuild_chunks).
-// load() collects one key per cell into a vector, sorts + uniques it, and
-// rejects over kMaxSaveChunks. Transient is bounded by the cell cap
+// coords (negative cells map to negative chunks, matching the load commit
+// path). load() collects one key per cell into a vector, sorts + uniques
+// it, and rejects over kMaxSaveChunks. Transient is bounded by the cell cap
 // (<= (1<<22) keys x 8 B = 32 MiB worst case).
 std::uint64_t load_chunk_key(CellPosition pos) {
     const auto chunk_x = static_cast<std::uint32_t>(floor_divide(pos.x, kChunkSize));
@@ -192,6 +264,29 @@ std::uint32_t SimulationWorld::reaction_roll(
 bool SimulationWorld::load_reactions(const ReactionTable& table) {
     std::string error;
     if (!validate_reaction_table(table, error)) return false;
+    // Link stage (Group 3, J5): validate against the loaded material
+    // vocabulary with rule+field context (unknown names, dead tags,
+    // primary-air). Runs before any mutation, so rejection leaves rules_
+    // untouched; the resolve loop's silent checks below stay as backstop.
+    {
+        std::vector<std::string> material_names;
+        material_names.reserve(materials_.size());
+        std::vector<std::string> material_tags;
+        for (const auto& [id, spec] : materials_) {
+            material_names.push_back(spec.name);
+            for (const std::string& tag : spec.tags) {
+                bool known = false;
+                for (const std::string& seen : material_tags) {
+                    if (seen == tag) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) material_tags.push_back(tag);
+            }
+        }
+        if (!validate_reaction_links(table, material_names, material_tags, error)) return false;
+    }
     std::vector<ResolvedReaction> resolved;
     resolved.reserve(table.reactions.size());
     for (const ReactionSpec& spec : table.reactions) {
@@ -431,6 +526,8 @@ void SimulationWorld::run_reactions() {
         if (have_applied && hit.pos == applied) continue;
         set_cell(hit.pos, hit.product);
         const ResolvedReaction& rule = reactions_[hit.rule];
+        // Air product + temp -> set_temperature returns false, correctly
+        // storing nothing (return ignored: not [[nodiscard]]).
         if (rule.has_product_temp) set_temperature(hit.pos, rule.product_temp);
         applied = hit.pos;
         have_applied = true;
@@ -1000,47 +1097,149 @@ void SimulationWorld::copy_rect(CellPosition first, CellPosition last, std::span
     }
 }
 
-std::vector<std::uint8_t> SimulationWorld::save() const {
-    // Sort for deterministic bytes (flat storage is O(1) but unordered).
-    std::vector<std::pair<CellPosition, MaterialId>> ordered;
-    ordered.reserve(cells_.size());
-    cells_.for_each([&](const CellPosition& position, const MaterialId& material_id) {
-        ordered.emplace_back(position, material_id);
-    });
-    std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
-        if (left.first.x != right.first.x) return left.first.x < right.first.x;
-        if (left.first.y != right.first.y) return left.first.y < right.first.y;
-        return left.second < right.second;
-    });
-    // v2 temps section: sorted by (x, y) for deterministic bytes. Ambient
-    // worlds store a zero count (4 bytes) — the only size cost when cold.
-    std::vector<std::pair<CellPosition, std::int16_t>> ordered_temps;
-    ordered_temps.reserve(temps_.size());
-    temps_.for_each([&](const CellPosition& position, const std::int16_t& temp) {
-        ordered_temps.emplace_back(position, temp);
-    });
-    std::sort(ordered_temps.begin(), ordered_temps.end(), [](const auto& left, const auto& right) {
-        if (left.first.x != right.first.x) return left.first.x < right.first.x;
-        return left.first.y < right.first.y;
-    });
-    std::vector<std::uint8_t> bytes;
-    constexpr std::size_t kHeaderBytes = 7 + 1 + 12; // prefix + version + tick + ncell
-    bytes.reserve(kHeaderBytes + ordered.size() * 9 + 4 + ordered_temps.size() * 10);
-    bytes.insert(bytes.end(), kSaveMagicPrefix.begin(), kSaveMagicPrefix.end());
-    bytes.push_back(kSaveVersion2);
-    append_u64(bytes, tick_);
-    append_u32(bytes, static_cast<std::uint32_t>(ordered.size()));
-    for (const auto& [position, material_id] : ordered) {
-        append_u32(bytes, static_cast<std::uint32_t>(position.x));
-        append_u32(bytes, static_cast<std::uint32_t>(position.y));
-        bytes.push_back(material_id);
+std::uint32_t SimulationWorld::reaction_table_hash() const {
+    // Canonical per-rule encoding joined by '\0': rule.name \0
+    // probability(decimal) \0 + per reactant slot `tag:NAME|mat:NAME \0` +
+    // per reactant slot `mat:NAME|IDENTITY \0` (missing product tail =
+    // identity) + gates (`min:i \0` / `max:i \0` if present) + `ptemp:i \0`
+    // if present. Material references resolve by NAME via materials_, so the
+    // hash is stable across id remaps: same content under renamed ids
+    // hashes identically, while any content edit changes the hash.
+    std::string canonical;
+    for (const ResolvedReaction& rule : reactions_) {
+        canonical += rule.name;
+        canonical += '\0';
+        canonical += std::to_string(rule.probability);
+        canonical += '\0';
+        for (int i = 0; i < rule.reactant_count; ++i) {
+            const ReactionSlot& slot = rule.reactants[i];
+            if (slot.is_tag) {
+                canonical += "tag:";
+                canonical += slot.tag;
+            } else {
+                canonical += "mat:";
+                canonical += materials_.at(slot.id).name;
+            }
+            canonical += '\0';
+        }
+        for (int i = 0; i < rule.reactant_count; ++i) {
+            if (i < rule.product_count) {
+                canonical += "mat:";
+                canonical += materials_.at(rule.products[i].id).name;
+            } else {
+                canonical += "IDENTITY";
+            }
+            canonical += '\0';
+        }
+        if (rule.has_min) {
+            canonical += "min:";
+            canonical += std::to_string(rule.min_temp);
+            canonical += '\0';
+        }
+        if (rule.has_max) {
+            canonical += "max:";
+            canonical += std::to_string(rule.max_temp);
+            canonical += '\0';
+        }
+        if (rule.has_product_temp) {
+            canonical += "ptemp:";
+            canonical += std::to_string(rule.product_temp);
+            canonical += '\0';
+        }
     }
-    append_u32(bytes, static_cast<std::uint32_t>(ordered_temps.size()));
-    for (const auto& [position, temp] : ordered_temps) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(canonical.data());
+    return crc32_update(0xFFFFFFFFu, bytes, canonical.size()) ^ 0xFFFFFFFFu;
+}
+
+std::vector<std::uint8_t> SimulationWorld::save() const {
+    // Canonical form (v3, writer emits v3 ONLY): chunk-major ascending
+    // (cx,cy,ly,lx) by walking chunks_ (std::map, ordered) row-major within
+    // dense vectors — ascending by construction, NO sort pass (this is what
+    // kills the sort). Temps inherit cell order (walk cells, emit temp if
+    // present; air-temps are SKIPPED, never stored). Roster maps old ids to
+    // stable names (full table incl. air); the reaction count+hash gates
+    // content identity; extents bound the payload; CRC32 seals prefix..temps.
+    // Guarantees: chunk-major sorted, unique, capped, no air-temps.
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(64 + material_order_.size() * 16 + cells_.size() * 9 + temps_.size() * 10);
+    bytes.insert(bytes.end(), kSaveMagicPrefix.begin(), kSaveMagicPrefix.end());
+    bytes.push_back(kSaveVersion3);
+    append_u64(bytes, tick_);
+    // Roster: current table id+name per material, table order.
+    append_u32(bytes, static_cast<std::uint32_t>(material_order_.size()));
+    for (MaterialId id : material_order_) {
+        const std::string& name = materials_.at(id).name;
+        assert(name.size() <= 255);
+        bytes.push_back(id);
+        bytes.push_back(static_cast<std::uint8_t>(name.size()));
+        bytes.insert(bytes.end(), name.begin(), name.end());
+    }
+    append_u32(bytes, static_cast<std::uint32_t>(reactions_.size()));
+    append_u32(bytes, reaction_table_hash());
+    // Extents (empty world -> all 0), precomputed since they precede cells.
+    std::int32_t min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+    bool have_cell = false;
+    cells_.for_each([&](const CellPosition& position, const MaterialId&) {
+        if (!have_cell) {
+            min_x = max_x = position.x;
+            min_y = max_y = position.y;
+            have_cell = true;
+        } else {
+            if (position.x < min_x) min_x = position.x;
+            if (position.x > max_x) max_x = position.x;
+            if (position.y < min_y) min_y = position.y;
+            if (position.y > max_y) max_y = position.y;
+        }
+    });
+    append_u32(bytes, static_cast<std::uint32_t>(min_x));
+    append_u32(bytes, static_cast<std::uint32_t>(max_x));
+    append_u32(bytes, static_cast<std::uint32_t>(min_y));
+    append_u32(bytes, static_cast<std::uint32_t>(max_y));
+    append_u32(bytes, static_cast<std::uint32_t>(cells_.size()));
+    std::vector<std::pair<CellPosition, std::int16_t>> temp_entries;
+    temp_entries.reserve(temps_.size());
+    bool have_prev = false;
+    std::tuple<int, int, int, int> prev_key{};
+    std::size_t emitted_cells = 0;
+    for (const auto& [chunk_position, storage] : chunks_) {
+        for (std::size_t index = 0; index < storage.size(); ++index) {
+            const MaterialId material_id = storage[index];
+            if (material_id == kAir) continue;
+            const int local_x = static_cast<int>(index % static_cast<std::size_t>(kChunkSize));
+            const int local_y = static_cast<int>(index / static_cast<std::size_t>(kChunkSize));
+            const CellPosition position{
+                chunk_position.x * kChunkSize + local_x, chunk_position.y * kChunkSize + local_y};
+            const auto key = save_order_key(position);
+            assert(!have_prev || prev_key < key);
+            prev_key = key;
+            have_prev = true;
+            append_u32(bytes, static_cast<std::uint32_t>(position.x));
+            append_u32(bytes, static_cast<std::uint32_t>(position.y));
+            bytes.push_back(material_id);
+            ++emitted_cells;
+            if (const std::int16_t* temp = temps_.find(position)) {
+                temp_entries.emplace_back(position, *temp);
+            }
+        }
+    }
+    assert(emitted_cells == cells_.size());
+    assert(!have_cell == (emitted_cells == 0));
+    (void)have_prev;
+    (void)emitted_cells;
+    append_u32(bytes, static_cast<std::uint32_t>(temp_entries.size()));
+    bool have_prev_temp = false;
+    std::tuple<int, int, int, int> prev_temp_key{};
+    for (const auto& [position, temp] : temp_entries) {
+        const auto key = save_order_key(position);
+        assert(!have_prev_temp || prev_temp_key < key);
+        prev_temp_key = key;
+        have_prev_temp = true;
         append_u32(bytes, static_cast<std::uint32_t>(position.x));
         append_u32(bytes, static_cast<std::uint32_t>(position.y));
         append_u16(bytes, static_cast<std::uint16_t>(temp));
     }
+    (void)have_prev_temp;
+    append_u32(bytes, crc32_bytes(bytes));
     return bytes;
 }
 
@@ -1049,11 +1248,15 @@ bool SimulationWorld::load(std::span<const std::uint8_t> bytes) {
     return load_with_diagnostic(bytes, ignored);
 }
 
-bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, LoadError& error) {
+bool SimulationWorld::load_with_diagnostic(
+    std::span<const std::uint8_t> bytes, LoadError& error, LoadOptions options) {
     // Migration decision (per docs/AGENT_GUIDE.md): v1 loads with all cells
-    // ambient (no heat section); v2 adds the sparse temps tail. Anything
-    // else is rejected; failed loads leave the world (cells, heat, tick)
-    // untouched. The host wrapper is unchanged — old user saves load.
+    // ambient (no heat section); v2 adds the sparse temps tail; v3 is the
+    // first bump gating content identity (roster/remap + reaction guard +
+    // extents + CRC + chunk-major order). Readers v1..vN are retained, the
+    // writer emits v3 ONLY; each bump keeps a fixture + test + paragraph.
+    // Anything else is rejected; failed loads leave the world (cells, heat,
+    // tick) untouched. The host wrapper is unchanged — old user saves load.
     // Transient memory note: pre-commit the live tables, `loaded` /
     // `loaded_temps`, and the rebuilt chunk map coexist (~2.2x steady-state
     // tables); a streaming loader is later work. The chunk-key vector below
@@ -1061,13 +1264,18 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
     // stays accurate.
     // v2-strict (Group 2, Task S1; version byte stays 2): load() newly
     // REJECTS only malformed/foreign inputs — canonical saves (what save()
-    // emits: ascending, unique, within caps) still load, so honest saves are
-    // unaffected. Newly-rejected classes: oversize files/counts (Oversize),
-    // out-of-range coords (CoordOutOfRange), duplicate cells/temps
-    // (DuplicateCell/DuplicateTemp), non-ascending sections
-    // (UnsortedCells/UnsortedTemps — save() always emits ascending), and
-    // chunk-count bombs (TooManyChunks). Temps-on-air stay ACCEPTED (the S4
-    // set-on-air rejection waits for v3).
+    // emitted then: ascending, unique, within caps) still load, so honest
+    // saves are unaffected. Newly-rejected classes: oversize files/counts
+    // (Oversize), out-of-range coords (CoordOutOfRange), duplicate
+    // cells/temps (DuplicateCell/DuplicateTemp), non-ascending sections
+    // (UnsortedCells/UnsortedTemps), and chunk-count bombs (TooManyChunks).
+    // Temps-on-air stay ACCEPTED on v1/v2 (the S4 set-on-air rejection is a
+    // v3 gate); prune stays the backstop.
+    // v3 section-error policy: roster framing failures -> BadRoster;
+    // reaction/extents/cell-count framing failures -> BadCellSection;
+    // temp framing failures and trailing bytes -> BadTempSection; CRC is
+    // verified BEFORE parsing the payload (integrity first, then semantic:
+    // size -> magic -> version -> CRC -> payload).
     //
     // (Owner caps 2026-09-10: kMaxSaveBytes = 64 MiB,
     // kMaxSaveCells = kMaxSaveTemps = 1<<22, kMaxSaveChunks = 4096,
@@ -1092,9 +1300,262 @@ bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, 
         return false;
     }
     const std::uint8_t version = bytes[kSaveMagicPrefix.size()];
-    if (version != kSaveVersion1 && version != kSaveVersion2) {
+    if (version != kSaveVersion1 && version != kSaveVersion2 && version != kSaveVersion3) {
         error = LoadError::BadVersion;
         return false;
+    }
+    if (version == kSaveVersion3) {
+        // v3 fixed framing: prefix(7) + ver(1) + tick(8) + roster_count(4) +
+        // reaction_count(4) + hash(4) + extents(16) + cell_count(4) +
+        // temp_count(4) + crc(4) = 56 bytes minimum (empty roster).
+        constexpr std::size_t kV3MinBytes = 7 + 1 + 8 + 4 + 4 + 4 + 16 + 4 + 4 + 4;
+        if (bytes.size() < kV3MinBytes) {
+            error = LoadError::TooShort;
+            return false;
+        }
+        const std::size_t end = bytes.size() - 4;
+        std::uint32_t stored_crc = 0;
+        for (int byte = 0; byte < 4; ++byte) {
+            stored_crc |= static_cast<std::uint32_t>(bytes[end + static_cast<std::size_t>(byte)]) << (byte * 8);
+        }
+        if (crc32_bytes(bytes.subspan(0, end)) != stored_crc) {
+            error = LoadError::BadCrc;
+            return false;
+        }
+        std::size_t offset = kSaveMagicPrefix.size() + 1;
+        std::uint64_t saved_tick = 0;
+        if (!read_u64_end(bytes, offset, end, saved_tick) || offset > end) {
+            error = LoadError::BadCellSection;
+            return false;
+        }
+        // Roster: old_id -> current_id remap by stable name. Every roster
+        // name must resolve in the CURRENT table (missing -> reject); cell
+        // bytes remap through the roster (unknown old-id -> reject — roster
+        // is authoritative).
+        std::uint32_t roster_count = 0;
+        if (!read_u32_end(bytes, offset, end, roster_count) || offset > end) {
+            error = LoadError::BadRoster;
+            return false;
+        }
+        if (roster_count > 256) {
+            error = LoadError::BadRoster;
+            return false;
+        }
+        std::array<int, 256> remap;
+        remap.fill(-1);
+        for (std::uint32_t i = 0; i < roster_count; ++i) {
+            std::uint8_t old_id = 0;
+            std::uint8_t name_len = 0;
+            if (!read_u8(bytes, offset, end, old_id) || !read_u8(bytes, offset, end, name_len) || name_len == 0 ||
+                offset + name_len > end) {
+                error = LoadError::BadRoster;
+                return false;
+            }
+            if (remap[old_id] != -1) {
+                error = LoadError::BadRoster;
+                return false;
+            }
+            const std::string name(
+                reinterpret_cast<const char*>(bytes.data() + offset), static_cast<std::size_t>(name_len));
+            offset += name_len;
+            MaterialId current_id = kAir;
+            if (!material_id_by_name(name, current_id)) {
+                error = LoadError::RosterUnknownMaterial;
+                return false;
+            }
+            remap[old_id] = static_cast<int>(current_id);
+        }
+        // Reaction guard: count + content hash recomputed post-remap (names,
+        // so remaps compare equal). Mismatch rejects unless the caller
+        // passes LoadOptions{allow_reaction_table_mismatch=true} (dev
+        // override for content iteration).
+        std::uint32_t stored_reaction_count = 0;
+        std::uint32_t stored_reaction_hash = 0;
+        if (!read_u32_end(bytes, offset, end, stored_reaction_count) ||
+            !read_u32_end(bytes, offset, end, stored_reaction_hash) || offset > end) {
+            error = LoadError::BadCellSection;
+            return false;
+        }
+        if (!options.allow_reaction_table_mismatch &&
+            (stored_reaction_count != static_cast<std::uint32_t>(reactions_.size()) ||
+                stored_reaction_hash != reaction_table_hash())) {
+            error = LoadError::ReactionTableMismatch;
+            return false;
+        }
+        std::int32_t ext_min_x = 0, ext_max_x = 0, ext_min_y = 0, ext_max_y = 0;
+        if (!read_i32(bytes, offset, end, ext_min_x) || !read_i32(bytes, offset, end, ext_max_x) ||
+            !read_i32(bytes, offset, end, ext_min_y) || !read_i32(bytes, offset, end, ext_max_y) || offset > end) {
+            error = LoadError::BadCellSection;
+            return false;
+        }
+        std::uint32_t cell_count = 0;
+        if (!read_u32_end(bytes, offset, end, cell_count) || offset > end) {
+            error = LoadError::BadCellSection;
+            return false;
+        }
+        if (cell_count > kMaxSaveCells) {
+            error = LoadError::Oversize;
+            return false;
+        }
+        FlatCells loaded;
+        loaded.reserve_for(static_cast<std::size_t>(cell_count) + 16);
+        // v3 order: chunk-major (cx,cy,ly,lx) strictly ascending; duplicates
+        // and descents both report BadChunkOrder. The key compare names the
+        // failure while find_or_insert belt-and-braces (unreachable when the
+        // compare passes: distinct keys imply distinct positions).
+        bool have_prev_cell = false;
+        std::tuple<int, int, int, int> prev_key{};
+        std::int32_t min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+        for (std::uint32_t index = 0; index < cell_count; ++index) {
+            std::uint32_t raw_x = 0;
+            std::uint32_t raw_y = 0;
+            std::uint8_t old_id = 0;
+            if (!read_u32_end(bytes, offset, end, raw_x) || !read_u32_end(bytes, offset, end, raw_y) ||
+                !read_u8(bytes, offset, end, old_id)) {
+                error = LoadError::BadCellSection;
+                return false;
+            }
+            const int remapped = remap[old_id];
+            if (remapped < 0) {
+                error = LoadError::RosterUnknownMaterial;
+                return false;
+            }
+            const MaterialId material_id = static_cast<MaterialId>(remapped);
+            if (material_id == kAir) {
+                error = LoadError::AirCellStored;
+                return false;
+            }
+            const CellPosition position{static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)};
+            if (position.x > kMaxSaveCoord || position.x < -kMaxSaveCoord || position.y > kMaxSaveCoord ||
+                position.y < -kMaxSaveCoord) {
+                error = LoadError::CoordOutOfRange;
+                return false;
+            }
+            const auto key = save_order_key(position);
+            if (have_prev_cell && !(prev_key < key)) {
+                error = LoadError::BadChunkOrder;
+                return false;
+            }
+            const auto cell_claim = loaded.find_or_insert(position, material_id);
+            if (!cell_claim.inserted) {
+                error = LoadError::BadChunkOrder;
+                return false;
+            }
+            prev_key = key;
+            have_prev_cell = true;
+            if (index == 0) {
+                min_x = max_x = position.x;
+                min_y = max_y = position.y;
+            } else {
+                if (position.x < min_x) min_x = position.x;
+                if (position.x > max_x) max_x = position.x;
+                if (position.y < min_y) min_y = position.y;
+                if (position.y > max_y) max_y = position.y;
+            }
+        }
+        // Extents must match the payload (empty world -> all 0).
+        if ((cell_count == 0 &&
+                (ext_min_x != 0 || ext_max_x != 0 || ext_min_y != 0 || ext_max_y != 0)) ||
+            (cell_count != 0 &&
+                (ext_min_x != min_x || ext_max_x != max_x || ext_min_y != min_y || ext_max_y != max_y))) {
+            error = LoadError::BadExtents;
+            return false;
+        }
+        FlatTemps loaded_temps;
+        std::uint32_t temp_count = 0;
+        if (!read_u32_end(bytes, offset, end, temp_count) || offset > end) {
+            error = LoadError::BadTempSection;
+            return false;
+        }
+        if (temp_count > kMaxSaveTemps) {
+            error = LoadError::Oversize;
+            return false;
+        }
+        loaded_temps.reserve_for(static_cast<std::size_t>(temp_count) + 16);
+        // Temps must follow the same chunk-major subsequence the writer
+        // emits (strictly ascending keys); every temp must sit on a stored
+        // cell (TempsOnAir — the writer filters, the setter rejects).
+        bool have_prev_temp = false;
+        std::tuple<int, int, int, int> prev_temp_key{};
+        for (std::uint32_t index = 0; index < temp_count; ++index) {
+            std::uint32_t raw_x = 0;
+            std::uint32_t raw_y = 0;
+            std::uint16_t raw_temp = 0;
+            if (!read_u32_end(bytes, offset, end, raw_x) || !read_u32_end(bytes, offset, end, raw_y) ||
+                !read_u16_end(bytes, offset, end, raw_temp)) {
+                error = LoadError::BadTempSection;
+                return false;
+            }
+            const auto temp = static_cast<std::int16_t>(raw_temp);
+            if (temp == 0) {
+                error = LoadError::AmbientTempStored;
+                return false;
+            }
+            const CellPosition position{static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)};
+            if (position.x > kMaxSaveCoord || position.x < -kMaxSaveCoord || position.y > kMaxSaveCoord ||
+                position.y < -kMaxSaveCoord) {
+                error = LoadError::CoordOutOfRange;
+                return false;
+            }
+            const auto key = save_order_key(position);
+            if (have_prev_temp && !(prev_temp_key < key)) {
+                error = LoadError::BadChunkOrder;
+                return false;
+            }
+            if (!loaded.contains(position)) {
+                error = LoadError::TempsOnAir;
+                return false;
+            }
+            const auto temp_claim = loaded_temps.find_or_insert(position, temp);
+            if (!temp_claim.inserted) {
+                error = LoadError::BadChunkOrder;
+                return false;
+            }
+            prev_temp_key = key;
+            have_prev_temp = true;
+        }
+        if (offset != end) {
+            error = LoadError::BadTempSection;
+            return false;
+        }
+        {
+            std::vector<std::uint64_t> chunk_keys;
+            chunk_keys.reserve(loaded.size());
+            loaded.for_each([&](const CellPosition& position, const MaterialId&) {
+                chunk_keys.push_back(load_chunk_key(position));
+            });
+            std::sort(chunk_keys.begin(), chunk_keys.end());
+            chunk_keys.erase(std::unique(chunk_keys.begin(), chunk_keys.end()), chunk_keys.end());
+            if (chunk_keys.size() > kMaxSaveChunks) {
+                error = LoadError::TooManyChunks;
+                return false;
+            }
+        }
+        std::map<CellPosition, std::vector<MaterialId>> fresh_chunks;
+        loaded.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+            const CellPosition chunk_position{
+                floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
+            auto [chunk, inserted] = fresh_chunks.try_emplace(chunk_position);
+            if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
+            const int local_x = positive_modulo(position.x, kChunkSize);
+            const int local_y = positive_modulo(position.y, kChunkSize);
+            chunk->second[static_cast<std::size_t>(local_y * kChunkSize + local_x)] = material_id;
+        });
+        std::set<CellPosition> changed_chunks;
+        for (const auto& [chunk_position, _] : chunks_) {
+            changed_chunks.insert(chunk_position);
+        }
+        for (const auto& [chunk_position, _] : fresh_chunks) {
+            changed_chunks.insert(chunk_position);
+        }
+        chunks_ = std::move(fresh_chunks);
+        cells_ = std::move(loaded);
+        temps_ = std::move(loaded_temps);
+        tick_ = saved_tick;
+        for (const CellPosition chunk_position : changed_chunks) {
+            mark_chunk_dirty(chunk_position);
+        }
+        return true;
     }
     std::size_t offset = kSaveMagicPrefix.size() + 1;
     std::uint64_t saved_tick = 0;
@@ -1367,13 +1828,18 @@ bool SimulationWorld::material_info(MaterialId id, MaterialSpec& out) const {
     return true;
 }
 
-void SimulationWorld::set_temperature(CellPosition position, int temperature) {
+bool SimulationWorld::set_temperature(CellPosition position, int temperature) {
+    // v3 cell-owned heat: rejected on air (false, nothing stored); stored or
+    // erased otherwise (true). Not [[nodiscard]] so existing call sites
+    // compile unchanged.
+    if (cell(position) == kAir) return false;
     const int clamped = std::clamp(temperature, -32767, 32767);
     if (clamped == 0) {
         temps_.erase(position);
     } else {
         temps_.insert_or_assign(position, static_cast<std::int16_t>(clamped));
     }
+    return true;
 }
 
 int SimulationWorld::temperature_at(CellPosition position) const {
@@ -1439,10 +1905,10 @@ void SimulationWorld::conduct_temperature() {
     // P2.5 carries heat with moving material via staged next-state temps
     // (heat_next_scratch_, committed post-swap); the prune below is kept as a
     // BACKSTOP (Group 2, Task H — do not delete): commit already discards old
-    // coordinate entries structurally, so this is normally a no-op, but
-    // set_temperature on air stays legal until v3 (S4 gate) and temps whose
-    // cell is gone must still be pruned pre-conduction, or falling hot
-    // material would heat its own wake through the stale snapshot entry.
+    // coordinate entries structurally, so this is normally a no-op, but v1/v2
+    // saves may still load temps-on-air and those must be pruned
+    // pre-conduction, or falling hot material would heat its own wake
+    // through the stale snapshot entry.
     temp_prune_scratch_.clear();
     temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
         if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);
@@ -1483,17 +1949,5 @@ bool SimulationWorld::prefers_left(CellPosition position, std::uint64_t tick) {
     return (hash & 1u) == 0;
 }
 
-
-void SimulationWorld::rebuild_chunks(const FlatCells& cells) {
-    chunks_.clear();
-    cells.for_each([&](const CellPosition& position, const MaterialId& material_id) {
-        const CellPosition chunk_position{floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
-        auto [chunk, inserted] = chunks_.try_emplace(chunk_position);
-        if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
-        const int x = positive_modulo(position.x, kChunkSize);
-        const int y = positive_modulo(position.y, kChunkSize);
-        chunk->second[static_cast<std::size_t>(y * kChunkSize + x)] = material_id;
-    });
-}
 
 } // namespace ashfall

@@ -42,6 +42,9 @@ struct StepCounters {
 #endif
 
 /// Portable, deterministic cellular world. Godot and rendering code must not own this state.
+struct LoadOptions {
+    bool allow_reaction_table_mismatch = false;
+};
 class SimulationWorld {
 public:
     SimulationWorld();
@@ -60,11 +63,13 @@ public:
     // Sparse per-cell temperature (ambient 0; only non-zero is stored).
     // Deterministic integer conduction runs each step(); queries read the
     // settled post-step state. Setting 0 erases the entry. Out-of-range
-    // values clamp to int16. Heat may be set on any position (even air);
-    // P2.5 carries heat with moving material via staged next-state temps
-    // (heat_next_scratch_, committed post-swap); temps whose cell is gone
-    // are pruned pre-conduction (backstop — see conduct_temperature).
-    void set_temperature(CellPosition position, int temperature);
+    // values clamp to int16. Heat is cell-owned (v3 gate): setting heat on
+    // air is rejected (returns false, nothing stored); stored/erased
+    // otherwise (returns true). P2.5 carries heat with moving material via
+    // staged next-state temps (heat_next_scratch_, committed post-swap);
+    // temps whose cell is gone are pruned pre-conduction (backstop — see
+    // conduct_temperature).
+    bool set_temperature(CellPosition position, int temperature);
     [[nodiscard]] int temperature(CellPosition position) const;
     [[nodiscard]] std::size_t temperature_count() const noexcept { return temps_.size(); }
     // Table-order material ids (insertion order from the loaded table) for
@@ -89,12 +94,15 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> save() const;
     [[nodiscard]] bool load(std::span<const std::uint8_t> bytes);
     // Save-format constants + load diagnostics (Group 1, Task C2, backlog
-    // S2). v1 = cells only (all ambient), v2 = cells + sparse temps tail.
-    // load() delegates to load_with_diagnostic and ignores the diagnostic,
-    // so tick outcomes and save bytes are unchanged by this refactor.
+    // S2; Group 3, Task S: v3). v1 = cells only (all ambient), v2 = cells +
+    // sparse temps tail, v3 = roster + reaction guard + extents + chunk-major
+    // cells + filtered temps + CRC32. Readers v1..vN are retained; the writer
+    // emits v3 ONLY. load() delegates to load_with_diagnostic and ignores
+    // the diagnostic, so tick outcomes are unchanged by this refactor.
     static constexpr std::array<std::uint8_t, 7> kSaveMagicPrefix = {'A', 'S', 'H', 'F', 'A', 'L', 'L'};
     static constexpr std::uint8_t kSaveVersion1 = 1;
     static constexpr std::uint8_t kSaveVersion2 = 2;
+    static constexpr std::uint8_t kSaveVersion3 = 3;
     enum class LoadError : std::uint8_t {
         Ok = 0,
         TooShort,
@@ -111,9 +119,22 @@ public:
         UnsortedCells,
         UnsortedTemps,
         TooManyChunks,
-        CoordOutOfRange
+        CoordOutOfRange,
+        BadCrc,
+        BadRoster,
+        RosterUnknownMaterial,
+        ReactionTableMismatch,
+        TempsOnAir,
+        BadChunkOrder,
+        BadExtents
     };
-    [[nodiscard]] bool load_with_diagnostic(std::span<const std::uint8_t> bytes, LoadError& error);
+    [[nodiscard]] bool load_with_diagnostic(
+        std::span<const std::uint8_t> bytes, LoadError& error, LoadOptions options = {});
+    // CRC32 over the canonical per-rule encoding (reaction names, decimal
+    // probabilities, NAME-keyed material refs, gates, product temps, joined
+    // by '\0'); stable across id remaps, so the v3 reaction guard compares
+    // content identity, not ids. Also useful for future dev UI.
+    [[nodiscard]] std::uint32_t reaction_table_hash() const;
 #ifdef ASHFALL_STEP_INSTRUMENT
     [[nodiscard]] const StepTimings& last_step_timings() const noexcept { return last_timings_; }
     // Counting rules: `reaction_cells` = cells visited in the run_reactions
@@ -149,7 +170,6 @@ private:
 
     [[nodiscard]] const MaterialSpec& material(MaterialId id) const;
     [[nodiscard]] static bool prefers_left(CellPosition position, std::uint64_t tick);
-    void rebuild_chunks(const FlatCells& cells);
     void write_chunk_cell(CellPosition position, MaterialId material_id);
     void write_chunk_cell_deferred(
         CellPosition position, MaterialId material_id, std::set<CellPosition>* maybe_emptied);
