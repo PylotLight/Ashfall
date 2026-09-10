@@ -3,6 +3,17 @@ extends Control
 # Ashfall Host Controller
 # Presentation and input forwarding only.
 # No simulation rules or world state are implemented here.
+#
+# Controls: WASD/arrows = move avatar (S keeps move-down); N = single sim
+# tick (rebound from S in Group 3 — S both moved down and stepped, so the
+# step key moved to the unused N); SPACE = play/pause; R = reset level;
+# E = dig at avatar; F = place held material; F5 = save; F9 = load;
+# 1..0 = palette shortcuts in table order; mouse paint on the world view.
+#
+# Presentation cadence (Group 3, Task B4): sim/edit paths only accumulate
+# engine dirtiness; _process calls world.flush_present() exactly once per
+# rendered frame and rebinds both texture refs (rebind covers bridge-side
+# presentation recovery, which replaces texture objects).
 
 @onready var world: AshfallWorld = $AshfallWorld
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
@@ -35,8 +46,30 @@ const PLAYER_HALF_W: float = 0.4
 const PLAYER_H: float = 1.8
 const PLAYER_SPEED: float = 90.0
 const SAVE_PATH: String = "user://ashfall_save.bin"
+const SAVE_TMP_PATH: String = "user://ashfall_save.bin.tmp"
+# Host save envelope v2 (Group 3, Task B6): version u8=2 | px float | py
+# float | material NAME (pascal string) | sim_len u32 | sim bytes. The v1
+# header was exactly 14 bytes (1+8+1+4); v2's minimum is 18 (1+8+5+4 with a
+# 1-char name). The material travels by stable NAME so table-id remaps (core
+# v3 roster) cannot misroute it; unknown names fall back to the first table
+# material with a transient message. Writes are atomic (tmp + rename).
+const HOST_SAVE_VERSION: int = 2
+const HOST_SAVE_MIN_BYTES: int = 18
+const HOST_SAVE_SIM_MAX: int = 64 * 1024 * 1024
+# Transient status line (Group 3, Task B6/B7): save/load/material notices
+# live here instead of being overwritten by the next throttled HUD refresh.
+var _transient_msg: String = ""
+var _transient_ttl: float = 0.0
+const TRANSIENT_SECS: float = 3.0
+# Marker label cache (Group 3, Task B7): material lookup + label assignment
+# run only when the held material changes, not every frame.
+var _marker_mat: int = -1
 
 func _ready() -> void:
+	# Release-outside safety: gui_input only fires inside the control, so a
+	# release outside would otherwise leave is_drawing stuck on. The _process
+	# poll below is the backstop; focus loss clears immediately.
+	get_window().focus_exited.connect(_on_focus_lost)
 	# Material table comes from versioned data (P2); defaults match, so this
 	# only proves the production file-to-core path every boot.
 	var data_file := FileAccess.open("res://data/materials.json", FileAccess.READ)
@@ -73,6 +106,19 @@ func _process(delta: float) -> void:
 		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
 	_move_player(delta)
 	_update_marker()
+	# Group 3, Task B7: drawing state tracks the physical buttons, so a
+	# release outside the drawing control still ends the stroke.
+	if is_drawing and not (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)):
+		is_drawing = false
+	# Group 3, Task B4: exactly one present flush per rendered frame, then
+	# rebind both layers (bridge recovery replaces texture objects).
+	world.flush_present()
+	texture_display.texture = world.get_world_texture()
+	water_display.texture = world.get_water_texture()
+	if _transient_ttl > 0.0:
+		_transient_ttl -= delta
+		if _transient_ttl <= 0.0:
+			_transient_msg = ""
 	# Throttled HUD: occupied-cell query is O(1) but label churn every frame
 	# is still wasteful. Refresh at 4Hz.
 	_hud_cooldown -= delta
@@ -82,6 +128,11 @@ func _process(delta: float) -> void:
 	else:
 		# Cheap tick-only refresh keeps the counter live without cell query.
 		tick_label.text = str(world.get_tick())
+
+func _set_transient(msg: String) -> void:
+	_transient_msg = msg
+	_transient_ttl = TRANSIENT_SECS
+	status_label.text = msg
 
 func _respawn_player() -> void:
 	var spawn: Vector2i = world.get_player_spawn()
@@ -127,7 +178,8 @@ func _dig_at_player() -> void:
 			var m: int = world.get_cell(c.x + dx, c.y + dy)
 			if m != AshfallWorld.MATERIAL_AIR and m != AshfallWorld.MATERIAL_STONE:
 				world.set_cell(c.x + dx, c.y + dy, AshfallWorld.MATERIAL_AIR)
-	world.update_world_texture()
+	# Group 3, Task B4: no direct present here — the per-frame flush in
+	# _process presents the accumulated dirtiness.
 	_update_hud()
 
 func _place_at_player() -> void:
@@ -139,7 +191,8 @@ func _place_at_player() -> void:
 		for dx in range(-2, 3):
 			if world.get_cell(c.x + dx, c.y + dy) == AshfallWorld.MATERIAL_AIR:
 				world.set_cell(c.x + dx, c.y + dy, current_material)
-	world.update_world_texture()
+	# Group 3, Task B4: no direct present here — the per-frame flush in
+	# _process presents the accumulated dirtiness.
 	_update_hud()
 
 func _build_palette() -> void:
@@ -170,48 +223,93 @@ func _on_palette_btn_pressed(id: int) -> void:
 
 func _save_game() -> void:
 	var sim := world.save_to_bytes()
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	var mat_name: String = world.get_material_name(current_material)
+	var f := FileAccess.open(SAVE_TMP_PATH, FileAccess.WRITE)
 	if f == null:
-		status_label.text = "SAVE FAILED"
+		_set_transient("SAVE FAILED")
 		return
-	f.store_8(1) # save format version
+	f.store_8(HOST_SAVE_VERSION) # host save format version (v2: name, not id)
 	f.store_float(player_pos.x)
 	f.store_float(player_pos.y)
-	f.store_8(current_material)
+	f.store_pascal_string(mat_name)
 	f.store_32(sim.size())
 	f.store_buffer(sim)
 	f.close()
+	# Atomic write: the previous good save survives a crash mid-write.
+	if DirAccess.rename_absolute(SAVE_TMP_PATH, SAVE_PATH) != OK:
+		_set_transient("SAVE FAILED")
+		return
+	_set_transient("SAVED")
 	_update_hud()
 
 func _load_game() -> void:
 	if not FileAccess.file_exists(SAVE_PATH):
-		status_label.text = "NO SAVE"
+		_set_transient("NO SAVE")
 		return
 	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
-	if f == null or f.get_length() < 11:
-		status_label.text = "SAVE CORRUPT"
+	# Parse + validate ALL host metadata BEFORE the engine commit below.
+	if f == null or f.get_length() < HOST_SAVE_MIN_BYTES:
+		_set_transient("SAVE CORRUPT")
 		return
-	if f.get_8() != 1:
-		status_label.text = "SAVE VERSION?"
+	if f.get_8() != HOST_SAVE_VERSION:
+		_set_transient("SAVE VERSION?")
 		return
 	var px: float = f.get_float()
 	var py: float = f.get_float()
-	var mat: int = f.get_8()
+	var mat_name: String = f.get_pascal_string()
 	var sim_len: int = int(f.get_32())
+	var world_w: int = world.get_world_width()
+	var world_h: int = world.get_world_height()
+	# Domain for player coords (Group 3, Task B6): the world rect.
+	var meta_ok: bool = is_finite(px) and is_finite(py)
+	meta_ok = meta_ok and px >= 0.0 and px <= float(world_w)
+	meta_ok = meta_ok and py >= 0.0 and py <= float(world_h)
+	meta_ok = meta_ok and not mat_name.is_empty()
+	meta_ok = meta_ok and sim_len >= 0 and sim_len <= HOST_SAVE_SIM_MAX
+	meta_ok = meta_ok and sim_len <= int(f.get_length() - f.get_position())
+	if not meta_ok:
+		_set_transient("SAVE CORRUPT")
+		return
 	var sim := f.get_buffer(sim_len)
+	if sim.size() != sim_len or f.get_position() != f.get_length():
+		# Short read, or trailing bytes (strict envelope: reject).
+		_set_transient("SAVE CORRUPT")
+		return
 	f.close()
-	if sim.size() != sim_len or not world.load_from_bytes(sim):
-		status_label.text = "LOAD FAILED"
+	if not world.load_from_bytes(sim):
+		_set_transient("LOAD FAILED")
 		return
 	player_pos = Vector2(px, py)
-	current_material = mat
+	# Stable-name remap: unknown names fall back to the first table material
+	# with a transient notice (UX fallback, not sim integrity).
+	current_material = _material_id_for_name(mat_name)
 	_update_marker()
 	_update_hud()
+	if _pending_material_notice.is_empty():
+		_set_transient("LOADED")
+	else:
+		_set_transient(_pending_material_notice)
+		_pending_material_notice = ""
+
+var _pending_material_notice: String = ""
+
+func _material_id_for_name(mat_name: String) -> int:
+	var ids: PackedInt32Array = world.get_material_ids()
+	for id in ids:
+		if world.get_material_name(id) == mat_name:
+			return id
+	var first: int = ids[0] if ids.size() > 0 else AshfallWorld.MATERIAL_AIR
+	_pending_material_notice = "MATERIAL '%s' ? -> %s" % [mat_name, world.get_material_name(first).capitalize()]
+	return first
 
 func _update_hud() -> void:
 	tick_label.text = str(world.get_tick())
 	cells_label.text = str(world.get_occupied_cell_count())
-	status_label.text = "RUNNING" if world.is_auto_step() else "PAUSED"
+	# A live transient notice owns the status line until it expires.
+	if _transient_msg.is_empty():
+		status_label.text = "RUNNING" if world.is_auto_step() else "PAUSED"
+	else:
+		status_label.text = _transient_msg
 	fps_label.text = "%d fps" % Engine.get_frames_per_second()
 	frame_label.text = "%.2f ms" % _frame_ms_ema
 	sim_label.text = "%.2f ms" % world.get_last_step_ms()
@@ -245,20 +343,34 @@ func _display_to_world(local_pos: Vector2) -> Vector2i:
 	var world_h: int = world.get_world_height()
 	if s.x <= 0.0:
 		return Vector2i(-1, -1)
-	var cell_x: int = clampi(int(floor((local_pos.x - o.x) / s.x)), 0, world_w - 1)
-	var cell_y: int = clampi(int(floor((local_pos.y - o.y) / s.y)), 0, world_h - 1)
-	return Vector2i(cell_x, cell_y)
+	# Group 3, Task B7: letterbox clicks OUTSIDE the image are rejected
+	# pre-clamp (clamping painted border cells from the margins).
+	var fx: float = (local_pos.x - o.x) / s.x
+	var fy: float = (local_pos.y - o.y) / s.y
+	if fx < 0.0 or fy < 0.0 or fx >= float(world_w) or fy >= float(world_h):
+		return Vector2i(-1, -1)
+	return Vector2i(int(floor(fx)), int(floor(fy)))
 
 func _update_marker() -> void:
 	# Avatar box in display space (same letterbox as the world texture).
+	# Position is cheap and follows every frame; the material lookup + label
+	# assignment run only when the held material changes (Group 3, Task B7).
 	var top_left := _world_to_display(Vector2(player_pos.x - PLAYER_HALF_W, player_pos.y - PLAYER_H))
 	var bottom_right := _world_to_display(Vector2(player_pos.x + PLAYER_HALF_W, player_pos.y))
 	player_marker.position = top_left
 	player_marker.size = bottom_right - top_left
+	if current_material == _marker_mat:
+		return
+	_marker_mat = current_material
 	if current_material == AshfallWorld.MATERIAL_AIR:
 		material_label.text = "Air (Eraser)"
 	else:
 		material_label.text = world.get_material_name(current_material).capitalize()
+
+func _on_focus_lost() -> void:
+	# Group 3, Task B7: alt-tab (or any window focus loss) mid-stroke must
+	# not leave a stuck brush painting on return.
+	is_drawing = false
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
@@ -266,7 +378,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_SPACE:
 				world.auto_step = not world.is_auto_step()
 				_update_hud()
-			KEY_S:
+			# Group 3, Task B7: S keeps move-down (see _move_player); the
+			# single-step key is N (unused elsewhere in the input map).
+			KEY_N:
 				world.step()
 				_update_hud()
 			KEY_R:
@@ -331,7 +445,8 @@ func _draw_at(local_pos: Vector2) -> void:
 	var y2: int = mini(world_h - 1, cell.y + brush_size)
 
 	world.fill_rect(x1, y1, x2, y2, draw_material)
-	world.update_world_texture()
+	# Group 3, Task B4: no direct present here — the per-frame flush in
+	# _process presents the accumulated dirtiness.
 	_update_hud()
 
 func _on_step_btn_pressed() -> void:

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 #include <godot_cpp/classes/node2d.hpp>
 #include <godot_cpp/classes/image.hpp>
@@ -57,15 +59,22 @@ private:
     std::array<std::uint8_t, 256> movements_;
     std::array<bool, 256> known_ids_;
     void refresh_material_cache();
-    // Wall-clock cost of the last step() (sim + present), for the perf HUD.
+    // Wall-clock cost of the last step() (sim ONLY — present cost lives in
+    // last_present_; see flush_present()), for the perf HUD.
     double last_step_ms_ = 0.0;
     bool auto_step_ = false;
     // Fixed-rate simulation pacing: accumulate physics delta and step at
-    // sim_rate_hz_ (default 30Hz), at most max_steps_per_physics_frame_ steps
+    // sim_rate_hz_ (default 60Hz), at most max_steps_per_physics_frame_ steps
     // per callback. Excess backlog is dropped to avoid spiral of death.
     double step_accumulator_ = 0.0;
     double sim_rate_hz_ = 60.0;
     int max_steps_per_physics_frame_ = 2;
+    // Bridge/host resource limits (Group 3, Task B5 — mirror core caps).
+    // Checked BEFORE any world reset or allocation.
+    static constexpr int kMaxWorldDim = 4096;
+    static constexpr std::uint64_t kMaxWorldCells = 1u << 22;
+    static constexpr double kMinSimRateHz = 1.0;
+    static constexpr double kMaxSimRateHz = 240.0;
 
 protected:
     static void _bind_methods();
@@ -118,6 +127,29 @@ public:
     int get_max_steps_per_physics_frame() const { return max_steps_per_physics_frame_; }
 
     Ref<ImageTexture> update_world_texture();
+    // Present-phase breakdown for the last flush (Group 1, Task C4; moved
+    // into the class in Group 3, Task B). flush_present() is the documented
+    // SOLE consumer of the engine dirty set: sim (step) and edits only
+    // accumulate dirtiness; exactly one flush per rendered frame presents it.
+    // update_world_texture() is a compatibility wrapper around flush_present()
+    // for tests and tools that need a synchronous step-and-present.
+    Ref<ImageTexture> flush_present();
+    // Test hooks (presentation verifies only — never used by the host):
+    // debug_force_full_repaint() forces the next flush onto the full-window
+    // path (F1 partial==full compare); debug_drop_presentation() releases all
+    // presentation objects without touching sim state (F5 recovery proof).
+    void debug_force_full_repaint();
+    void debug_drop_presentation();
+    double get_present_sim_ms() const { return last_present_.sim_ms; }
+    double get_present_dirty_collect_ms() const { return last_present_.dirty_collect_ms; }
+    double get_present_material_read_ms() const { return last_present_.material_read_ms; }
+    double get_present_paint_ms() const { return last_present_.paint_ms; }
+    double get_present_set_data_ms() const { return last_present_.set_data_ms; }
+    double get_present_submit_ms() const { return last_present_.submit_ms; }
+    std::uint64_t get_present_texture_submits() const { return last_present_.texture_submits; }
+    std::uint64_t get_present_flushes() const { return last_present_.present_flushes; }
+    std::uint64_t get_present_dirty_pixels() const { return last_present_.dirty_pixels; }
+    std::uint64_t get_present_logical_bytes() const { return last_present_.logical_bytes; }
     Ref<ImageTexture> get_world_texture() const;
     Ref<Image> get_world_image() const;
     Ref<ImageTexture> get_water_texture() const;
@@ -125,6 +157,36 @@ public:
     double get_last_step_ms() const { return last_step_ms_; }
     int get_world_width() const { return world_width_; }
     int get_world_height() const { return world_height_; }
+
+private:
+    // Present-phase breakdown (see flush_present()). Cumulative counters are
+    // per-world (one world in practice).
+    struct PresentPhases {
+        double sim_ms = 0.0; // world_.step() span ONLY (see step() comment)
+        double dirty_collect_ms = 0.0; // dirty_chunks() copy
+        double material_read_ms = 0.0; // full-path copy_rect(); 0 on partial path (reads inline, timed in paint)
+        double paint_ms = 0.0; // ptrw() acquire + per-pixel paint loops
+        double set_data_ms = 0.0; // Image::set_data() x2 (CPU upload staging)
+        double submit_ms = 0.0; // ImageTexture::update() x2 (GPU submit)
+        std::uint64_t texture_submits = 0; // cumulative update() calls (2 per painted flush: base + water)
+        std::uint64_t present_flushes = 0; // cumulative flush_present() calls that painted (updates-per-frame source)
+        std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
+        std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
+    };
+    PresentPhases last_present_;
+    bool force_full_repaint_ = false;
+    // Renderer invalidation halo (Group 3, Task B1): liquid shading samples
+    // up to 5 cells vertically, so a dirty chunk can change the color of
+    // unchanged cells in its vertical neighbors. Expand dirty chunks by ±1
+    // cy, clipped to the presentation window. The sim stays unaware.
+    [[nodiscard]] std::vector<ashfall::CellPosition> visible_repaint_set(
+        const std::vector<ashfall::CellPosition>& dirty) const;
+    [[nodiscard]] bool presentation_resources_valid() const;
+    // Recreate presentation objects + full repaint from the CURRENT world.
+    // Zero sim mutation (Group 3, Task B2): never resets or loads the world.
+    void recover_presentation_resources();
+    void fill_background_pixels();
+    [[nodiscard]] bool validate_material_id(int p_material_id) const;
 };
 
 } // namespace godot

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -17,24 +18,6 @@
 namespace godot {
 
 namespace {
-// Present-phase breakdown for the last step() (Group 1, Task C4). File-local
-// because the bridge class header is owned by another workstream; the
-// integrator may move this into AshfallWorld (and bind phase getters) in
-// Group 3. Cumulative counters are process-wide (one world in practice).
-struct PresentPhases {
-    double sim_ms = 0.0; // world_.step() span ONLY (see step() comment)
-    double dirty_collect_ms = 0.0; // dirty_chunks() copy
-    double material_read_ms = 0.0; // full-path copy_rect(); 0 on partial path (reads inline, timed in paint)
-    double paint_ms = 0.0; // ptrw() acquire + per-pixel paint loops
-    double set_data_ms = 0.0; // Image::set_data() x2 (CPU upload staging)
-    double submit_ms = 0.0; // ImageTexture::update() x2 (GPU submit)
-    std::uint64_t texture_submits = 0; // cumulative update() calls (2 per painted flush: base + water)
-    std::uint64_t present_flushes = 0; // cumulative update_world_texture() calls that painted (updates-per-frame source)
-    std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
-    std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
-};
-PresentPhases g_last_present;
-
 inline double present_ms_between(
     const std::chrono::steady_clock::time_point& start,
     const std::chrono::steady_clock::time_point& end) {
@@ -76,6 +59,19 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_max_steps_per_physics_frame"), &AshfallWorld::get_max_steps_per_physics_frame);
 
     ClassDB::bind_method(D_METHOD("update_world_texture"), &AshfallWorld::update_world_texture);
+    ClassDB::bind_method(D_METHOD("flush_present"), &AshfallWorld::flush_present);
+    ClassDB::bind_method(D_METHOD("debug_force_full_repaint"), &AshfallWorld::debug_force_full_repaint);
+    ClassDB::bind_method(D_METHOD("debug_drop_presentation"), &AshfallWorld::debug_drop_presentation);
+    ClassDB::bind_method(D_METHOD("get_present_sim_ms"), &AshfallWorld::get_present_sim_ms);
+    ClassDB::bind_method(D_METHOD("get_present_dirty_collect_ms"), &AshfallWorld::get_present_dirty_collect_ms);
+    ClassDB::bind_method(D_METHOD("get_present_material_read_ms"), &AshfallWorld::get_present_material_read_ms);
+    ClassDB::bind_method(D_METHOD("get_present_paint_ms"), &AshfallWorld::get_present_paint_ms);
+    ClassDB::bind_method(D_METHOD("get_present_set_data_ms"), &AshfallWorld::get_present_set_data_ms);
+    ClassDB::bind_method(D_METHOD("get_present_submit_ms"), &AshfallWorld::get_present_submit_ms);
+    ClassDB::bind_method(D_METHOD("get_present_texture_submits"), &AshfallWorld::get_present_texture_submits);
+    ClassDB::bind_method(D_METHOD("get_present_flushes"), &AshfallWorld::get_present_flushes);
+    ClassDB::bind_method(D_METHOD("get_present_dirty_pixels"), &AshfallWorld::get_present_dirty_pixels);
+    ClassDB::bind_method(D_METHOD("get_present_logical_bytes"), &AshfallWorld::get_present_logical_bytes);
     ClassDB::bind_method(D_METHOD("get_world_texture"), &AshfallWorld::get_world_texture);
     ClassDB::bind_method(D_METHOD("get_world_image"), &AshfallWorld::get_world_image);
     ClassDB::bind_method(D_METHOD("get_water_texture"), &AshfallWorld::get_water_texture);
@@ -123,8 +119,21 @@ void AshfallWorld::_physics_process(double delta) {
 }
 
 void AshfallWorld::init_world(int p_width, int p_height) {
-    world_width_ = p_width > 0 ? p_width : 512;
-    world_height_ = p_height > 0 ? p_height : 512;
+    // Group 3, Task B5: checked dims + resource limits BEFORE any world
+    // reset or allocation. Signed arithmetic in int64 so large inputs cannot
+    // overflow; rejection leaves the current world untouched.
+    if (p_width < 1 || p_height < 1 || p_width > kMaxWorldDim || p_height > kMaxWorldDim) {
+        UtilityFunctions::push_error("init_world: dimensions out of range (1..4096 each)");
+        return;
+    }
+    const std::uint64_t cells64 =
+        static_cast<std::uint64_t>(p_width) * static_cast<std::uint64_t>(p_height);
+    if (cells64 > kMaxWorldCells) {
+        UtilityFunctions::push_error("init_world: world too large (cells exceed 1<<22)");
+        return;
+    }
+    world_width_ = p_width;
+    world_height_ = p_height;
 
     // Authoritative state reset: presentation window resize must not preserve
     // stale cells from a previous world. reset() dirties removed chunks, but
@@ -133,50 +142,55 @@ void AshfallWorld::init_world(int p_width, int p_height) {
     world_.reset();
     refresh_material_cache();
 
-    const std::size_t total_cells = static_cast<std::size_t>(world_width_ * world_height_);
-    cell_buffer_.resize(total_cells, ashfall::kAir);
+    const std::size_t total_cells = static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    cell_buffer_.assign(total_cells, ashfall::kAir);
 
-    pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
-    uint8_t *w = pixel_bytes_.ptrw();
-    for (std::size_t i = 0; i < total_cells; ++i) {
-        w[i * 4 + 0] = 18;
-        w[i * 4 + 1] = 20;
-        w[i * 4 + 2] = 24;
-        w[i * 4 + 3] = 255;
-    }
-
-    water_pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
-    uint8_t *ww = water_pixel_bytes_.ptrw();
-    for (std::size_t i = 0; i < total_cells; ++i) {
-        ww[i * 4 + 0] = 0;
-        ww[i * 4 + 1] = 0;
-        ww[i * 4 + 2] = 0;
-        ww[i * 4 + 3] = 0;
-    }
+    fill_background_pixels();
 
     world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     world_texture_ = ImageTexture::create_from_image(world_image_);
     water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
     water_texture_ = ImageTexture::create_from_image(water_image_);
+    force_full_repaint_ = false;
     world_.clear_dirty_chunks();
     step_accumulator_ = 0.0;
 }
 
 void AshfallWorld::step() {
+    // Group 3, Task B4 (cadence): step() advances the sim and accumulates
+    // dirtiness ONLY. Presentation happens in flush_present(), called once
+    // per rendered frame by the host (main_controller._process) — never once
+    // per sim step, edit, or mouse-motion event. Tests needing a synchronous
+    // step-and-present use flush_present() (or update_world_texture())
+    // directly after stepping.
     // HUD number span: world_.step() ONLY — the same span bench_step.cpp
     // times (sim, no present), so the HUD ms/step is directly comparable to
-    // sim-bench numbers. Present cost lives in g_last_present (see
-    // update_world_texture()). Present cadence unchanged: every step still
-    // presents (once-per-frame accumulation is Group 3 work).
+    // sim-bench numbers. Present cost lives in last_present_ (see
+    // flush_present()).
     const auto sim_t0 = std::chrono::steady_clock::now();
     world_.step();
     const auto sim_t1 = std::chrono::steady_clock::now();
-    g_last_present.sim_ms = present_ms_between(sim_t0, sim_t1);
-    last_step_ms_ = g_last_present.sim_ms;
-    update_world_texture();
+    last_present_.sim_ms = present_ms_between(sim_t0, sim_t1);
+    last_step_ms_ = last_present_.sim_ms;
+}
+
+bool AshfallWorld::validate_material_id(int p_material_id) const {
+    // Group 3, Task B5: range + known-id reject BEFORE the u8 narrow, so 256
+    // can never alias to air (and 257 to stone) ahead of engine validation.
+    if (p_material_id < 0 || p_material_id > 255) {
+        UtilityFunctions::push_error("AshfallWorld: material id out of range 0..255");
+        return false;
+    }
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) {
+        UtilityFunctions::push_error("AshfallWorld: unknown material id");
+        return false;
+    }
+    return true;
 }
 
 void AshfallWorld::set_cell(int p_x, int p_y, int p_material_id) {
+    if (!validate_material_id(p_material_id)) return;
     world_.set_cell({p_x, p_y}, static_cast<ashfall::MaterialId>(p_material_id));
 }
 
@@ -185,6 +199,7 @@ int AshfallWorld::get_cell(int p_x, int p_y) const {
 }
 
 void AshfallWorld::fill_rect(int p_x1, int p_y1, int p_x2, int p_y2, int p_material_id) {
+    if (!validate_material_id(p_material_id)) return;
     world_.fill_rect({p_x1, p_y1}, {p_x2, p_y2}, static_cast<ashfall::MaterialId>(p_material_id));
 }
 
@@ -218,7 +233,13 @@ bool AshfallWorld::is_auto_step() const {
 }
 
 void AshfallWorld::set_sim_rate_hz(double p_hz) {
-    sim_rate_hz_ = p_hz;
+    // Group 3, Task B5: non-finite rates are rejected (old rate kept);
+    // finite rates clamp to the supported range.
+    if (!std::isfinite(p_hz)) {
+        UtilityFunctions::push_error("AshfallWorld: sim rate must be finite");
+        return;
+    }
+    sim_rate_hz_ = std::clamp(p_hz, kMinSimRateHz, kMaxSimRateHz);
     step_accumulator_ = 0.0;
 }
 
@@ -378,26 +399,121 @@ bool AshfallWorld::load_from_bytes(const PackedByteArray &p_bytes) {
 }
 
 Ref<ImageTexture> AshfallWorld::update_world_texture() {
-    if (world_image_.is_null() || world_texture_.is_null()) {
-        init_world(world_width_, world_height_);
+    // Compatibility wrapper: synchronous present for tests/tools.
+    return flush_present();
+}
+
+void AshfallWorld::debug_force_full_repaint() {
+    force_full_repaint_ = true;
+}
+
+void AshfallWorld::debug_drop_presentation() {
+    // Test hook only: release presentation objects, sim state untouched.
+    world_image_.unref();
+    world_texture_.unref();
+    water_image_.unref();
+    water_texture_.unref();
+}
+
+std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
+    const std::vector<ashfall::CellPosition>& dirty) const {
+    // B1 halo: each dirty chunk plus its vertical neighbors (±1 cy), clipped
+    // to the presentation window. The window is the whole world here, so the
+    // clip drops chunks that cannot paint (offscreen dirt must neither
+    // repaint nor upload — B4 visible-set filtering).
+    std::set<ashfall::CellPosition> repaint;
+    for (const ashfall::CellPosition chunk : dirty) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            const ashfall::CellPosition candidate{chunk.x, chunk.y + dy};
+            const int base_x = candidate.x * ashfall::kChunkSize;
+            const int base_y = candidate.y * ashfall::kChunkSize;
+            if (base_x + ashfall::kChunkSize - 1 < 0 || base_x > world_width_ - 1) continue;
+            if (base_y + ashfall::kChunkSize - 1 < 0 || base_y > world_height_ - 1) continue;
+            repaint.insert(candidate);
+        }
+    }
+    return std::vector<ashfall::CellPosition>(repaint.begin(), repaint.end());
+}
+
+bool AshfallWorld::presentation_resources_valid() const {
+    // B2: the null/degraded check covers BOTH layers (base + water).
+    if (world_image_.is_null() || world_texture_.is_null()) return false;
+    if (water_image_.is_null() || water_texture_.is_null()) return false;
+    if (world_image_->get_width() != world_width_ || world_image_->get_height() != world_height_) return false;
+    if (water_image_->get_width() != world_width_ || water_image_->get_height() != world_height_) return false;
+    const int64_t expect = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_) * 4;
+    if (pixel_bytes_.size() != expect || water_pixel_bytes_.size() != expect) return false;
+    return true;
+}
+
+void AshfallWorld::fill_background_pixels() {
+    const std::size_t total_cells =
+        static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
+    uint8_t *w = pixel_bytes_.ptrw();
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        w[i * 4 + 0] = 18;
+        w[i * 4 + 1] = 20;
+        w[i * 4 + 2] = 24;
+        w[i * 4 + 3] = 255;
+    }
+    water_pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
+    uint8_t *ww = water_pixel_bytes_.ptrw();
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        ww[i * 4 + 0] = 0;
+        ww[i * 4 + 1] = 0;
+        ww[i * 4 + 2] = 0;
+        ww[i * 4 + 3] = 0;
+    }
+}
+
+void AshfallWorld::recover_presentation_resources() {
+    // B2: recreate presentation objects + full repaint from the CURRENT
+    // world. Zero sim mutation: world_, its tick, cells, temps, and table are
+    // never touched here (the old path called init_world(), erasing the sim).
+    // The host rebinds its texture refs after every flush (see
+    // main_controller._process), so replaced texture objects stay bound.
+    const std::size_t total_cells =
+        static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    cell_buffer_.assign(total_cells, ashfall::kAir);
+    fill_background_pixels();
+    world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
+    world_texture_ = ImageTexture::create_from_image(world_image_);
+    water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    water_texture_ = ImageTexture::create_from_image(water_image_);
+    force_full_repaint_ = true;
+}
+
+Ref<ImageTexture> AshfallWorld::flush_present() {
+    if (!presentation_resources_valid()) {
+        recover_presentation_resources();
     }
 
     const auto dirty_t0 = std::chrono::steady_clock::now();
     const std::vector<ashfall::CellPosition> dirty = world_.dirty_chunks();
-    g_last_present.dirty_collect_ms = present_ms_between(dirty_t0, std::chrono::steady_clock::now());
+    last_present_.dirty_collect_ms = present_ms_between(dirty_t0, std::chrono::steady_clock::now());
+
+    // B1 halo + B4 visible-set filtering: the repaint set (dirty ∪ vertical
+    // neighbors, window-clipped) is built BEFORE the partial/full decision,
+    // so offscreen dirt neither repaints nor uploads.
+    const std::vector<ashfall::CellPosition> repaint = visible_repaint_set(dirty);
 
     // No-work fast path BEFORE any ptrw(): PackedByteArray::ptrw() triggers
     // copy-on-write duplication even when the bytes are only read, so
     // acquiring the write pointer on a clean frame would copy ~1MB per layer
     // for nothing (CoW trap). Skipping here mutates nothing the old path did
     // not: the old code returned the same texture untouched when clean.
-    if (dirty.empty()) {
-        g_last_present.material_read_ms = 0.0;
-        g_last_present.paint_ms = 0.0;
-        g_last_present.set_data_ms = 0.0;
-        g_last_present.submit_ms = 0.0;
-        g_last_present.dirty_pixels = 0;
-        g_last_present.logical_bytes = 0;
+    // Invisible-only dirt is consumed the same way (fixed window: nothing
+    // newly exposed can need it later) but submits nothing.
+    if (repaint.empty()) {
+        force_full_repaint_ = false;
+        last_present_.material_read_ms = 0.0;
+        last_present_.paint_ms = 0.0;
+        last_present_.set_data_ms = 0.0;
+        last_present_.submit_ms = 0.0;
+        last_present_.dirty_pixels = 0;
+        last_present_.logical_bytes = 0;
+        world_.clear_dirty_chunks();
         return world_texture_;
     }
 
@@ -468,16 +584,18 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
     std::uint64_t painted_pixels = 0;
     std::uint64_t logical_cells = 0;
 
-    // Partial CPU-side path: repaint only dirty 64x64 chunks intersecting the
-    // presentation window. The single ImageTexture still requires a full GPU
-    // upload via update(), so GPU-side remains monolithic by design (see P1.2).
+    // Partial CPU-side path: repaint only the visible repaint set (dirty
+    // chunks + vertical halo, window-clipped). The single ImageTexture still
+    // requires a full GPU upload via update(), so GPU-side remains monolithic
+    // by design (see P1.2). The partial/full choice is made on the VISIBLE
+    // set: offscreen dirt already returned early above.
     const std::size_t kFullRepaintThreshold = 8;
-    bool use_partial = !dirty.empty() && dirty.size() <= kFullRepaintThreshold;
+    bool use_partial = !force_full_repaint_ && repaint.size() <= kFullRepaintThreshold;
 
     if (!use_partial) {
         const auto read_t0 = std::chrono::steady_clock::now();
         world_.copy_rect({0, 0}, {world_width_ - 1, world_height_ - 1}, cell_buffer_);
-        g_last_present.material_read_ms = present_ms_between(read_t0, std::chrono::steady_clock::now());
+        last_present_.material_read_ms = present_ms_between(read_t0, std::chrono::steady_clock::now());
         logical_cells = static_cast<std::uint64_t>(world_width_) * static_cast<std::uint64_t>(world_height_);
         for (int y = 0; y < world_height_; ++y) {
             for (int x = 0; x < world_width_; ++x) {
@@ -514,8 +632,8 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
         // Partial path reads cells inline via world_.cell() during the paint
         // loops below (no separate copy_rect), so there is no isolated
         // material-read phase here: it is timed within paint.
-        g_last_present.material_read_ms = 0.0;
-        for (const ashfall::CellPosition chunk : dirty) {
+        last_present_.material_read_ms = 0.0;
+        for (const ashfall::CellPosition chunk : repaint) {
             const int base_x = chunk.x * ashfall::kChunkSize;
             const int base_y = chunk.y * ashfall::kChunkSize;
             const int start_x = std::max(base_x, 0);
@@ -552,20 +670,21 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
             }
         }
     }
-    g_last_present.paint_ms = present_ms_between(paint_t0, std::chrono::steady_clock::now());
-    g_last_present.dirty_pixels = painted_pixels;
-    g_last_present.logical_bytes = logical_cells; // u8 ids: 1 byte per logical cell
+    last_present_.paint_ms = present_ms_between(paint_t0, std::chrono::steady_clock::now());
+    last_present_.dirty_pixels = painted_pixels;
+    last_present_.logical_bytes = logical_cells; // u8 ids: 1 byte per logical cell
 
     const auto set_data_t0 = std::chrono::steady_clock::now();
     world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
-    g_last_present.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
+    last_present_.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
     const auto submit_t0 = std::chrono::steady_clock::now();
     world_texture_->update(world_image_);
     water_texture_->update(water_image_);
-    g_last_present.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
-    g_last_present.texture_submits += 2; // base + water update() calls
-    ++g_last_present.present_flushes;
+    last_present_.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
+    last_present_.texture_submits += 2; // base + water update() calls
+    ++last_present_.present_flushes;
+    force_full_repaint_ = false;
     // Presentation consumed the dirty set.
     world_.clear_dirty_chunks();
 
