@@ -240,6 +240,8 @@ bool SimulationWorld::load_material_table(const MaterialTable& table) {
         runtime.solid = spec.solid;
         runtime.valid = true;
     }
+    // (Group 4, Task O4:) reset() empties the world, so non_static_count_ is
+    // already 0 here — a table change on an empty world needs no recount.
     reset();
     reactions_.clear();
     return true;
@@ -384,6 +386,8 @@ void SimulationWorld::reset() {
     temp_scratch_.clear();
     temp_prune_scratch_.clear();
     heat_next_scratch_.clear();
+    // (Group 4, Task O4:) the world is empty, so the non-static count is exactly 0.
+    non_static_count_ = 0;
     tick_ = 0;
 }
 
@@ -424,6 +428,16 @@ void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
     const MaterialId* found = cells_.find(position);
     const MaterialId previous = found == nullptr ? kAir : *found;
     if (previous == material_id) return;
+    // (Group 4, Task O4:) counter delta from the old/new movement classes
+    // (old lookup already exists above). Air counts as static; ids here are
+    // validated (unknown material_id returns above, stored cells hold valid
+    // ids), so the material_fast asserts hold.
+    const bool was_dynamic =
+        previous != kAir && material_fast(previous).movement != Movement::Static;
+    const bool is_dynamic =
+        material_id != kAir && material_fast(material_id).movement != Movement::Static;
+    if (is_dynamic && !was_dynamic) ++non_static_count_;
+    else if (was_dynamic && !is_dynamic) --non_static_count_;
     if (material_id == kAir) {
         cells_.erase(position);
         temps_.erase(position);
@@ -445,15 +459,29 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
             for (int x = min_x; x <= max_x; ++x) {
                 const CellPosition position{x, y};
                 temps_.erase(position);
-                if (!cells_.contains(position)) continue;
+                const MaterialId* found = cells_.find(position);
+                if (found == nullptr) continue;
+                // (Group 4, Task O4:) accumulate the counter over erased cells.
+                if (material_fast(*found).movement != Movement::Static) --non_static_count_;
                 cells_.erase(position);
                 write_chunk_cell(position, kAir);
             }
         }
     } else {
+        // (Group 4, Task O4:) hoisted new-class lookup; per-cell delta only
+        // on actual material change (same-id rewrites contribute 0).
+        const bool new_dynamic = material_fast(material_id).movement != Movement::Static;
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
                 const CellPosition position{x, y};
+                const MaterialId* found = cells_.find(position);
+                const MaterialId previous = found == nullptr ? kAir : *found;
+                if (previous != material_id) {
+                    const bool was_dynamic = previous != kAir &&
+                                             material_fast(previous).movement != Movement::Static;
+                    if (new_dynamic && !was_dynamic) ++non_static_count_;
+                    else if (was_dynamic && !new_dynamic) --non_static_count_;
+                }
                 cells_.insert_or_assign(position, material_id);
                 write_chunk_cell(position, material_id);
             }
@@ -612,6 +640,43 @@ void SimulationWorld::step() {
 #else
     run_reactions();
 #endif
+    // (Group 4, Task O4:) exact static fast path. Reactions STILL run first
+    // above (static worlds can ignite — a reaction creating a dynamic cell
+    // routes via set_cell, so the counter below already reflects it). With no
+    // non-static cells there is nothing to classify, order, move, or
+    // reconcile, and dirty chunks stay exactly as reactions left them.
+    // HEAT-COMMIT TRAP: the normal path rebuilds temps_ from
+    // heat_next_scratch_, but with no movement nothing staged anything, so
+    // the scratch is empty and a commit would WIPE temps_. The fast path
+    // must leave temps_ exactly as-is and conduct in place (statics never
+    // move, so in-place conduction is identical to stage+commit+conduct).
+    if (non_static_count_ == 0) {
+        ++tick_;
+#ifdef ASHFALL_STEP_INSTRUMENT
+        const auto conduct_t0 = std::chrono::steady_clock::now();
+#endif
+        conduct_temperature();
+#ifdef ASHFALL_STEP_INSTRUMENT
+        // Skipped phases read as zero. reaction_cells/reaction_hits were
+        // stored by run_reactions() above and must survive (never
+        // whole-struct-assign last_counters_ here).
+        timings.conduct_ms = step_ms_between(conduct_t0, std::chrono::steady_clock::now());
+        timings.total_ms = step_ms_between(step_t0, std::chrono::steady_clock::now());
+        last_timings_ = timings; // every other phase field defaults to 0.0
+        last_counters_.occupied = cells_.size();
+        last_counters_.static_cells = cells_.size();
+        last_counters_.dynamic_cells = 0;
+        last_counters_.powder_moves = 0;
+        last_counters_.liquid_moves = 0;
+        last_counters_.gas_moves = 0;
+        last_counters_.swaps = 0;
+        last_counters_.nonzero_temps = temps_.size();
+        last_counters_.carried_heat = 0;
+        last_counters_.changed_positions = 0;
+        last_counters_.dirty_chunk_marks = 0;
+#endif
+        return;
+    }
     // cells_ IS the tick-start state: no collect copy. next replaces it.
     const FlatCells& current = cells_;
     FlatCells& next = next_scratch_;
@@ -1620,6 +1685,13 @@ bool SimulationWorld::load_with_diagnostic(
         cells_ = std::move(loaded);
         temps_ = std::move(loaded_temps);
         tick_ = saved_tick;
+        // (Group 4, Task O4:) recount scan post-commit — O(n) once per load.
+        // Committed ids are remapped to the current table (valid), so the
+        // material_fast asserts hold.
+        non_static_count_ = 0;
+        cells_.for_each([&](const CellPosition&, const MaterialId& id) {
+            if (material_fast(id).movement != Movement::Static) ++non_static_count_;
+        });
         for (const CellPosition chunk_position : changed_chunks) {
             mark_chunk_dirty(chunk_position);
         }
@@ -1813,6 +1885,13 @@ bool SimulationWorld::load_with_diagnostic(
     cells_ = std::move(loaded);
     temps_ = std::move(loaded_temps);
     tick_ = saved_tick;
+    // (Group 4, Task O4:) recount scan post-commit — O(n) once per load.
+    // Committed ids passed the materials_.contains gate above (valid), so the
+    // material_fast asserts hold.
+    non_static_count_ = 0;
+    cells_.for_each([&](const CellPosition&, const MaterialId& id) {
+        if (material_fast(id).movement != Movement::Static) ++non_static_count_;
+    });
     for (const CellPosition chunk_position : changed_chunks) {
         mark_chunk_dirty(chunk_position);
     }

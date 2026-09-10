@@ -3938,6 +3938,124 @@ bool oracle_load_hashes(const char* name, std::vector<std::uint64_t>& out) {
     return !out.empty();
 }
 
+// (Group 4, Task O4:) independent scan of the non-static count via the
+// public cell()/material_info API. The box covers every cell the test below
+// places, including a few ticks of movement range.
+std::size_t o4_scanned_non_static(ashfall::SimulationWorld& world) {
+    std::size_t count = 0;
+    for (int y = -8; y <= 8; ++y) {
+        for (int x = -8; x <= 8; ++x) {
+            const ashfall::MaterialId id = world.cell({x, y});
+            if (id == ashfall::kAir) continue;
+            ashfall::MaterialSpec spec{};
+            expect(world.material_info(id, spec), "o4 scan sees known ids only");
+            if (spec.movement != ashfall::Movement::Static) ++count;
+        }
+    }
+    return count;
+}
+
+void o4_expect_counter(ashfall::SimulationWorld& world, const char* message) {
+    const std::size_t scanned = o4_scanned_non_static(world);
+    if (world.non_static_count() != scanned) {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "%s (counter %zu scanned %zu)", message,
+            world.non_static_count(), scanned);
+        expect(false, msg);
+    }
+}
+
+void test_o4_non_static_counter() {
+    ashfall::SimulationWorld world;
+    o4_expect_counter(world, "o4 empty world counts 0");
+    // set_cell ops: static set, dynamic sets, class changes, no-ops.
+    world.set_cell({0, 0}, ashfall::kStone);
+    o4_expect_counter(world, "o4 static set keeps 0");
+    world.set_cell({1, 0}, ashfall::kSand);
+    world.set_cell({2, 0}, ashfall::kWater);
+    world.set_cell({3, 0}, ashfall::kFire);
+    o4_expect_counter(world, "o4 powder+liquid+gas sets count 3");
+    world.set_cell({1, 0}, ashfall::kStone); // dynamic -> static
+    o4_expect_counter(world, "o4 overwrite to static decrements");
+    world.set_cell({2, 0}, ashfall::kAir); // dynamic -> air
+    o4_expect_counter(world, "o4 erase to air decrements");
+    world.set_cell({0, 0}, ashfall::kStone); // same-id no-op
+    o4_expect_counter(world, "o4 same-id set is neutral");
+    world.set_cell({5, 5}, 42); // unknown id no-op
+    o4_expect_counter(world, "o4 unknown id set is neutral");
+    // fill_rect ops: bulk set, same-id rewrite, class swaps, air erases.
+    world.fill_rect({-2, 2}, {2, 4}, ashfall::kWater);
+    o4_expect_counter(world, "o4 liquid fill accumulates");
+    world.fill_rect({-2, 2}, {2, 4}, ashfall::kWater);
+    o4_expect_counter(world, "o4 same-id fill is neutral");
+    world.fill_rect({0, 2}, {1, 4}, ashfall::kStone);
+    o4_expect_counter(world, "o4 static fill over liquid decrements");
+    world.fill_rect({0, 2}, {1, 4}, ashfall::kAir);
+    o4_expect_counter(world, "o4 air fill over static is neutral");
+    world.fill_rect({-2, 3}, {2, 3}, ashfall::kAir);
+    o4_expect_counter(world, "o4 air fill over liquid decrements");
+    // Steps preserve the count on a mixed world (movement only relocates).
+    for (int i = 0; i < 3; ++i) {
+        world.step();
+        o4_expect_counter(world, "o4 stepping a mixed world preserves the count");
+    }
+    // Reaction op: spread turns static wood into gas fire via set_cell.
+    ashfall::SimulationWorld react;
+    react.set_cell({0, 0}, ashfall::kFire);
+    react.fill_rect({1, 0}, {2, 0}, ashfall::kWood);
+    o4_expect_counter(react, "o4 pre-reaction counts the single fire");
+    ashfall::ReactionTable spread_table;
+    spread_table.version = 1;
+    ashfall::ReactionSpec spread;
+    spread.name = "spread";
+    spread.probability = 100;
+    spread.reactants = {{false, "fire"}, {true, "burnable"}};
+    spread.products = {{"fire"}, {"fire"}};
+    spread_table.reactions = {spread};
+    expect(react.load_reactions(spread_table), "o4 spread loads");
+    o4_expect_counter(react, "o4 load_reactions touches no cells");
+    react.step(); // fire spreads to one wood cell, then both flames rise
+    o4_expect_counter(react, "o4 reaction-created gas counted after step");
+    expect(react.non_static_count() == 2, "o4 spread yields exactly two flames");
+    // Static-only world: the fast-path hook keeps the counter at 0 while the
+    // tick still advances and nothing moves.
+    ashfall::SimulationWorld statik;
+    statik.fill_rect({-3, -3}, {3, 3}, ashfall::kStone);
+    o4_expect_counter(statik, "o4 static box counts 0");
+    const std::size_t occupied = statik.occupied_cell_count();
+    for (int i = 0; i < 5; ++i) statik.step();
+    o4_expect_counter(statik, "o4 fast-path steps keep 0");
+    expect(statik.occupied_cell_count() == occupied, "o4 fast-path steps move nothing");
+    expect(statik.tick() == 5, "o4 fast-path steps still advance the tick");
+    // Load op: the recount matches both the scan and the source world.
+    const std::vector<std::uint8_t> bytes = world.save();
+    ashfall::SimulationWorld loaded;
+    expect(loaded.load(bytes), "o4 save loads");
+    o4_expect_counter(loaded, "o4 load recount matches scan");
+    expect(loaded.non_static_count() == world.non_static_count(), "o4 load recount matches source");
+    // Reset op.
+    world.reset();
+    o4_expect_counter(world, "o4 reset counts 0");
+    expect(world.non_static_count() == 0, "o4 reset is exactly 0");
+    // Remap op: table load resets to 0, and the counter tracks remapped ids.
+    ashfall::MaterialTable table;
+    table.version = 1;
+    table.materials = {
+        {0, "air", ashfall::Movement::Static, false, 0, {0, 0, 0}},
+        {4, "stone", ashfall::Movement::Static, true, 99, {0, 0, 0}},
+        {5, "sand", ashfall::Movement::Powder, false, 2, {0, 0, 0}},
+        {6, "water", ashfall::Movement::Liquid, false, 1, {0, 0, 0}},
+    };
+    expect(world.load_material_table(table), "o4 remap loads");
+    o4_expect_counter(world, "o4 remap resets to 0");
+    world.set_cell({0, 0}, 5);
+    world.fill_rect({1, 0}, {2, 0}, 6);
+    o4_expect_counter(world, "o4 counter tracks remapped ids");
+    expect(world.non_static_count() == 3, "o4 remapped sand+water count 3");
+    expect(world.load_material_table(ashfall::default_material_table()), "o4 defaults reload");
+    o4_expect_counter(world, "o4 reload resets to 0");
+}
+
 void test_oracle_replay() {
     struct Case {
         const char* name;
@@ -4105,6 +4223,7 @@ int main() {
     test_b2_reset_dirtiness();
     test_b2_load_invalidates_old_and_new();
     test_b2_copy_rect_full_overwrite();
+    test_o4_non_static_counter();
     test_oracle_replay();
     std::cout << "All simulation tests passed.\n";
 }

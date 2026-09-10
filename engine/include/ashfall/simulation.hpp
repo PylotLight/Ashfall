@@ -101,6 +101,10 @@ public:
     void step();
 
     [[nodiscard]] std::size_t occupied_cell_count() const noexcept { return cells_.size(); }
+    // (Group 4, Task O4:) exact count of non-static cells (movement !=
+    // Static), maintained on every mutation path; the step() fast-path hook
+    // reads it. Exposed for the counter test only.
+    [[nodiscard]] std::size_t non_static_count() const noexcept { return non_static_count_; }
     [[nodiscard]] std::uint64_t tick() const noexcept { return tick_; }
     [[nodiscard]] bool has_chunk(CellPosition chunk_position) const;
     [[nodiscard]] std::vector<CellPosition> active_chunks() const;
@@ -217,6 +221,13 @@ private:
     std::vector<std::size_t> order_cursor_;
     std::map<MaterialId, MaterialSpec> materials_;
     std::array<MaterialRuntime, 256> material_fast_;
+    // (Group 4, Task O4:) exact static fast-path counter: cells whose
+    // material_fast_ movement != Static. Maintained on EVERY mutation path
+    // (set_cell delta, fill_rect accumulate, load recount, reset → 0;
+    // reaction applies route via set_cell). Step movement never changes the
+    // material multiset (relocations + swaps only), so the hook reads it
+    // without rescanning.
+    std::size_t non_static_count_ = 0;
     std::vector<MaterialId> material_order_;
     [[nodiscard]] int temperature_at(CellPosition position) const;
     void conduct_temperature();
