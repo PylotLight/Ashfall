@@ -332,6 +332,40 @@ bool SimulationWorld::load_reactions(const ReactionTable& table) {
         resolved.push_back(std::move(rule));
     }
     reactions_ = std::move(resolved);
+    // (Group 4, Task O3:) rebuild the compiled matching structures from the
+    // resolved rules: per-slot bitsets, the air-r2 flag, and the ascending
+    // per-primary candidate lists. Lists are cleared first, rules are visited
+    // in table order, so each list holds indices ascending by construction.
+    compiled_rules_.clear();
+    compiled_rules_.resize(reactions_.size());
+    for (auto& list : rules_by_primary_) list.clear();
+    const auto compile_slot = [&](std::bitset<256>& bits, const ReactionSlot& slot) {
+        bits.reset();
+        if (slot.is_tag) {
+            for (const auto& [id, spec] : materials_) {
+                for (const std::string& tag : spec.tags) {
+                    if (tag == slot.tag) {
+                        bits.set(id);
+                        break;
+                    }
+                }
+            }
+        } else {
+            bits.set(slot.id);
+        }
+    };
+    for (std::uint32_t rule_idx = 0; rule_idx < reactions_.size(); ++rule_idx) {
+        const ResolvedReaction& rule = reactions_[rule_idx];
+        CompiledRule& compiled = compiled_rules_[rule_idx];
+        compile_slot(compiled.reactant_bits[0], rule.reactants[0]);
+        // Air-r2 (e.g. dissipate) is special-cased at match time exactly as
+        // before, never via the bitset.
+        compiled.second_is_air = !rule.reactants[1].is_tag && rule.reactants[1].id == kAir;
+        if (!compiled.second_is_air) compile_slot(compiled.reactant_bits[1], rule.reactants[1]);
+        for (std::uint32_t id = 0; id < 256; ++id) {
+            if (compiled.reactant_bits[0].test(id)) rules_by_primary_[id].push_back(rule_idx);
+        }
+    }
     return true;
 }
 
@@ -460,15 +494,11 @@ void SimulationWorld::run_reactions() {
 #else
     if (reactions_.empty()) return;
 #endif
-    struct Hit {
-        CellPosition pos;
-        MaterialId product;
-        std::uint32_t rule;
-        bool own; // primary-cell transform beats neighbor-imposed claims
-        CellPosition primary;
-    };
-    std::vector<Hit> hits;
-    hits.reserve(cells_.size());
+    std::vector<Hit>& hits = hits_;
+    // (Group 4, Task O3:) member scratch — capacity retained across ticks,
+    // sized from measured last-tick hits (64 floor), NOT cells_.size().
+    hits.clear();
+    hits.reserve(std::max<std::size_t>(64, last_hits_ * 2));
 #ifdef ASHFALL_STEP_INSTRUMENT
     std::size_t visited_cells = 0;
 #endif
@@ -476,15 +506,27 @@ void SimulationWorld::run_reactions() {
 #ifdef ASHFALL_STEP_INSTRUMENT
         ++visited_cells;
 #endif
-        for (std::uint32_t rule_idx = 0; rule_idx < reactions_.size(); ++rule_idx) {
+        // (Group 4, Task O3:) candidates are the rules whose R1 slot matches
+        // this primary, in ascending original-table order — priority, roll
+        // inputs, and ownership all follow structurally.
+        for (std::uint32_t rule_idx : rules_by_primary_[material_id]) {
             const ResolvedReaction& rule = reactions_[rule_idx];
-            if (!matches_reactant(material_id, rule.reactants[0])) continue;
-            const int heat = temperature_at(position);
-            if (rule.has_min && heat < rule.min_temp) continue;
-            if (rule.has_max && heat > rule.max_temp) continue;
-            const auto roll = reaction_roll(position, tick_, rule_idx);
+            const CompiledRule& compiled = compiled_rules_[rule_idx];
+            if (!compiled.reactant_bits[0].test(material_id)) continue;
+            // Gateless rules skip the temp query (temperature_at is a pure
+            // FlatMap read with no side effects, so skipping changes only
+            // work, never which rules match).
+            if (rule.has_min || rule.has_max) {
+                const int heat = temperature_at(position);
+                if (rule.has_min && heat < rule.min_temp) continue;
+                if (rule.has_max && heat > rule.max_temp) continue;
+            }
             if (rule.reactant_count == 1) {
-                if (roll < static_cast<std::uint32_t>(rule.probability)) {
+                // Single-reactant: R1 + gates IS the full match. The roll is
+                // evaluated after the match (same pure value as before); a
+                // failed roll STILL owns the primary (§4.3) — break either way.
+                if (reaction_roll(position, tick_, rule_idx) <
+                    static_cast<std::uint32_t>(rule.probability)) {
                     hits.push_back({position, rule.products[0].id, rule_idx, true, position});
                 }
                 break;
@@ -501,17 +543,19 @@ void SimulationWorld::run_reactions() {
             for (const CellPosition neighbor : neighbors) {
                 const MaterialId* found = cells_.find(neighbor);
                 const bool empty = found == nullptr;
-                const ReactionSlot& want = rule.reactants[1];
-                const bool match = (want.id == kAir && !want.is_tag)
+                // Air-r2 special case preserved: an empty second slot matches,
+                // an occupied one never does. Non-air slots test the bitset.
+                const bool match = compiled.second_is_air
                                        ? empty
-                                       : (!empty && matches_reactant(*found, want));
+                                       : (!empty && compiled.reactant_bits[1].test(*found));
                 if (!match) continue;
                 // Full match (R1 + R2 + gate): this rule owns the primary
                 // this tick, whether or not the roll lands. R1-only matches
                 // must NOT consume the primary, or an inapplicable rule
                 // would shadow every lower-priority rule forever (e.g. wet
                 // quench shadowing burnout for a dry fire).
-                if (roll < static_cast<std::uint32_t>(rule.probability)) {
+                if (reaction_roll(position, tick_, rule_idx) <
+                    static_cast<std::uint32_t>(rule.probability)) {
                     hits.push_back({position, rule.products[0].id, rule_idx, true, position});
                     if (rule.product_count == 2) {
                         hits.push_back({neighbor, rule.products[1].id, rule_idx, false, position});
@@ -525,6 +569,7 @@ void SimulationWorld::run_reactions() {
     });
     // Deterministic conflict resolution: total sort order (position, own
     // first, rule priority, primary position) — first hit per cell wins.
+    last_hits_ = hits.size();
 #ifdef ASHFALL_STEP_INSTRUMENT
     last_counters_.reaction_cells = visited_cells;
     last_counters_.reaction_hits = hits.size();

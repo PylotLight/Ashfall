@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <bitset>
 #include <cassert>
 #include <compare>
 #include <cstddef>
@@ -273,6 +274,30 @@ private:
         int product_temp = 0;
     };
     std::vector<ResolvedReaction> reactions_;
+    // (Group 4, Task O3:) compiled reaction matching. Per-rule slot bitsets
+    // (tag slots: all matching ids resolved at load; id slots: single bit;
+    // an air second reactant is special-cased via second_is_air, NOT in the
+    // bitset — the empty-slot check stays as today) plus per-primary
+    // candidate lists holding rule indices in ASCENDING original-table order
+    // (ownership semantics preserved structurally). Rebuilt in
+    // load_reactions; cleared with reactions_. hits_ is the run_reactions
+    // scratch (capacity retained across ticks); last_hits_ sizes its reserve
+    // (max(64, last_hits_ * 2) per tick — measured candidates, not cells).
+    struct CompiledRule {
+        std::array<std::bitset<256>, 2> reactant_bits;
+        bool second_is_air = false;
+    };
+    struct Hit {
+        CellPosition pos;
+        MaterialId product;
+        std::uint32_t rule;
+        bool own; // primary-cell transform beats neighbor-imposed claims
+        CellPosition primary;
+    };
+    std::vector<CompiledRule> compiled_rules_;
+    std::array<std::vector<std::uint32_t>, 256> rules_by_primary_;
+    std::vector<Hit> hits_;
+    std::size_t last_hits_ = 0;
 
     [[nodiscard]] bool material_id_by_name(const std::string& name, MaterialId& out) const;
     [[nodiscard]] bool matches_reactant(MaterialId id, const ReactionSlot& slot) const;
