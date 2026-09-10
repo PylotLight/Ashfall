@@ -201,7 +201,17 @@ private:
     [[nodiscard]] static std::size_t chunk_index(int local_x, int local_y) noexcept {
         return static_cast<std::size_t>(local_y * kChunkSize + local_x);
     }
-    [[nodiscard]] static bool chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept;
+    // (Group 4, Task O6:) touch helper for changed-position
+    // reconciliation (perf §9.2): successful movement registers its
+    // endpoints (vacated source + written destination; both partners of a
+    // swap) into touch_scratch_. Duplicates allowed; reconcile dedups via
+    // sort+unique (deterministic). Place-backs (static or dynamic) rewrite
+    // the identical id, so before==after by construction and they are
+    // deliberately NOT touched — dynamics can never overwrite a
+    // static-occupied next slot (density / stayed / emptiness gates), and
+    // stays rewrite their own id. The NDEBUG full-reconstruction comparator
+    // in step() proves this coverage every debug tick.
+    void touch_next(CellPosition position) { touch_scratch_.push_back(position); }
 
     // cells_ is the authoritative occupied set, persistent across ticks:
     // step() reads it in place and swaps in the next state, so there is no
@@ -262,6 +272,10 @@ private:
     // is stored, mirroring temps_.
     FlatTemps heat_next_scratch_;
     std::vector<CellPosition> temp_prune_scratch_;
+    // (Group 4, Task O5:) retained candidate list for the sparse conduction
+    // pass (nonzero-temp positions + 4-neighbors, sorted + deduped per tick;
+    // cleared + grown-only — steady-state zero alloc).
+    std::vector<CellPosition> cond_cand_scratch_;
     struct ReactionSlot {
         bool is_tag = false;
         std::string tag;
@@ -316,7 +330,21 @@ private:
         CellPosition position, std::uint64_t tick, std::uint32_t rule);
     void run_reactions();
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
-    std::set<CellPosition> dirty_chunks_;
+    // (Group 4, Task O6:) per-chunk occupancy (non-air slot count).
+    // Invariant: an entry exists iff the chunk exists, and the count equals
+    // the chunk's non-air slots. Maintained on EVERY chunk-mirror write path
+    // (write_chunk_cell_deferred both variants, load-commit rebuild,
+    // reset-clear); emptiness queries read it (O(1)) instead of scanning the
+    // dense vector. fill_rect(air) inherits this (no rescans).
+    std::map<CellPosition, std::size_t> chunk_occupancy_;
+    // (Group 4, Task O6:) vector-backed dirty set with IDENTICAL observable
+    // semantics to the old std::set: mark=push_back (duplicates allowed),
+    // read=sorted-unique copy, clear=empty. dirty_chunks() still returns a
+    // sorted, unique vector.
+    std::vector<CellPosition> dirty_chunks_;
+    // (Group 4, Task O6:) changed-position scratch: cleared + grown-only per
+    // step (steady-state zero alloc), deduped in reconcile.
+    std::vector<CellPosition> touch_scratch_;
     std::uint64_t tick_ = 0;
 #ifdef ASHFALL_STEP_INSTRUMENT
     // Write-only instrumentation state (see determinism rule above): step()

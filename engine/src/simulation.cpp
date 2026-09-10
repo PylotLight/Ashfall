@@ -381,6 +381,8 @@ void SimulationWorld::reset() {
         mark_chunk_dirty(chunk_position);
     }
     chunks_.clear();
+    // (Group 4, Task O6:) occupancy tracks chunks_ 1:1 — no chunks, no counts.
+    chunk_occupancy_.clear();
     cells_.clear();
     temps_.clear();
     temp_scratch_.clear();
@@ -401,16 +403,35 @@ void SimulationWorld::write_chunk_cell_deferred(
     const int local_x = positive_modulo(position.x, kChunkSize);
     const int local_y = positive_modulo(position.y, kChunkSize);
     const std::size_t index = chunk_index(local_x, local_y);
+    // (Group 4, Task O6:) occupancy-maintained mirror writes. The
+    // chunk_occupancy_ invariant (entry exists iff chunk exists; count ==
+    // non-air slots) is updated on every slot transition, so emptiness is an
+    // O(1) map lookup — no dense-vector rescans anywhere on this path.
     if (material_id == kAir) {
         const auto chunk_it = chunks_.find(chunk_position);
         if (chunk_it == chunks_.end()) return;
+        if (chunk_it->second[index] == kAir) {
+            // Air-to-air rewrite: no state change. The old code still queued
+            // the chunk for the deferred sweep (which re-scanned and kept
+            // it); the occupancy sweep below keeps it too — same outcome.
+            if (maybe_emptied != nullptr) maybe_emptied->insert(chunk_position);
+            return;
+        }
         chunk_it->second[index] = kAir;
-        // O(chunk) emptiness scans are deferred in bulk paths: the caller
-        // collects touched chunks and sweeps once (see step()).
-        if (maybe_emptied != nullptr) {
+        const auto occ_it = chunk_occupancy_.find(chunk_position);
+        assert(occ_it != chunk_occupancy_.end() && occ_it->second > 0);
+        if (occ_it == chunk_occupancy_.end() || occ_it->second == 0) return; // backstop; invariant holds
+        if (--occ_it->second == 0) {
+            // O(chunk) emptiness scans are deferred in bulk paths: the caller
+            // collects touched chunks and sweeps once (see step()).
+            if (maybe_emptied != nullptr) {
+                maybe_emptied->insert(chunk_position);
+            } else {
+                chunks_.erase(chunk_it);
+                chunk_occupancy_.erase(occ_it);
+            }
+        } else if (maybe_emptied != nullptr) {
             maybe_emptied->insert(chunk_position);
-        } else if (chunk_storage_empty(chunk_it->second)) {
-            chunks_.erase(chunk_it);
         }
         return;
     }
@@ -419,6 +440,12 @@ void SimulationWorld::write_chunk_cell_deferred(
         auto [inserted_it, _] = chunks_.try_emplace(
             chunk_position, std::vector<MaterialId>(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir));
         chunk_it = inserted_it;
+        chunk_occupancy_.emplace(chunk_position, 0);
+    }
+    if (chunk_it->second[index] == kAir) {
+        const auto occ_it = chunk_occupancy_.find(chunk_position);
+        assert(occ_it != chunk_occupancy_.end());
+        if (occ_it != chunk_occupancy_.end()) ++occ_it->second;
     }
     chunk_it->second[index] = material_id;
 }
@@ -701,6 +728,13 @@ void SimulationWorld::step() {
     // working set every tick, mirroring next_ above (F3 spirit).
     heat_next_scratch_.clear();
     heat_next_scratch_.reserve_for(temps_.size() + 16);
+    // (Group 4, Task O6:) changed-position scratch: cleared every tick.
+    // Candidates are successful-move endpoints only (perf §9.2: <= 2 per
+    // dynamic cell), so occupied-size reserve is a generous bound.
+    // vector::reserve never shrinks, so steady-state capacity sticks at the
+    // max with no churn.
+    touch_scratch_.clear();
+    touch_scratch_.reserve(cells_.size() * 2 + 16);
 #ifdef ASHFALL_STEP_INSTRUMENT
     // clear_reserve covers next.clear/reserve + scratch clears/reserves at
     // the top of step() (stayed is sized post-classify from D — see below).
@@ -711,6 +745,12 @@ void SimulationWorld::step() {
     current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
         if (material_fast(material_id).movement == Movement::Static) {
             next.insert_or_assign(position, material_id);
+            // (Group 4, Task O6:) NO touch here (perf §9.2: candidates are
+            // successful-move endpoints only). A static home is copied
+            // identically, and no dynamic write can target its slot (powder
+            // density gate + stayed-only swaps, liquid class-gated swaps,
+            // empty-only diagonals/laterals, gas freeness), so before==after
+            // by construction. The NDEBUG comparator below proves it.
             // Every written cell stages (Task H): a static home with no staged
             // entry would implicitly read ambient 0 at commit and lose heat.
             stage_heat_carry(position, position);
@@ -776,11 +816,19 @@ void SimulationWorld::step() {
                 MaterialId* occupant = next.find(dest);
                 if (occupant == nullptr) {
                     next.insert_or_assign(dest, material_id);
+                    // (Group 4, Task O6:) powder empty-target endpoints (move site 1 of 9):
+                    // dest written, source vacated (removal).
+                    touch_next(dest);
+                    touch_next(source);
                     stage_heat_carry(source, dest);
                 } else if (*occupant != kAir && stayed.contains(dest)) {
                     MaterialId displaced = *occupant;
                     next.insert_or_assign(dest, material_id);
                     next.insert_or_assign(source, displaced);
+                    // (Group 4, Task O6:) powder swap endpoints (move site 2 of 9): both
+                    // partners rewritten.
+                    touch_next(dest);
+                    touch_next(source);
                     // Atomic swap (Task H): sequential stages would read back
                     // the just-staged partner via heat_of's staged-next-first
                     // rule. Same pattern at the liquid density swap and the
@@ -812,6 +860,9 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                // (Group 4, Task O6:) NO touch: a place-back rewrites the
+                // identical id (before==after by construction — same argument
+                // as the statics place-back above; proven by the comparator).
                 stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
@@ -847,6 +898,10 @@ void SimulationWorld::step() {
                 MaterialId* occupant = next.find(down);
                 if (occupant == nullptr) {
                     next.insert_or_assign(down, material_id);
+                    // (Group 4, Task O6:) liquid down-target endpoints (move site 3 of 9):
+                    // down written, source vacated (removal).
+                    touch_next(down);
+                    touch_next(source);
                     stage_heat_carry(source, down);
                     moved = true;
                 } else if (*occupant != kAir && stayed.contains(down)) {
@@ -857,6 +912,10 @@ void SimulationWorld::step() {
                         const MaterialId displaced = *occupant;
                         next.insert_or_assign(down, material_id);
                         next.insert_or_assign(source, displaced);
+                        // (Group 4, Task O6:) liquid density-swap endpoints
+                        // (move site 4 of 9): both partners rewritten.
+                        touch_next(down);
+                        touch_next(source);
                         // Atomic swap (Task H): see the powder swap above.
                         stage_heat_swap(source, down);
                         moved = true;
@@ -875,6 +934,10 @@ void SimulationWorld::step() {
                     }
                     if (is_empty_down(diag)) {
                         next.insert_or_assign(diag, material_id);
+                        // (Group 4, Task O6:) liquid diagonal endpoints
+                        // (move site 5 of 9): diag written, source vacated.
+                        touch_next(diag);
+                        touch_next(source);
                         stage_heat_carry(source, diag);
                         moved = true;
                         break;
@@ -912,6 +975,11 @@ void SimulationWorld::step() {
                                     if (current.contains(target)) continue;
                                     if (!next.contains(target)) {
                                         next.insert_or_assign(target, material_id);
+                                        // (Group 4, Task O6:) liquid lateral endpoints
+                                        // (move site 6 of 9): target written,
+                                        // source vacated.
+                                        touch_next(target);
+                                        touch_next(source);
                                         stage_heat_carry(source, target);
                                         moved = true;
                                         break;
@@ -952,6 +1020,10 @@ void SimulationWorld::step() {
                             (escapable(seep_l) || escapable(seep_r))) {
                             next.insert_or_assign(down, material_id);
                             next.insert_or_assign(source, below_id);
+                            // (Group 4, Task O6:) infiltration-swap endpoints
+                            // (move site 7 of 9): both partners rewritten.
+                            touch_next(down);
+                            touch_next(source);
                             // Atomic swap (Task H): `down` may hold an in-flight
                             // arrival whose staged temp must win over the old
                             // coordinate's temp (§3.2 fix) — and sequential
@@ -968,6 +1040,8 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                // (Group 4, Task O6:) NO touch: identical-id place-back (see
+                // the powder place-back note above).
                 stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
@@ -1009,6 +1083,10 @@ void SimulationWorld::step() {
             auto try_gas_target = [&](CellPosition dest) -> bool {
                 if (!gas_free(dest)) return false;
                 next.insert_or_assign(dest, material_id);
+                // (Group 4, Task O6:) gas rise/diagonal endpoints (move site 8 of 9):
+                // dest written, source vacated.
+                touch_next(dest);
+                touch_next(source);
                 stage_heat_carry(source, dest);
                 return true;
             };
@@ -1036,6 +1114,10 @@ void SimulationWorld::step() {
                             if (current.contains(target)) continue;
                             if (!next.contains(target)) {
                                 next.insert_or_assign(target, material_id);
+                                // (Group 4, Task O6:) gas lateral endpoints
+                                // (move site 9 of 9): target written, source vacated.
+                                touch_next(target);
+                                touch_next(source);
                                 stage_heat_carry(source, target);
                                 moved = true;
                                 break;
@@ -1048,6 +1130,8 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+                // (Group 4, Task O6:) NO touch: identical-id place-back (see
+                // the powder place-back note above).
                 stage_heat_carry(source, source);
 #ifdef ASHFALL_STEP_INSTRUMENT
             } else {
@@ -1069,27 +1153,95 @@ void SimulationWorld::step() {
 #endif
     }
 
-    // Patch the chunk mirror + dirty set from the tick diff (minimal writes:
-    // removals/changes in the first loop, pure additions in the second).
-    // Emptiness sweeps are deferred: one O(chunk) scan per touched chunk.
+    // Patch the chunk mirror + dirty set from the tick diff (Group 4, Task
+    // O6, perf §9.2): SINGLE pass over the deduped successful-move endpoints
+    // (sort+unique — deterministic) instead of the old two full-table loops:
+    // O(movement endpoints) rather than O(all occupied cells). Per position
+    // the before/after lookup classifies removal/change/addition, with the
+    // FINAL material-identity compare (perf §9.2: identical materials
+    // exchanging ownership stay clean — exactly as the old loops skipped
+    // them). Place-backs and statics are provably identical before/after
+    // (see the NO-touch notes at their write sites) and never enter the
+    // candidate set — the NDEBUG oracle below verifies this every debug
+    // tick. Chunk-mirror writes + dirty marks are identical in effect to
+    // the old loops. Emptiness sweeps are deferred: one O(1) occupancy read
+    // per touched chunk.
 #ifdef ASHFALL_STEP_INSTRUMENT
     const auto reconcile_t0 = std::chrono::steady_clock::now();
     // changed_positions and dirty_chunk_marks count ONLY the three reconcile
-    // call sites below (not global mark_chunk_dirty traffic); both loops
-    // diff the tick, so removals + changes + additions is the position delta.
+    // effect classes below (not global mark_chunk_dirty traffic); the single
+    // pass diffs the tick, so removals + changes + additions is the position
+    // delta — same count the two loops produced.
     std::size_t changed_positions = 0, dirty_chunk_marks = 0;
 #endif
+    std::sort(touch_scratch_.begin(), touch_scratch_.end());
+    touch_scratch_.erase(
+        std::unique(touch_scratch_.begin(), touch_scratch_.end()), touch_scratch_.end());
+#ifndef NDEBUG
+    // Full-reconstruction oracle: the OLD two-loop diff (over ALL of current
+    // + next) recomputed here and asserted equal to the candidate single-pass
+    // classification. Debug-only (Release compiles it out); the /tmp
+    // -O0 -UNDEBUG full-suite run is the proof — any divergence aborts via
+    // assert. Encoding: (pos, new material), kAir == removal.
+    {
+        std::vector<std::pair<CellPosition, MaterialId>> expected;
+        expected.reserve(touch_scratch_.size());
+        cells_.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+            const MaterialId* updated = next.find(pos);
+            if (updated == nullptr) {
+                expected.emplace_back(pos, kAir);
+            } else if (*updated != mat) {
+                expected.emplace_back(pos, *updated);
+            }
+        });
+        next.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+            if (!cells_.contains(pos)) expected.emplace_back(pos, mat);
+        });
+        std::vector<std::pair<CellPosition, MaterialId>> candidate;
+        candidate.reserve(touch_scratch_.size());
+        for (const CellPosition pos : touch_scratch_) {
+            const MaterialId* updated = next.find(pos);
+            const MaterialId* before = current.find(pos);
+            if (updated == nullptr) {
+                if (before != nullptr) candidate.emplace_back(pos, kAir);
+            } else if (before == nullptr) {
+                candidate.emplace_back(pos, *updated);
+            } else if (*updated != *before) {
+                candidate.emplace_back(pos, *updated);
+            }
+        }
+        const auto by_pos = [](const auto& left, const auto& right) { return left.first < right.first; };
+        std::sort(expected.begin(), expected.end(), by_pos);
+        std::sort(candidate.begin(), candidate.end(), by_pos);
+        assert(expected.size() == candidate.size());
+        if (expected.size() == candidate.size()) {
+            for (std::size_t i = 0; i < expected.size(); ++i) {
+                assert(expected[i].first == candidate[i].first);
+                assert(expected[i].second == candidate[i].second);
+            }
+        }
+    }
+#endif
     std::set<CellPosition> maybe_emptied;
-    cells_.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+    for (const CellPosition pos : touch_scratch_) {
         const MaterialId* updated = next.find(pos);
+        const MaterialId* before = current.find(pos);
         if (updated == nullptr) {
+            if (before == nullptr) continue; // cannot happen (touched ⇒ in some state); guard only
             write_chunk_cell_deferred(pos, kAir, &maybe_emptied);
             mark_chunk_dirty(chunk_pos_of(pos));
 #ifdef ASHFALL_STEP_INSTRUMENT
             ++changed_positions;
             ++dirty_chunk_marks;
 #endif
-        } else if (*updated != mat) {
+        } else if (before == nullptr) {
+            write_chunk_cell(pos, *updated);
+            mark_chunk_dirty(chunk_pos_of(pos));
+#ifdef ASHFALL_STEP_INSTRUMENT
+            ++changed_positions;
+            ++dirty_chunk_marks;
+#endif
+        } else if (*updated != *before) {
             write_chunk_cell(pos, *updated);
             mark_chunk_dirty(chunk_pos_of(pos));
 #ifdef ASHFALL_STEP_INSTRUMENT
@@ -1097,21 +1249,14 @@ void SimulationWorld::step() {
             ++dirty_chunk_marks;
 #endif
         }
-    });
-    next.for_each([&](const CellPosition& pos, const MaterialId& mat) {
-        if (!cells_.contains(pos)) {
-            write_chunk_cell(pos, mat);
-            mark_chunk_dirty(chunk_pos_of(pos));
-#ifdef ASHFALL_STEP_INSTRUMENT
-            ++changed_positions;
-            ++dirty_chunk_marks;
-#endif
-        }
-    });
+    }
     for (const CellPosition chunk_position : maybe_emptied) {
-        const auto chunk_it = chunks_.find(chunk_position);
-        if (chunk_it != chunks_.end() && chunk_storage_empty(chunk_it->second)) {
-            chunks_.erase(chunk_it);
+        // (Group 4, Task O6:) O(1) occupancy sweep — replaces the O(chunk)
+        // dense-vector rescan. Erase iff the counter says empty.
+        const auto occ_it = chunk_occupancy_.find(chunk_position);
+        if (occ_it != chunk_occupancy_.end() && occ_it->second == 0) {
+            chunks_.erase(chunk_position);
+            chunk_occupancy_.erase(occ_it);
         }
     }
 
@@ -1685,6 +1830,17 @@ bool SimulationWorld::load_with_diagnostic(
         cells_ = std::move(loaded);
         temps_ = std::move(loaded_temps);
         tick_ = saved_tick;
+        // (Group 4, Task O6:) rebuild occupancy wholesale from the committed
+        // mirror (load bypasses write_chunk_cell): count non-air slots per
+        // chunk. Every committed chunk holds >= 1 cell by construction.
+        chunk_occupancy_.clear();
+        for (const auto& [chunk_position, storage] : chunks_) {
+            std::size_t occupied = 0;
+            for (MaterialId material_id : storage) {
+                if (material_id != kAir) ++occupied;
+            }
+            if (occupied != 0) chunk_occupancy_.emplace(chunk_position, occupied);
+        }
         // (Group 4, Task O4:) recount scan post-commit — O(n) once per load.
         // Committed ids are remapped to the current table (valid), so the
         // material_fast asserts hold.
@@ -1885,6 +2041,16 @@ bool SimulationWorld::load_with_diagnostic(
     cells_ = std::move(loaded);
     temps_ = std::move(loaded_temps);
     tick_ = saved_tick;
+    // (Group 4, Task O6:) rebuild occupancy wholesale from the committed
+    // mirror (load bypasses write_chunk_cell) — see the v3 path above.
+    chunk_occupancy_.clear();
+    for (const auto& [chunk_position, storage] : chunks_) {
+        std::size_t occupied = 0;
+        for (MaterialId material_id : storage) {
+            if (material_id != kAir) ++occupied;
+        }
+        if (occupied != 0) chunk_occupancy_.emplace(chunk_position, occupied);
+    }
     // (Group 4, Task O4:) recount scan post-commit — O(n) once per load.
     // Committed ids passed the materials_.contains gate above (valid), so the
     // material_fast asserts hold.
@@ -1956,7 +2122,14 @@ bool SimulationWorld::can_move_to(CellPosition min_pos, CellPosition max_pos) co
 }
 
 std::vector<CellPosition> SimulationWorld::dirty_chunks() const {
-    return std::vector<CellPosition>(dirty_chunks_.begin(), dirty_chunks_.end());
+    // (Group 4, Task O6:) vector-backed dirty set: the read end sorts +
+    // uniques the push_back log, so the observable result is IDENTICAL to
+    // the old std::set (sorted, unique) — pinned by the B2 tests + the O6
+    // dirty-sequence test.
+    std::vector<CellPosition> sorted = dirty_chunks_;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    return sorted;
 }
 
 void SimulationWorld::clear_dirty_chunks() {
@@ -1964,7 +2137,7 @@ void SimulationWorld::clear_dirty_chunks() {
 }
 
 void SimulationWorld::mark_chunk_dirty(CellPosition chunk_position) {
-    dirty_chunks_.insert(chunk_position);
+    dirty_chunks_.push_back(chunk_position);
 }
 
 const MaterialSpec& SimulationWorld::material(MaterialId id) const { return materials_.at(id); }
@@ -2071,6 +2244,38 @@ void SimulationWorld::conduct_temperature() {
     // results are iteration-order independent and deterministic. Integer
     // mean over self + 4 neighbors (missing = ambient 0); truncates toward
     // zero so small temps vanish instead of lingering at ±1.
+    //
+    // (Group 4, Task O5:) sparse candidate enumeration. A conducted entry
+    // needs a nonzero temp in its closed 5-neighborhood, so exactly the
+    // positions in H ∪ N(H) (H = pre-pass nonzero-temp positions, N =
+    // 4-neighbors) can produce a nonzero result — every other occupied cell
+    // reads five zeroes and stores nothing, so skipping it is identical.
+    // Candidates are gathered from the PRE-pass snapshot (positions only;
+    // temps_ is untouched during the pass), restricted to occupied cells,
+    // and sorted + deduped for determinism. The per-position stencil below
+    // and the snapshot-write-then-swap structure are UNCHANGED.
+    std::vector<CellPosition>& candidates = cond_cand_scratch_;
+    candidates.clear();
+    // Exact bound: each temps_ entry contributes itself + 4 neighbors.
+    // vector::reserve never shrinks: steady-state zero alloc, capacity
+    // sticks at max 5H + 16.
+    candidates.reserve(temps_.size() * 5 + 16);
+    temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
+        candidates.push_back(position);
+        candidates.push_back({position.x - 1, position.y});
+        candidates.push_back({position.x + 1, position.y});
+        candidates.push_back({position.x, position.y - 1});
+        candidates.push_back({position.x, position.y + 1});
+    });
+    std::sort(candidates.begin(), candidates.end(),
+              [](const CellPosition& a, const CellPosition& b) {
+                  return std::tie(a.x, a.y) < std::tie(b.x, b.y);
+              });
+    candidates.erase(std::unique(candidates.begin(), candidates.end(),
+                                 [](const CellPosition& a, const CellPosition& b) {
+                                     return a.x == b.x && a.y == b.y;
+                                 }),
+                     candidates.end());
     FlatTemps& conducted = temp_scratch_;
     conducted.clear();
     // (Group 4, Task O2:) F3 working-set sizing: a conducted entry needs a
@@ -2078,23 +2283,34 @@ void SimulationWorld::conduct_temperature() {
     // union of source neighborhoods (<= 5H), not the whole occupied set.
     // reserve_for never shrinks — steady-state capacity sticks at max 5H.
     conducted.reserve_for(temps_.size() * 5 + 16);
-    cells_.for_each([&](const CellPosition& position, const MaterialId&) {
-        int sum = temperature_at(position);
-        sum += temperature_at({position.x - 1, position.y});
-        sum += temperature_at({position.x + 1, position.y});
-        sum += temperature_at({position.x, position.y - 1});
-        sum += temperature_at({position.x, position.y + 1});
-        const int next = sum / 5;
-        if (next != 0) conducted.insert_or_assign(position, static_cast<std::int16_t>(next));
-    });
-    std::swap(temps_, temp_scratch_);
-}
-
-bool SimulationWorld::chunk_storage_empty(const std::vector<MaterialId>& chunk) noexcept {
-    for (MaterialId material_id : chunk) {
-        if (material_id != kAir) return false;
+    // Dense fallback: past half occupancy the sort+unique + membership
+    // probes cost more than a straight occupied scan, so run the full scan
+    // (identical stencil). The 1/2 crossover is a heuristic, not a measured
+    // optimum — a chunk-local dense-pass crossover study is future work,
+    // not this task.
+    if (candidates.size() > cells_.size() / 2) {
+        cells_.for_each([&](const CellPosition& position, const MaterialId&) {
+            int sum = temperature_at(position);
+            sum += temperature_at({position.x - 1, position.y});
+            sum += temperature_at({position.x + 1, position.y});
+            sum += temperature_at({position.x, position.y - 1});
+            sum += temperature_at({position.x, position.y + 1});
+            const int next = sum / 5;
+            if (next != 0) conducted.insert_or_assign(position, static_cast<std::int16_t>(next));
+        });
+    } else {
+        for (const CellPosition position : candidates) {
+            if (!cells_.contains(position)) continue;
+            int sum = temperature_at(position);
+            sum += temperature_at({position.x - 1, position.y});
+            sum += temperature_at({position.x + 1, position.y});
+            sum += temperature_at({position.x, position.y - 1});
+            sum += temperature_at({position.x, position.y + 1});
+            const int next = sum / 5;
+            if (next != 0) conducted.insert_or_assign(position, static_cast<std::int16_t>(next));
+        }
     }
-    return true;
+    std::swap(temps_, temp_scratch_);
 }
 
 bool SimulationWorld::prefers_left(CellPosition position, std::uint64_t tick) {

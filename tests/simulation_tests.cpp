@@ -4103,6 +4103,217 @@ void test_oracle_replay() {
     }
 }
 
+// Group 4 (Task O6) agreement helpers: the chunk mirror is NOT in save()
+// bytes, so the oracle cannot pin it — these tests do. o6_expect_agreement
+// checks both directions over every live chunk (every cells_ entry matches
+// its mirror slot; every non-air mirror slot matches cells_; missing chunks
+// read back as air) plus the temps-subset-cells invariant on sampled
+// positions.
+void o6_expect_agreement(ashfall::SimulationWorld& world, const char* message) {
+    constexpr int kSide = ashfall::kChunkSize;
+    std::vector<ashfall::MaterialId> buffer(
+        static_cast<std::size_t>(kSide * kSide), ashfall::kAir);
+    for (const ashfall::CellPosition chunk : world.active_chunks()) {
+        expect(world.read_chunk(chunk, buffer), "o6 read_chunk succeeds on active chunk");
+        for (int ly = 0; ly < kSide; ++ly) {
+            for (int lx = 0; lx < kSide; ++lx) {
+                const ashfall::CellPosition pos{
+                    chunk.x * kSide + lx, chunk.y * kSide + ly};
+                const ashfall::MaterialId mirror =
+                    buffer[static_cast<std::size_t>(ly * kSide + lx)];
+                const ashfall::MaterialId live = world.cell(pos);
+                if (mirror != live) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg),
+                        "%s: mirror/cells diverge at (%d,%d): mirror %u live %u", message, pos.x,
+                        pos.y, static_cast<unsigned>(mirror), static_cast<unsigned>(live));
+                    expect(false, msg);
+                }
+                if (world.temperature(pos) != 0 && live == ashfall::kAir) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg),
+                        "%s: temp stored on air at (%d,%d)", message, pos.x, pos.y);
+                    expect(false, msg);
+                }
+            }
+        }
+    }
+}
+
+void test_o6_mirror_cells_agreement() {
+    ashfall::SimulationWorld world;
+    o6_expect_agreement(world, "o6 empty world agrees");
+    // Deterministic op sequence across chunk boundaries (incl. negative
+    // coords): sets, fills, an air-erase, heat, steps (movement exercises
+    // the single-pass reconcile), a save/load round trip, and more steps.
+    world.set_cell({5, 5}, ashfall::kSand);
+    world.set_cell({-3, -70}, ashfall::kStone); // chunk {-1,-2}
+    world.set_cell({63, 63}, ashfall::kWater);
+    world.set_cell({64, 64}, ashfall::kSand); // adjacent chunk {1,1}
+    world.fill_rect({-70, 60}, {-65, 64}, ashfall::kWood);
+    o6_expect_agreement(world, "o6 placed cells agree");
+    world.fill_rect({10, 12}, {12, 12}, ashfall::kStone);
+    world.fill_rect({10, 0}, {12, 11}, ashfall::kSand);
+    world.fill_rect({20, 0}, {30, 11}, ashfall::kWater);
+    expect(world.set_temperature({11, 5}, 60), "o6 heat stages on sand");
+    expect(world.set_temperature({25, 5}, -40), "o6 cold stages on water");
+    o6_expect_agreement(world, "o6 pre-step world agrees");
+    for (int i = 0; i < 25; ++i) {
+        world.step();
+        o6_expect_agreement(world, "o6 stepping world agrees");
+    }
+    world.set_cell({64, 64}, ashfall::kAir); // erase one cross-chunk cell
+    world.fill_rect({-70, 60}, {-65, 64}, ashfall::kAir); // erase a wood block
+    o6_expect_agreement(world, "o6 erasures agree");
+    const std::vector<std::uint8_t> bytes = world.save();
+    ashfall::SimulationWorld loaded;
+    expect(loaded.load(bytes), "o6 save loads");
+    o6_expect_agreement(loaded, "o6 loaded world agrees");
+    for (int i = 0; i < 10; ++i) {
+        loaded.step();
+        o6_expect_agreement(loaded, "o6 stepping loaded world agrees");
+    }
+    loaded.reset();
+    o6_expect_agreement(loaded, "o6 reset world agrees");
+    expect(loaded.active_chunks().empty(), "o6 reset drops all chunks");
+}
+
+// Group 4 (Task O6) occupancy pin: chunk_occupancy_ has no public getter
+// (header scope lock), so this pins its OBSERVABLE invariant — chunk
+// existence ⇔ a full read_chunk scan finds non-air — over the live-chunk
+// bounding box plus a one-chunk ring (neighbors must be absent AND empty).
+// Any counter drift (leaked empty chunk, missing populated chunk) fails.
+void test_o6_occupancy_matches_scan() {
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 5}, ashfall::kSand);
+    world.set_cell({-3, -70}, ashfall::kStone);
+    world.fill_rect({64, 0}, {130, 65}, ashfall::kWater); // spans chunks {1..2, 0..1}
+    world.fill_rect({10, 12}, {12, 12}, ashfall::kStone);
+    world.fill_rect({10, 0}, {12, 11}, ashfall::kSand);
+    for (int i = 0; i < 15; ++i) world.step();
+    world.set_cell({5, 5}, ashfall::kAir);
+    world.fill_rect({64, 0}, {70, 65}, ashfall::kAir); // partial erase of the water span
+    const std::vector<std::uint8_t> bytes = world.save();
+    ashfall::SimulationWorld loaded;
+    expect(loaded.load(bytes), "o6 occupancy save loads");
+    for (ashfall::SimulationWorld* target : {&world, &loaded}) {
+        int min_cx = 0, max_cx = 0, min_cy = 0, max_cy = 0;
+        bool have = false;
+        for (const ashfall::CellPosition chunk : target->active_chunks()) {
+            if (!have) {
+                min_cx = max_cx = chunk.x;
+                min_cy = max_cy = chunk.y;
+                have = true;
+            } else {
+                if (chunk.x < min_cx) min_cx = chunk.x;
+                if (chunk.x > max_cx) max_cx = chunk.x;
+                if (chunk.y < min_cy) min_cy = chunk.y;
+                if (chunk.y > max_cy) max_cy = chunk.y;
+            }
+        }
+        expect(have, "o6 occupancy world is non-empty");
+        constexpr int kSide = ashfall::kChunkSize;
+        std::vector<ashfall::MaterialId> buffer(
+            static_cast<std::size_t>(kSide * kSide), ashfall::kAir);
+        for (int cy = min_cy - 1; cy <= max_cy + 1; ++cy) {
+            for (int cx = min_cx - 1; cx <= max_cx + 1; ++cx) {
+                const ashfall::CellPosition chunk{cx, cy};
+                std::fill(buffer.begin(), buffer.end(), ashfall::kAir);
+                expect(target->read_chunk(chunk, buffer), "o6 read_chunk succeeds");
+                std::size_t scanned = 0;
+                for (ashfall::MaterialId id : buffer) {
+                    if (id != ashfall::kAir) ++scanned;
+                }
+                const bool exists = target->has_chunk(chunk);
+                if (exists != (scanned != 0)) {
+                    char msg[256];
+                    std::snprintf(msg, sizeof(msg),
+                        "o6 chunk (%d,%d): exists=%d but scan finds %zu live cells", cx, cy,
+                        exists ? 1 : 0, scanned);
+                    expect(false, msg);
+                }
+            }
+        }
+    }
+    // Fully deleting a chunk's last cell must drop the chunk (counter 0 ⇒
+    // erase, no scan): wipe the stone cell's whole chunk region cell by cell.
+    for (int y = -128; y < 0; ++y) {
+        for (int x = -64; x < 0; ++x) world.set_cell({x, y}, ashfall::kAir);
+    }
+    expect(!world.has_chunk({-1, -2}), "o6 emptied chunk is gone");
+}
+
+// Group 4 (Task O6) dirty-sequence pin: a fixed op script must produce the
+// EXACT dirty list — this is the vector-backing equivalence proof (push_back
+// + sorted-unique read ≡ the old std::set, incl. dedup of repeat marks and
+// the no-op paths that mark nothing).
+void o6_expect_dirty(
+    ashfall::SimulationWorld& world, std::vector<ashfall::CellPosition> want, const char* message) {
+    const std::vector<ashfall::CellPosition> actual = world.dirty_chunks();
+    if (actual.size() != want.size()) {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "%s: dirty size %zu want %zu", message, actual.size(),
+            want.size());
+        expect(false, msg);
+    }
+    for (std::size_t i = 0; i < want.size(); ++i) {
+        if (!(actual[i] == want[i])) {
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "%s: dirty[%zu] is (%d,%d) want (%d,%d)", message, i,
+                actual[i].x, actual[i].y, want[i].x, want[i].y);
+            expect(false, msg);
+        }
+    }
+}
+
+void test_o6_dirty_sequence() {
+    ashfall::SimulationWorld world;
+    world.set_cell({5, 5}, ashfall::kSand);      // chunk {0, 0}
+    world.set_cell({200, 200}, ashfall::kStone); // chunk {3, 3}
+    world.clear_dirty_chunks();
+    o6_expect_dirty(world, {}, "o6 clear empties the log");
+    // Same-id set is a no-op: marks nothing (no push on the early return).
+    world.set_cell({5, 5}, ashfall::kSand);
+    o6_expect_dirty(world, {}, "o6 same-id set marks nothing");
+    // Unknown-id set is rejected: marks nothing.
+    world.set_cell({6, 6}, 42);
+    o6_expect_dirty(world, {}, "o6 unknown-id set marks nothing");
+    // Two marks in one chunk without a clear collapse to one entry.
+    world.set_cell({70, 5}, ashfall::kWater); // chunk {1, 0}
+    world.set_cell({71, 6}, ashfall::kWater); // chunk {1, 0} again
+    o6_expect_dirty(world, {{{1, 0}}}, "o6 repeat chunk marks dedup");
+    world.clear_dirty_chunks();
+    // Erasing the chunk's last cells still dirties exactly that chunk.
+    world.set_cell({70, 5}, ashfall::kAir);
+    world.set_cell({71, 6}, ashfall::kAir);
+    o6_expect_dirty(world, {{{1, 0}}}, "o6 chunk emptying dirties the former chunk");
+    expect(!world.has_chunk({1, 0}), "o6 emptied chunk is gone");
+    world.clear_dirty_chunks();
+    // One deterministic movement tick: sand falls within chunk {0, 0}.
+    world.set_cell({11, 10}, ashfall::kSand);
+    world.clear_dirty_chunks();
+    world.step();
+    expect(world.cell({11, 11}) == ashfall::kSand, "o6 script sand fell one cell");
+    o6_expect_dirty(world, {{{0, 0}}}, "o6 same-chunk step dirties one chunk");
+    // Air fill over an empty region dirties the covered chunk range
+    // (fill_rect marks its range unconditionally — pinned as-is).
+    world.clear_dirty_chunks();
+    world.fill_rect({300, 300}, {310, 310}, ashfall::kAir); // chunk {4, 4}
+    o6_expect_dirty(world, {{{4, 4}}}, "o6 air fill over empty dirties its range");
+    // Reset dirties exactly the removed populated chunks, sorted.
+    world.clear_dirty_chunks();
+    world.reset();
+    o6_expect_dirty(world, {{{0, 0}, {3, 3}}}, "o6 reset dirties removed chunks");
+    // Load dirties the vacated old region plus the populated new region.
+    ashfall::SimulationWorld source;
+    source.set_cell({320, 320}, ashfall::kStone); // chunk {5, 5}
+    const std::vector<std::uint8_t> bytes = source.save();
+    world.set_cell({0, 0}, ashfall::kSand); // chunk {0, 0}, disjoint
+    world.clear_dirty_chunks();
+    expect(world.load(bytes), "o6 disjoint load succeeds");
+    o6_expect_dirty(world, {{{0, 0}, {5, 5}}}, "o6 load dirties old and new regions");
+}
+
 } // namespace
 
 int main() {
@@ -4224,6 +4435,9 @@ int main() {
     test_b2_load_invalidates_old_and_new();
     test_b2_copy_rect_full_overwrite();
     test_o4_non_static_counter();
+    test_o6_mirror_cells_agreement();
+    test_o6_occupancy_matches_scan();
+    test_o6_dirty_sequence();
     test_oracle_replay();
     std::cout << "All simulation tests passed.\n";
 }
