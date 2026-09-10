@@ -1,10 +1,34 @@
 #include "ashfall/material_data.hpp"
 #include "ashfall/json_subset.hpp"
 
+#include <initializer_list>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace ashfall {
+
+namespace {
+
+bool reject_unknown_keys(const JsonValue& obj, std::string_view path,
+                         std::initializer_list<std::string_view> allowed, std::string& error) {
+    for (const auto& field : obj.fields) {
+        bool known = false;
+        for (std::string_view want : allowed) {
+            if (field.first == want) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            error = std::string(path) + ": unknown key \"" + field.first + "\"";
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
 
 bool movement_from_string(std::string_view name, Movement& out) {
     if (name == "static") {
@@ -60,6 +84,11 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
             error = "material \"name\" must be a non-empty string";
             return false;
         }
+        // Group 3 (J6): Choice A identifiers on the programmatic route too.
+        if (!is_valid_identifier(spec.name)) {
+            error = "material name \"" + spec.name + "\" is not a valid identifier (want [a-z][a-z0-9_-]*)";
+            return false;
+        }
         if (spec.solid && spec.movement != Movement::Static) {
             error = "material \"" + spec.name + "\" is solid but not static";
             return false;
@@ -94,6 +123,11 @@ bool validate_material_table(const MaterialTable& table, std::string& error) {
         for (std::size_t t = 0; t < spec.tags.size(); ++t) {
             if (spec.tags[t].empty()) {
                 error = "material \"" + spec.name + "\" has an empty tag";
+                return false;
+            }
+            if (!is_valid_identifier(spec.tags[t])) {
+                error = "material \"" + spec.name + "\" tag \"" + spec.tags[t] +
+                        "\" is not a valid identifier (want [a-z][a-z0-9_-]*)";
                 return false;
             }
             for (std::size_t u = t + 1; u < spec.tags.size(); ++u) {
@@ -160,9 +194,20 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         error = "unsupported data version (want 1)";
         return false;
     }
+    // Group 3 (J3): strict allowed keys at the document root (`metadata` and
+    // any other extension key reject — no extensions exist today).
+    if (!reject_unknown_keys(root, "(root)", {"version", "materials"}, error)) return false;
     const JsonValue* materials = find_json_field(root, "materials");
     if (materials == nullptr || materials->type != JsonValue::Type::Array || materials->items.empty()) {
         error = "\"materials\" must be a non-empty array";
+        return false;
+    }
+    // Group 3 (J1): schema-level material cap, checked before row decoding
+    // allocates any spec (parser-level array/node/string budgets already
+    // bounded the raw document above).
+    if (materials->items.size() > kDefaultJsonLimits.max_materials) {
+        error = "limit: materials array exceeds " +
+                std::to_string(kDefaultJsonLimits.max_materials) + " entries";
         return false;
     }
     bool seen_id[256] = {};
@@ -170,67 +215,80 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
     MaterialTable table;
     table.version = 1;
     for (std::size_t index = 0; index < materials->items.size(); ++index) {
-        // V3-core row context (P7 token offsets deferred to Group 3).
-        const std::string row = "materials[" + std::to_string(index) + "]: ";
+        // Group 3 (J4): every schema error below carries the full field path
+        // (`materials[i].density`, ...), not just the row prefix.
+        const std::string row = "materials[" + std::to_string(index) + "]";
         const JsonValue& entry = materials->items[index];
         if (entry.type != JsonValue::Type::Object) {
-            error = row + "material entry must be an object";
+            error = row + ": material entry must be an object";
+            return false;
+        }
+        if (!reject_unknown_keys(entry, row,
+                                 {"id", "name", "movement", "solid", "density", "color",
+                                  "tags", "hardness"},
+                                 error)) {
             return false;
         }
         long long id = 0;
         if (!require_json_int(entry, "id", 0, 255, id, error)) {
-            error = row + error;
+            error = row + ".id: " + error;
             return false;
         }
         if (seen_id[static_cast<std::size_t>(id)]) {
-            error = row + "duplicate material id " + std::to_string(id);
+            error = row + ": duplicate material id " + std::to_string(id);
             return false;
         }
         std::string name;
         if (!require_json_string(entry, "name", name, error) || name.empty()) {
-            error = row + "material \"name\" must be a non-empty string";
+            error = row + ".name: material \"name\" must be a non-empty string";
+            return false;
+        }
+        // Group 3 (J6): Choice A identifiers for material names.
+        if (!is_valid_identifier(name)) {
+            error = row + ".name: \"" + name + "\" is not a valid identifier (want [a-z][a-z0-9_-]*)";
             return false;
         }
         for (const std::string& taken : seen_names) {
             if (taken == name) {
-                error = row + "duplicate material name \"" + name + "\"";
+                error = row + ": duplicate material name \"" + name + "\"";
                 return false;
             }
         }
         std::string movement_name;
         if (!require_json_string(entry, "movement", movement_name, error)) {
-            error = row + error;
+            error = row + ".movement: " + error;
             return false;
         }
         Movement movement = Movement::Static;
         if (!movement_from_string(movement_name, movement)) {
-            error = row + "unknown movement \"" + movement_name + "\" (want static/powder/liquid/gas)";
+            error = row + ".movement: unknown movement \"" + movement_name +
+                    "\" (want static/powder/liquid/gas)";
             return false;
         }
         bool solid = false;
         if (!require_json_bool(entry, "solid", solid, error)) {
-            error = row + error;
+            error = row + ".solid: " + error;
             return false;
         }
         if (solid && movement != Movement::Static) {
-            error = row + "material \"" + name + "\" is solid but not static";
+            error = row + ": material \"" + name + "\" is solid but not static";
             return false;
         }
         long long density = 0;
         if (!require_json_int(entry, "density", 0, 100000, density, error)) {
-            error = row + error;
+            error = row + ".density: " + error;
             return false;
         }
         const JsonValue* color = find_json_field(entry, "color");
         if (color == nullptr || color->type != JsonValue::Type::Array || color->items.size() != 3) {
-            error = row + "material \"color\" must be an array of 3 integers";
+            error = row + ".color: material \"color\" must be an array of 3 integers";
             return false;
         }
         std::array<std::uint8_t, 3> rgb = {0, 0, 0};
         for (std::size_t c = 0; c < 3; ++c) {
             if (color->items[c].type != JsonValue::Type::Int || color->items[c].integer < 0 ||
                 color->items[c].integer > 255) {
-                error = row + "material \"color\" channels must be integers 0..255";
+                error = row + ".color: material \"color\" channels must be integers 0..255";
                 return false;
             }
             rgb[c] = static_cast<std::uint8_t>(color->items[c].integer);
@@ -245,12 +303,20 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         const JsonValue* tags = find_json_field(entry, "tags");
         if (tags != nullptr) {
             if (tags->type != JsonValue::Type::Array) {
-                error = row + "material \"tags\" must be an array of strings";
+                error = row + ".tags: material \"tags\" must be an array of strings";
                 return false;
             }
-            for (const JsonValue& tag : tags->items) {
+            for (std::size_t t = 0; t < tags->items.size(); ++t) {
+                const JsonValue& tag = tags->items[t];
+                const std::string tag_path =
+                    row + ".tags[" + std::to_string(t) + "]: ";
                 if (tag.type != JsonValue::Type::String || tag.str.empty()) {
-                    error = row + "material \"tags\" must be non-empty strings";
+                    error = tag_path + "material \"tags\" must be non-empty strings";
+                    return false;
+                }
+                if (!is_valid_identifier(tag.str)) {
+                    error = tag_path + "\"" + tag.str +
+                            "\" is not a valid identifier (want [a-z][a-z0-9_-]*)";
                     return false;
                 }
                 spec.tags.push_back(tag.str);
@@ -260,7 +326,7 @@ bool parse_material_data(std::string_view text, MaterialTable& out, std::string&
         if (hardness_field != nullptr) {
             long long hardness = 0;
             if (!require_json_int(entry, "hardness", 0, 6, hardness, error)) {
-                error = row + error;
+                error = row + ".hardness: " + error;
                 return false;
             }
             spec.hardness = static_cast<int>(hardness);

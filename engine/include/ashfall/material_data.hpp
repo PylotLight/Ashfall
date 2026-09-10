@@ -47,7 +47,13 @@ MaterialTable default_material_table();
 
 // Strict JSON subset (objects, arrays, strings, integers, true/false).
 // On success fills `out` and returns true. On failure returns false with
-// `error` set to "line L col C: message" (first error wins).
+// `error` set. Error contract: syntax failures are the parser's
+// "line L col C: message" (first error wins); every schema failure carries
+// the full field path (`materials[4].density: ...`, `(root): ...` for the
+// document object). Unknown keys are rejected at every level (allowed:
+// document `version, materials`; material `id, name, movement, solid,
+// density, color, tags, hardness` — no `metadata` extension today). Material
+// names and tags must match `[a-z][a-z0-9_-]*`. At most 256 materials.
 bool parse_material_data(std::string_view text, MaterialTable& out, std::string& error);
 
 } // namespace ashfall
