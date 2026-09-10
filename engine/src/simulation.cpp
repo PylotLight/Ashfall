@@ -162,8 +162,15 @@ std::uint64_t load_chunk_key(CellPosition pos) {
 // Bottom-up (y desc), x asc within a row: the exact order the old full
 // std::sort produced. Counting sort by y (O(n + rows)), then sorts each
 // short row by x. Falls back to std::sort on degenerate y-spread.
+// (Group 4, Task O2:) row_size/row_start/cursor are caller-retained scratch
+// (order_row_size_/order_row_start_/order_cursor_): assign() grows-only, so
+// steady-state ticks allocate nothing. cells.swap(scratch) retains capacity
+// on BOTH sides (move-assign freed one buffer every tick — perf §7).
 void order_dynamic_cells(std::vector<std::pair<CellPosition, MaterialId>>& cells,
-                         std::vector<std::pair<CellPosition, MaterialId>>& scratch) {
+                         std::vector<std::pair<CellPosition, MaterialId>>& scratch,
+                         std::vector<std::size_t>& row_size,
+                         std::vector<std::size_t>& row_start,
+                         std::vector<std::size_t>& cursor) {
     if (cells.size() < 2) return;
     int min_y = cells[0].first.y;
     int max_y = cells[0].first.y;
@@ -183,15 +190,15 @@ void order_dynamic_cells(std::vector<std::pair<CellPosition, MaterialId>>& cells
         return;
     }
     const std::size_t rows = static_cast<std::size_t>(span);
-    std::vector<std::size_t> row_size(rows, 0);
+    row_size.assign(rows, 0);
     for (const auto& entry : cells) {
         ++row_size[static_cast<std::size_t>(static_cast<std::int64_t>(max_y) - entry.first.y)];
     }
-    std::vector<std::size_t> row_start(rows + 1, 0);
+    row_start.assign(rows + 1, 0);
     for (std::size_t row = 0; row < rows; ++row) row_start[row + 1] = row_start[row] + row_size[row];
     scratch.clear();
     scratch.resize(cells.size());
-    std::vector<std::size_t> cursor(row_start.begin(), row_start.end() - 1);
+    cursor.assign(row_start.begin(), row_start.end() - 1);
     for (auto& entry : cells) {
         const std::size_t row = static_cast<std::size_t>(static_cast<std::int64_t>(max_y) - entry.first.y);
         scratch[cursor[row]++] = std::move(entry);
@@ -201,7 +208,7 @@ void order_dynamic_cells(std::vector<std::pair<CellPosition, MaterialId>>& cells
                   scratch.begin() + static_cast<std::ptrdiff_t>(row_start[row + 1]),
                   [](const auto& left, const auto& right) { return left.first.x < right.first.x; });
     }
-    cells = std::move(scratch);
+    cells.swap(scratch);
 }
 
 } // namespace
@@ -222,6 +229,16 @@ bool SimulationWorld::load_material_table(const MaterialTable& table) {
     for (const MaterialSpec& spec : table.materials) {
         materials_.emplace(spec.id, spec);
         material_order_.push_back(spec.id);
+    }
+    // (Group 4, Task O1:) rebuild the dense runtime mirror from the specs on
+    // every table load: all 256 slots, unlisted ids valid=false.
+    material_fast_.fill(MaterialRuntime{});
+    for (const auto& [id, spec] : materials_) {
+        MaterialRuntime& runtime = material_fast_[id];
+        runtime.movement = spec.movement;
+        runtime.density = spec.density;
+        runtime.solid = spec.solid;
+        runtime.valid = true;
     }
     reset();
     reactions_.clear();
@@ -568,20 +585,21 @@ void SimulationWorld::step() {
     // their owners are always decided already.
     FlatMarks& stayed = stayed_scratch_;
     stayed.clear();
-    stayed.reserve_for(cells_.size());
+    // (Group 4, Task O2:) no reserve here — stayed is sized post-classify
+    // from dynamic_cells.size() (see below).
     // Next-state heat staging (Group 2, Task H): cleared + sized from the
     // working set every tick, mirroring next_ above (F3 spirit).
     heat_next_scratch_.clear();
     heat_next_scratch_.reserve_for(temps_.size() + 16);
 #ifdef ASHFALL_STEP_INSTRUMENT
     // clear_reserve covers next.clear/reserve + scratch clears/reserves at
-    // the top of step().
+    // the top of step() (stayed is sized post-classify from D — see below).
     timings.clear_reserve_ms = step_ms_between(clear_t0, std::chrono::steady_clock::now());
     const auto classify_t0 = std::chrono::steady_clock::now();
 #endif
 
     current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
-        if (material(material_id).movement == Movement::Static) {
+        if (material_fast(material_id).movement == Movement::Static) {
             next.insert_or_assign(position, material_id);
             // Every written cell stages (Task H): a static home with no staged
             // entry would implicitly read ambient 0 at commit and lose heat.
@@ -598,7 +616,12 @@ void SimulationWorld::step() {
     const std::size_t step_static_count = current.size() - step_dynamic_count;
     const auto ordering_t0 = std::chrono::steady_clock::now();
 #endif
-    order_dynamic_cells(dynamic_cells, order_scratch_);
+    // (Group 4, Task O2:) stayed marks dynamic place-backs only (statics
+    // never mark it), so D = dynamic_cells.size() is the exact bound (F3:
+    // "stayed from dynamic count"). Sized post-classify, once D is known;
+    // reserve_for never shrinks, so capacity sticks at max D with no churn.
+    stayed.reserve_for(dynamic_cells.size());
+    order_dynamic_cells(dynamic_cells, order_scratch_, order_row_size_, order_row_start_, order_cursor_);
 #ifdef ASHFALL_STEP_INSTRUMENT
     timings.ordering_ms = step_ms_between(ordering_t0, std::chrono::steady_clock::now());
 #endif
@@ -613,7 +636,7 @@ void SimulationWorld::step() {
 #ifdef ASHFALL_STEP_INSTRUMENT
         const auto arm_t0 = std::chrono::steady_clock::now();
 #endif
-        const auto& mat_def = material(material_id);
+        const MaterialRuntime& mat_def = material_fast(material_id);
         const bool left_first = prefers_left(source, tick_);
 #ifdef ASHFALL_STEP_INSTRUMENT
         const Movement arm_class = mat_def.movement;
@@ -631,7 +654,7 @@ void SimulationWorld::step() {
             auto get_density_in_next = [&](CellPosition p) -> int {
                 const MaterialId* found = next.find(p);
                 if (found == nullptr) return 0;
-                return material(*found).density;
+                return material_fast(*found).density;
             };
 
             bool moved = false;
@@ -717,7 +740,7 @@ void SimulationWorld::step() {
                     stage_heat_carry(source, down);
                     moved = true;
                 } else if (*occupant != kAir && stayed.contains(down)) {
-                    const auto& occupant_def = material(*occupant);
+                    const MaterialRuntime& occupant_def = material_fast(*occupant);
                     if ((occupant_def.movement == Movement::Liquid ||
                          occupant_def.movement == Movement::Gas) &&
                         occupant_def.density < mat_def.density) {
@@ -758,11 +781,11 @@ void SimulationWorld::step() {
                     constexpr int kDispersion = 4;
                     const MaterialId* below_mat = next.find(down);
                     const bool deep = below_mat != nullptr &&
-                                      material(*below_mat).movement == Movement::Liquid;
+                                      material_fast(*below_mat).movement == Movement::Liquid;
                     // Wetness in the settled/next state (decided cells only).
                     auto wet_at = [&](CellPosition p) -> bool {
                         const MaterialId* found = next.find(p);
-                        return found != nullptr && material(*found).movement == Movement::Liquid;
+                        return found != nullptr && material_fast(*found).movement == Movement::Liquid;
                     };
                     if (deep) {
                         // A cell embedded in a complete surface row (wet on
@@ -803,7 +826,7 @@ void SimulationWorld::step() {
                         // skip current-occupied laterals).
                         const MaterialId below_id = below_now != nullptr ? *below_now : kAir;
                         const bool powder_below =
-                            below_now != nullptr && material(below_id).movement == Movement::Powder;
+                            below_now != nullptr && material_fast(below_id).movement == Movement::Powder;
                         // Escape hatch: only seep when the displaced sand can
                         // roll somewhere (a diag of the source holding air or
                         // water in current). Otherwise the pair swap back and
@@ -811,7 +834,7 @@ void SimulationWorld::step() {
                         // A dot in a fully-cupped pit stays put (a puddle).
                         auto escapable = [&](CellPosition p) -> bool {
                             const MaterialId* found = current.find(p);
-                            return found == nullptr || material(*found).movement == Movement::Liquid;
+                            return found == nullptr || material_fast(*found).movement == Movement::Liquid;
                         };
                         const CellPosition seep_l{source.x - 1, source.y + 1};
                         const CellPosition seep_r{source.x + 1, source.y + 1};
@@ -1654,6 +1677,9 @@ bool SimulationWorld::load_with_diagnostic(
             error = LoadError::BadTempSection;
             return false;
         }
+        // (Group 4, Task O2:) exact count is already capped above
+        // (count-before-reserve: Oversize rejects before any allocation).
+        loaded_temps.reserve_for(static_cast<std::size_t>(temp_count) + 16);
         // Same v2-strict ordering pair as the cell section above
         // (prev-compare names it, find_or_insert belt-and-braces).
         bool have_prev_temp = false;
@@ -1749,9 +1775,7 @@ bool SimulationWorld::load_with_diagnostic(
 }
 
 bool SimulationWorld::is_solid(CellPosition position) const {
-    const auto it = materials_.find(cell(position));
-    if (it == materials_.end()) return false;
-    return it->second.solid;
+    return material_fast(cell(position)).solid;
 }
 
 void SimulationWorld::build_play_level() {
@@ -1910,6 +1934,10 @@ void SimulationWorld::conduct_temperature() {
     // pre-conduction, or falling hot material would heat its own wake
     // through the stale snapshot entry.
     temp_prune_scratch_.clear();
+    // (Group 4, Task O2:) exact bound — the loop below appends each temps_
+    // entry at most once. vector::reserve never shrinks: steady-state zero
+    // alloc, capacity sticks at max H.
+    temp_prune_scratch_.reserve(temps_.size());
     temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
         if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);
     });
@@ -1921,7 +1949,11 @@ void SimulationWorld::conduct_temperature() {
     // zero so small temps vanish instead of lingering at ±1.
     FlatTemps& conducted = temp_scratch_;
     conducted.clear();
-    conducted.reserve_for(cells_.size() + 16);
+    // (Group 4, Task O2:) F3 working-set sizing: a conducted entry needs a
+    // nonzero in its closed 5-neighborhood, so inserts are bounded by the
+    // union of source neighborhoods (<= 5H), not the whole occupied set.
+    // reserve_for never shrinks — steady-state capacity sticks at max 5H.
+    conducted.reserve_for(temps_.size() * 5 + 16);
     cells_.for_each([&](const CellPosition& position, const MaterialId&) {
         int sum = temperature_at(position);
         sum += temperature_at({position.x - 1, position.y});

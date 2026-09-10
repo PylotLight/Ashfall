@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -41,6 +42,19 @@ struct StepCounters {
 };
 #endif
 
+/// Dense runtime mirror of the material table for hot paths (Group 4, Task
+/// O1): indexed directly by MaterialId, so per-cell dispatch avoids the
+/// std::map lookup. Populated in load_material_table (all 256 slots;
+/// unlisted ids have valid=false). materials_ stays for names/metadata and
+/// all public/cold queries. Engine invariant: stored cells always hold
+/// validated ids (set/fill/load/reaction paths all gate), so the
+/// material_fast() debug assert documents rather than defends.
+struct MaterialRuntime {
+    Movement movement = Movement::Static;
+    int density = 0;
+    bool solid = false;
+    bool valid = false;
+};
 /// Portable, deterministic cellular world. Godot and rendering code must not own this state.
 struct LoadOptions {
     bool allow_reaction_table_mismatch = false;
@@ -169,6 +183,12 @@ private:
     using DynCells = std::vector<std::pair<CellPosition, MaterialId>>;
 
     [[nodiscard]] const MaterialSpec& material(MaterialId id) const;
+    [[nodiscard]] const MaterialRuntime& material_fast(MaterialId id) const {
+#ifndef NDEBUG
+        assert(material_fast_[id].valid);
+#endif
+        return material_fast_[id];
+    }
     [[nodiscard]] static bool prefers_left(CellPosition position, std::uint64_t tick);
     void write_chunk_cell(CellPosition position, MaterialId material_id);
     void write_chunk_cell_deferred(
@@ -187,7 +207,15 @@ private:
     FlatMarks stayed_scratch_;
     DynCells dyn_scratch_;
     DynCells order_scratch_;
+    // (Group 4, Task O2:) retained counting-sort rows for
+    // order_dynamic_cells (cleared + grown-only per call via assign() —
+    // steady-state zero alloc). Passed by ref; the function stays a free
+    // function in the anonymous namespace.
+    std::vector<std::size_t> order_row_size_;
+    std::vector<std::size_t> order_row_start_;
+    std::vector<std::size_t> order_cursor_;
     std::map<MaterialId, MaterialSpec> materials_;
+    std::array<MaterialRuntime, 256> material_fast_;
     std::vector<MaterialId> material_order_;
     [[nodiscard]] int temperature_at(CellPosition position) const;
     void conduct_temperature();
