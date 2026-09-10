@@ -19,6 +19,12 @@ if(ASHFALL_BUILD_TESTS)
     add_executable(ashfall_sim_tests tests/simulation_tests.cpp)
     target_link_libraries(ashfall_sim_tests PRIVATE ashfall_sim)
     add_test(NAME ashfall_sim_tests COMMAND ashfall_sim_tests)
+    add_executable(ashfall_flat_tests tests/flat_map_tests.cpp)
+    target_link_libraries(ashfall_flat_tests PRIVATE ashfall_sim)
+    add_test(NAME ashfall_flat_tests COMMAND ashfall_flat_tests)
+    # Step benchmark harness (Group 1): manual tool, not part of ctest.
+    add_executable(ashfall_bench bench/bench_step.cpp)
+    target_link_libraries(ashfall_bench PRIVATE ashfall_sim)
 endif()
 
 # GDExtension bridge using godot-cpp

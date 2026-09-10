@@ -4,12 +4,25 @@
 #include <array>
 #include <cstring>
 #include <unordered_set>
+#ifdef ASHFALL_STEP_INSTRUMENT
+#include <chrono>
+#endif
 
 namespace ashfall {
 namespace {
 
-[[maybe_unused]] constexpr std::array<std::uint8_t, 8> kSaveMagic = {'A', 'S', 'H', 'F', 'A', 'L', 'L', 1};
-constexpr std::array<std::uint8_t, 8> kSaveMagicV2 = {'A', 'S', 'H', 'F', 'A', 'L', 'L', 2};
+// (Group 1, Task C2:) the old anonymous-namespace kSaveMagic/kSaveMagicV2
+// 8-byte constants are removed; the canonical spellings are now
+// SimulationWorld::kSaveMagicPrefix + kSaveVersion1/kSaveVersion2 (header).
+// Nothing outside this file referenced the old names (verified by grep).
+
+#ifdef ASHFALL_STEP_INSTRUMENT
+inline double step_ms_between(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+#endif
 
 int floor_divide(int value, int divisor) {
     const int quotient = value / divisor;
@@ -21,6 +34,9 @@ int positive_modulo(int value, int divisor) {
     return remainder < 0 ? remainder + divisor : remainder;
 }
 
+// C++20 two's-complement makes this bit pattern exact for negative coords:
+// callers pass static_cast<std::uint32_t>(position.x), and load round-trips
+// via static_cast<std::int32_t>(raw_x). Do not "simplify" the casts away.
 void append_u32(std::vector<std::uint8_t>& out, std::uint32_t value) {
     for (int byte = 0; byte < 4; ++byte) out.push_back(static_cast<std::uint8_t>(value >> (byte * 8)));
 }
@@ -302,7 +318,18 @@ void SimulationWorld::run_reactions() {
     // FlatMap scan order: the same logical world reacts identically however
     // its cells were inserted. Cost is O(cells x rules) only while rules
     // are loaded; reactionless worlds pay one branch.
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // reaction_cells/reaction_hits are stored directly here (run_reactions
+    // runs inside step()'s reactions phase); step() fills every other
+    // counter field at the end and must not overwrite these two.
+    if (reactions_.empty()) {
+        last_counters_.reaction_cells = 0;
+        last_counters_.reaction_hits = 0;
+        return;
+    }
+#else
     if (reactions_.empty()) return;
+#endif
     struct Hit {
         CellPosition pos;
         MaterialId product;
@@ -312,7 +339,13 @@ void SimulationWorld::run_reactions() {
     };
     std::vector<Hit> hits;
     hits.reserve(cells_.size());
+#ifdef ASHFALL_STEP_INSTRUMENT
+    std::size_t visited_cells = 0;
+#endif
     cells_.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+#ifdef ASHFALL_STEP_INSTRUMENT
+        ++visited_cells;
+#endif
         for (std::uint32_t rule_idx = 0; rule_idx < reactions_.size(); ++rule_idx) {
             const ResolvedReaction& rule = reactions_[rule_idx];
             if (!matches_reactant(material_id, rule.reactants[0])) continue;
@@ -362,6 +395,10 @@ void SimulationWorld::run_reactions() {
     });
     // Deterministic conflict resolution: total sort order (position, own
     // first, rule priority, primary position) — first hit per cell wins.
+#ifdef ASHFALL_STEP_INSTRUMENT
+    last_counters_.reaction_cells = visited_cells;
+    last_counters_.reaction_hits = hits.size();
+#endif
     std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) {
         if (left.pos.x != right.pos.x) return left.pos.x < right.pos.x;
         if (left.pos.y != right.pos.y) return left.pos.y < right.pos.y;
@@ -383,11 +420,27 @@ void SimulationWorld::run_reactions() {
 }
 
 void SimulationWorld::step() {
+#ifdef ASHFALL_STEP_INSTRUMENT
+    const auto step_t0 = std::chrono::steady_clock::now();
+    StepTimings timings;
+    std::size_t powder_moves = 0, liquid_moves = 0, gas_moves = 0, swaps = 0;
+#endif
     // Reactions transform the tick-start state before movement sees it.
+#ifdef ASHFALL_STEP_INSTRUMENT
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        run_reactions();
+        timings.reactions_ms = step_ms_between(t0, std::chrono::steady_clock::now());
+    }
+#else
     run_reactions();
+#endif
     // cells_ IS the tick-start state: no collect copy. next replaces it.
     const FlatCells& current = cells_;
     FlatCells& next = next_scratch_;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    const auto clear_t0 = std::chrono::steady_clock::now();
+#endif
     next.clear();
     next.reserve_for(cells_.size() + 16);
     DynCells& dynamic_cells = dyn_scratch_;
@@ -401,6 +454,12 @@ void SimulationWorld::step() {
     FlatMarks& stayed = stayed_scratch_;
     stayed.clear();
     stayed.reserve_for(cells_.size());
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // clear_reserve covers next.clear/reserve + scratch clears/reserves at
+    // the top of step().
+    timings.clear_reserve_ms = step_ms_between(clear_t0, std::chrono::steady_clock::now());
+    const auto classify_t0 = std::chrono::steady_clock::now();
+#endif
 
     current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
         if (material(material_id).movement == Movement::Static) {
@@ -410,10 +469,33 @@ void SimulationWorld::step() {
         }
     });
 
+#ifdef ASHFALL_STEP_INSTRUMENT
+    timings.classify_ms = step_ms_between(classify_t0, std::chrono::steady_clock::now());
+    // Classified exactly once each: static = tick-start size minus dynamic.
+    const std::size_t step_dynamic_count = dynamic_cells.size();
+    const std::size_t step_static_count = current.size() - step_dynamic_count;
+    const auto ordering_t0 = std::chrono::steady_clock::now();
+#endif
     order_dynamic_cells(dynamic_cells, order_scratch_);
+#ifdef ASHFALL_STEP_INSTRUMENT
+    timings.ordering_ms = step_ms_between(ordering_t0, std::chrono::steady_clock::now());
+#endif
+    // Per-arm timing choice (documented per contract): two clock reads per
+    // dynamic cell (entry + exit) beat per-iteration reads inside every arm
+    // (which would distort the hot loop); the delta of the whole per-cell
+    // iteration, including dispatch (material()/prefers_left), is attributed
+    // to that cell's movement class. Residual: one clock read (~tens of ns)
+    // per dynamic cell lands outside every phase, so phase-sum can undershoot
+    // total by ~25ns x dynamic_cells on heavy worlds — expected, not a bug.
     for (const auto& [source, material_id] : dynamic_cells) {
+#ifdef ASHFALL_STEP_INSTRUMENT
+        const auto arm_t0 = std::chrono::steady_clock::now();
+#endif
         const auto& mat_def = material(material_id);
         const bool left_first = prefers_left(source, tick_);
+#ifdef ASHFALL_STEP_INSTRUMENT
+        const Movement arm_class = mat_def.movement;
+#endif
 
         if (mat_def.movement == Movement::Powder) {
             const CellPosition down{source.x, source.y + 1};
@@ -446,6 +528,9 @@ void SimulationWorld::step() {
                     next.insert_or_assign(source, displaced);
                     stage_heat_carry(source, dest);
                     stage_heat_carry(dest, source);
+#ifdef ASHFALL_STEP_INSTRUMENT
+                    ++swaps;
+#endif
                 } else {
                     return false;
                 }
@@ -469,6 +554,10 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+#ifdef ASHFALL_STEP_INSTRUMENT
+            } else {
+                ++powder_moves;
+#endif
             }
         } else if (mat_def.movement == Movement::Liquid) {
             const CellPosition down{source.x, source.y + 1};
@@ -512,6 +601,9 @@ void SimulationWorld::step() {
                         stage_heat_carry(source, down);
                         stage_heat_carry(down, source);
                         moved = true;
+#ifdef ASHFALL_STEP_INSTRUMENT
+                        ++swaps;
+#endif
                     }
                 }
             }
@@ -604,6 +696,9 @@ void SimulationWorld::step() {
                             stage_heat_carry(source, down);
                             stage_heat_carry(down, source);
                             moved = true;
+#ifdef ASHFALL_STEP_INSTRUMENT
+                            ++swaps;
+#endif
                         }
                     }
                 }
@@ -611,7 +706,14 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+#ifdef ASHFALL_STEP_INSTRUMENT
+            } else {
+                ++liquid_moves;
+#endif
             }
+            // Gas never swaps (bubbles emerge from the liquid side via
+            // density down-swaps; gas itself only takes free targets), so the
+            // swaps counter has no gas contribution by construction.
         } else if (mat_def.movement == Movement::Gas) {
             // Gases rise, pool under ceilings, and disperse sideways — all
             // table-driven, no id branches. An upward target is only free
@@ -683,28 +785,63 @@ void SimulationWorld::step() {
             if (!moved) {
                 next.insert_or_assign(source, material_id);
                 stayed.insert_or_assign(source, 1);
+#ifdef ASHFALL_STEP_INSTRUMENT
+            } else {
+                ++gas_moves;
+#endif
             }
         }
+#ifdef ASHFALL_STEP_INSTRUMENT
+        {
+            const double arm_ms = step_ms_between(arm_t0, std::chrono::steady_clock::now());
+            if (arm_class == Movement::Powder) {
+                timings.powder_ms += arm_ms;
+            } else if (arm_class == Movement::Liquid) {
+                timings.liquid_ms += arm_ms;
+            } else {
+                timings.gas_ms += arm_ms;
+            }
+        }
+#endif
     }
 
     // Patch the chunk mirror + dirty set from the tick diff (minimal writes:
     // removals/changes in the first loop, pure additions in the second).
     // Emptiness sweeps are deferred: one O(chunk) scan per touched chunk.
+#ifdef ASHFALL_STEP_INSTRUMENT
+    const auto reconcile_t0 = std::chrono::steady_clock::now();
+    // changed_positions and dirty_chunk_marks count ONLY the three reconcile
+    // call sites below (not global mark_chunk_dirty traffic); both loops
+    // diff the tick, so removals + changes + additions is the position delta.
+    std::size_t changed_positions = 0, dirty_chunk_marks = 0;
+#endif
     std::set<CellPosition> maybe_emptied;
     cells_.for_each([&](const CellPosition& pos, const MaterialId& mat) {
         const MaterialId* updated = next.find(pos);
         if (updated == nullptr) {
             write_chunk_cell_deferred(pos, kAir, &maybe_emptied);
             mark_chunk_dirty(chunk_pos_of(pos));
+#ifdef ASHFALL_STEP_INSTRUMENT
+            ++changed_positions;
+            ++dirty_chunk_marks;
+#endif
         } else if (*updated != mat) {
             write_chunk_cell(pos, *updated);
             mark_chunk_dirty(chunk_pos_of(pos));
+#ifdef ASHFALL_STEP_INSTRUMENT
+            ++changed_positions;
+            ++dirty_chunk_marks;
+#endif
         }
     });
     next.for_each([&](const CellPosition& pos, const MaterialId& mat) {
         if (!cells_.contains(pos)) {
             write_chunk_cell(pos, mat);
             mark_chunk_dirty(chunk_pos_of(pos));
+#ifdef ASHFALL_STEP_INSTRUMENT
+            ++changed_positions;
+            ++dirty_chunk_marks;
+#endif
         }
     });
     for (const CellPosition chunk_position : maybe_emptied) {
@@ -715,10 +852,42 @@ void SimulationWorld::step() {
     }
 
     std::swap(cells_, next);
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // reconcile covers both diff loops + the emptiness sweep + the swap.
+    timings.reconcile_ms = step_ms_between(reconcile_t0, std::chrono::steady_clock::now());
+#endif
     ++tick_;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    const std::size_t carried_heat = heat_carry_scratch_.size();
+    const auto heat_carry_t0 = std::chrono::steady_clock::now();
+#endif
     for (const auto& [dest, temp] : heat_carry_scratch_) temps_.insert_or_assign(dest, temp);
     heat_carry_scratch_.clear();
+#ifdef ASHFALL_STEP_INSTRUMENT
+    timings.heat_carry_ms = step_ms_between(heat_carry_t0, std::chrono::steady_clock::now());
+    const auto conduct_t0 = std::chrono::steady_clock::now();
+#endif
     conduct_temperature();
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // conduct covers the pre-conduction prune + conduct_temperature().
+    timings.conduct_ms = step_ms_between(conduct_t0, std::chrono::steady_clock::now());
+    timings.total_ms = step_ms_between(step_t0, std::chrono::steady_clock::now());
+    last_timings_ = timings;
+    // reaction_cells/reaction_hits were stored by run_reactions() above;
+    // every other field is filled here (never whole-struct-assigned, so the
+    // reaction fields survive).
+    last_counters_.occupied = cells_.size();
+    last_counters_.static_cells = step_static_count;
+    last_counters_.dynamic_cells = step_dynamic_count;
+    last_counters_.powder_moves = powder_moves;
+    last_counters_.liquid_moves = liquid_moves;
+    last_counters_.gas_moves = gas_moves;
+    last_counters_.swaps = swaps;
+    last_counters_.nonzero_temps = temps_.size();
+    last_counters_.carried_heat = carried_heat;
+    last_counters_.changed_positions = changed_positions;
+    last_counters_.dirty_chunk_marks = dirty_chunk_marks;
+#endif
 }
 
 
@@ -804,8 +973,10 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
         return left.first.y < right.first.y;
     });
     std::vector<std::uint8_t> bytes;
-    bytes.reserve(kSaveMagicV2.size() + 12 + ordered.size() * 9 + 4 + ordered_temps.size() * 10);
-    bytes.insert(bytes.end(), kSaveMagicV2.begin(), kSaveMagicV2.end());
+    constexpr std::size_t kHeaderBytes = 7 + 1 + 12; // prefix + version + tick + ncell
+    bytes.reserve(kHeaderBytes + ordered.size() * 9 + 4 + ordered_temps.size() * 10);
+    bytes.insert(bytes.end(), kSaveMagicPrefix.begin(), kSaveMagicPrefix.end());
+    bytes.push_back(kSaveVersion2);
     append_u64(bytes, tick_);
     append_u32(bytes, static_cast<std::uint32_t>(ordered.size()));
     for (const auto& [position, material_id] : ordered) {
@@ -823,44 +994,99 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
 }
 
 bool SimulationWorld::load(std::span<const std::uint8_t> bytes) {
+    LoadError ignored = LoadError::Ok;
+    return load_with_diagnostic(bytes, ignored);
+}
+
+bool SimulationWorld::load_with_diagnostic(std::span<const std::uint8_t> bytes, LoadError& error) {
     // Migration decision (per docs/AGENT_GUIDE.md): v1 loads with all cells
     // ambient (no heat section); v2 adds the sparse temps tail. Anything
     // else is rejected; failed loads leave the world (cells, heat, tick)
     // untouched. The host wrapper is unchanged — old user saves load.
-    if (bytes.size() < kSaveMagicV2.size() + 12) return false;
-    if (!std::equal(kSaveMagicV2.begin(), kSaveMagicV2.end() - 1, bytes.begin())) return false;
-    const std::uint8_t version = bytes[kSaveMagicV2.size() - 1];
-    if (version != 1 && version != 2) return false;
-    std::size_t offset = kSaveMagicV2.size();
+    // Transient memory note: pre-commit the live tables, `loaded` /
+    // `loaded_temps`, and the rebuilt chunk map coexist (~2.2x steady-state
+    // tables); a streaming loader is later work.
+    error = LoadError::Ok;
+    constexpr std::size_t kHeaderBytes = 7 + 1 + 12; // prefix + version + tick + ncell
+    if (bytes.size() < kHeaderBytes) {
+        error = LoadError::TooShort;
+        return false;
+    }
+    if (!std::equal(kSaveMagicPrefix.begin(), kSaveMagicPrefix.end(), bytes.begin())) {
+        error = LoadError::BadMagic;
+        return false;
+    }
+    const std::uint8_t version = bytes[kSaveMagicPrefix.size()];
+    if (version != kSaveVersion1 && version != kSaveVersion2) {
+        error = LoadError::BadVersion;
+        return false;
+    }
+    std::size_t offset = kSaveMagicPrefix.size() + 1;
     std::uint64_t saved_tick = 0;
     std::uint32_t count = 0;
-    if (!read_u64(bytes, offset, saved_tick) || !read_u32(bytes, offset, count)) return false;
-    if (version == 1 && bytes.size() - offset != static_cast<std::size_t>(count) * 9) return false;
-    if (version == 2 && bytes.size() - offset < static_cast<std::size_t>(count) * 9 + 4) return false;
+    if (!read_u64(bytes, offset, saved_tick) || !read_u32(bytes, offset, count)) {
+        error = LoadError::BadCellSection;
+        return false;
+    }
+    // Load-bearing: the cast to std::size_t happens BEFORE the multiply, so
+    // the extent is overflow-safe on 64-bit. Do not "simplify" this into a
+    // 32-bit multiply.
+    if (version == kSaveVersion1 && bytes.size() - offset != static_cast<std::size_t>(count) * 9) {
+        error = LoadError::BadCellSection;
+        return false;
+    }
+    if (version == kSaveVersion2 && bytes.size() - offset < static_cast<std::size_t>(count) * 9 + 4) {
+        error = LoadError::BadCellSection;
+        return false;
+    }
     FlatCells loaded;
     loaded.reserve_for(static_cast<std::size_t>(count) + 16);
     for (std::uint32_t index = 0; index < count; ++index) {
         std::uint32_t raw_x = 0;
         std::uint32_t raw_y = 0;
-        if (!read_u32(bytes, offset, raw_x) || !read_u32(bytes, offset, raw_y) || offset >= bytes.size()) return false;
+        if (!read_u32(bytes, offset, raw_x) || !read_u32(bytes, offset, raw_y) || offset >= bytes.size()) {
+            error = LoadError::BadCellSection;
+            return false;
+        }
         const MaterialId material_id = bytes[offset++];
-        if (material_id == kAir || !materials_.contains(material_id)) return false;
+        if (material_id == kAir) {
+            error = LoadError::AirCellStored;
+            return false;
+        }
+        if (!materials_.contains(material_id)) {
+            error = LoadError::UnknownMaterial;
+            return false;
+        }
+        // Duplicates policy UNCHANGED: last-write-wins accept via
+        // insert_or_assign. Strict (S1) rejection is Group 2/3 work.
         loaded.insert_or_assign({static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, material_id);
     }
     FlatTemps loaded_temps;
-    if (version == 2) {
+    if (version == kSaveVersion2) {
         std::uint32_t temp_count = 0;
-        if (!read_u32(bytes, offset, temp_count)) return false;
-        if (bytes.size() - offset != static_cast<std::size_t>(temp_count) * 10) return false;
+        if (!read_u32(bytes, offset, temp_count)) {
+            error = LoadError::BadTempSection;
+            return false;
+        }
+        if (bytes.size() - offset != static_cast<std::size_t>(temp_count) * 10) {
+            error = LoadError::BadTempSection;
+            return false;
+        }
         for (std::uint32_t index = 0; index < temp_count; ++index) {
             std::uint32_t raw_x = 0;
             std::uint32_t raw_y = 0;
             std::uint16_t raw_temp = 0;
             if (!read_u32(bytes, offset, raw_x) || !read_u32(bytes, offset, raw_y) ||
-                !read_u16(bytes, offset, raw_temp))
+                !read_u16(bytes, offset, raw_temp)) {
+                error = LoadError::BadTempSection;
                 return false;
+            }
             const auto temp = static_cast<std::int16_t>(raw_temp);
-            if (temp == 0) return false; // canonical saves never store ambient
+            if (temp == 0) {
+                error = LoadError::AmbientTempStored; // canonical saves never store ambient
+                return false;
+            }
+            // Duplicates policy UNCHANGED (see cell loop above).
             loaded_temps.insert_or_assign(
                 {static_cast<std::int32_t>(raw_x), static_cast<std::int32_t>(raw_y)}, temp);
         }
@@ -988,9 +1214,10 @@ void SimulationWorld::conduct_temperature() {
     // branch per tick and the hot loop is untouched (perf note: conduction
     // is O(occupied) integer ops only while heat exists).
     if (temps_.empty()) return;
-    // No advection in P2.4: drop heat whose cell is gone BEFORE conducting,
-    // or falling hot material would heat its own wake through the stale
-    // snapshot entry. P2.5 carries heat with moving material instead.
+    // P2.5 carries heat with moving material via `stage_heat_carry`
+    // (destination-keyed, applied post-swap); temps whose cell is gone are
+    // pruned pre-conduction, or falling hot material would heat its own wake
+    // through the stale snapshot entry.
     temp_prune_scratch_.clear();
     temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
         if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);

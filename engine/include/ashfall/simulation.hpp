@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,27 @@
 #include "ashfall/reaction_data.hpp"
 
 namespace ashfall {
+
+#ifdef ASHFALL_STEP_INSTRUMENT
+// Write-only step instrumentation (Group 1, Task C1). Populated at the end
+// of step(), AFTER conduct_temperature(). Sim code must NEVER read these:
+// timers/counters are write-only during step() and must not feed sim
+// decisions (determinism rule). Storage + accessors exist ONLY under this
+// macro; callers (e.g. bench/bench_step.cpp) guard reads with the same
+// macro, so every TU compiles either way.
+struct StepTimings {
+    double reactions_ms = 0.0, clear_reserve_ms = 0.0, classify_ms = 0.0;
+    double ordering_ms = 0.0, powder_ms = 0.0, liquid_ms = 0.0, gas_ms = 0.0;
+    double reconcile_ms = 0.0, heat_carry_ms = 0.0, conduct_ms = 0.0, total_ms = 0.0;
+};
+struct StepCounters {
+    std::size_t occupied = 0, static_cells = 0, dynamic_cells = 0;
+    std::size_t powder_moves = 0, liquid_moves = 0, gas_moves = 0, swaps = 0;
+    std::size_t reaction_cells = 0, reaction_hits = 0;
+    std::size_t nonzero_temps = 0, carried_heat = 0;
+    std::size_t changed_positions = 0, dirty_chunk_marks = 0;
+};
+#endif
 
 /// Portable, deterministic cellular world. Godot and rendering code must not own this state.
 class SimulationWorld {
@@ -39,8 +61,9 @@ public:
     // Deterministic integer conduction runs each step(); queries read the
     // settled post-step state. Setting 0 erases the entry. Out-of-range
     // values clamp to int16. Heat may be set on any position (even air);
-    // entries whose cell is gone are pruned on the next step (no advection
-    // in P2.4 — P2.5 carries heat with moving material).
+    // P2.5 carries heat with moving material via `stage_heat_carry`
+    // (destination-keyed, applied post-swap); temps whose cell is gone are
+    // pruned pre-conduction.
     void set_temperature(CellPosition position, int temperature);
     [[nodiscard]] int temperature(CellPosition position) const;
     [[nodiscard]] std::size_t temperature_count() const noexcept { return temps_.size(); }
@@ -65,6 +88,37 @@ public:
     void copy_rect(CellPosition first, CellPosition last, std::span<MaterialId> out_buffer) const;
     [[nodiscard]] std::vector<std::uint8_t> save() const;
     [[nodiscard]] bool load(std::span<const std::uint8_t> bytes);
+    // Save-format constants + load diagnostics (Group 1, Task C2, backlog
+    // S2). v1 = cells only (all ambient), v2 = cells + sparse temps tail.
+    // load() delegates to load_with_diagnostic and ignores the diagnostic,
+    // so tick outcomes and save bytes are unchanged by this refactor.
+    static constexpr std::array<std::uint8_t, 7> kSaveMagicPrefix = {'A', 'S', 'H', 'F', 'A', 'L', 'L'};
+    static constexpr std::uint8_t kSaveVersion1 = 1;
+    static constexpr std::uint8_t kSaveVersion2 = 2;
+    enum class LoadError : std::uint8_t {
+        Ok = 0,
+        TooShort,
+        BadMagic,
+        BadVersion,
+        BadCellSection,
+        BadTempSection,
+        UnknownMaterial,
+        AirCellStored,
+        AmbientTempStored
+    };
+    [[nodiscard]] bool load_with_diagnostic(std::span<const std::uint8_t> bytes, LoadError& error);
+#ifdef ASHFALL_STEP_INSTRUMENT
+    [[nodiscard]] const StepTimings& last_step_timings() const noexcept { return last_timings_; }
+    // Counting rules: `reaction_cells` = cells visited in the run_reactions
+    // pre-pass; `reaction_hits` = hits.size() before conflict resolution.
+    // `swaps` = powder settled-occupant swaps + liquid density down-swaps +
+    // infiltration swaps (gas never swaps). `changed_positions` = removals +
+    // changes + additions counted in the two reconcile diff loops.
+    // `dirty_chunk_marks` = mark_chunk_dirty calls at the three reconcile
+    // call sites (not global). `carried_heat` = heat_carry_scratch_.size()
+    // at apply time. `nonzero_temps` = temps_.size() post-step.
+    [[nodiscard]] const StepCounters& last_step_counters() const noexcept { return last_counters_; }
+#endif
 
     [[nodiscard]] bool is_solid(CellPosition position) const;
     [[nodiscard]] bool can_move_to(CellPosition min_pos, CellPosition max_pos) const;
@@ -156,6 +210,12 @@ private:
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     std::set<CellPosition> dirty_chunks_;
     std::uint64_t tick_ = 0;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // Write-only instrumentation state (see determinism rule above): step()
+    // stores here at the end; sim code must never read these members.
+    StepTimings last_timings_;
+    StepCounters last_counters_;
+#endif
 };
 
 } // namespace ashfall

@@ -16,6 +16,32 @@
 
 namespace godot {
 
+namespace {
+// Present-phase breakdown for the last step() (Group 1, Task C4). File-local
+// because the bridge class header is owned by another workstream; the
+// integrator may move this into AshfallWorld (and bind phase getters) in
+// Group 3. Cumulative counters are process-wide (one world in practice).
+struct PresentPhases {
+    double sim_ms = 0.0; // world_.step() span ONLY (see step() comment)
+    double dirty_collect_ms = 0.0; // dirty_chunks() copy
+    double material_read_ms = 0.0; // full-path copy_rect(); 0 on partial path (reads inline, timed in paint)
+    double paint_ms = 0.0; // ptrw() acquire + per-pixel paint loops
+    double set_data_ms = 0.0; // Image::set_data() x2 (CPU upload staging)
+    double submit_ms = 0.0; // ImageTexture::update() x2 (GPU submit)
+    std::uint64_t texture_submits = 0; // cumulative update() calls (2 per painted flush: base + water)
+    std::uint64_t present_flushes = 0; // cumulative update_world_texture() calls that painted (updates-per-frame source)
+    std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
+    std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
+};
+PresentPhases g_last_present;
+
+inline double present_ms_between(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+} // namespace
+
 void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("init_world", "width", "height"), &AshfallWorld::init_world);
     ClassDB::bind_method(D_METHOD("step"), &AshfallWorld::step);
@@ -137,11 +163,17 @@ void AshfallWorld::init_world(int p_width, int p_height) {
 }
 
 void AshfallWorld::step() {
-    const auto t0 = std::chrono::steady_clock::now();
+    // HUD number span: world_.step() ONLY — the same span bench_step.cpp
+    // times (sim, no present), so the HUD ms/step is directly comparable to
+    // sim-bench numbers. Present cost lives in g_last_present (see
+    // update_world_texture()). Present cadence unchanged: every step still
+    // presents (once-per-frame accumulation is Group 3 work).
+    const auto sim_t0 = std::chrono::steady_clock::now();
     world_.step();
+    const auto sim_t1 = std::chrono::steady_clock::now();
+    g_last_present.sim_ms = present_ms_between(sim_t0, sim_t1);
+    last_step_ms_ = g_last_present.sim_ms;
     update_world_texture();
-    const auto t1 = std::chrono::steady_clock::now();
-    last_step_ms_ = std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
 void AshfallWorld::set_cell(int p_x, int p_y, int p_material_id) {
@@ -350,7 +382,24 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
         init_world(world_width_, world_height_);
     }
 
+    const auto dirty_t0 = std::chrono::steady_clock::now();
     const std::vector<ashfall::CellPosition> dirty = world_.dirty_chunks();
+    g_last_present.dirty_collect_ms = present_ms_between(dirty_t0, std::chrono::steady_clock::now());
+
+    // No-work fast path BEFORE any ptrw(): PackedByteArray::ptrw() triggers
+    // copy-on-write duplication even when the bytes are only read, so
+    // acquiring the write pointer on a clean frame would copy ~1MB per layer
+    // for nothing (CoW trap). Skipping here mutates nothing the old path did
+    // not: the old code returned the same texture untouched when clean.
+    if (dirty.empty()) {
+        g_last_present.material_read_ms = 0.0;
+        g_last_present.paint_ms = 0.0;
+        g_last_present.set_data_ms = 0.0;
+        g_last_present.submit_ms = 0.0;
+        g_last_present.dirty_pixels = 0;
+        g_last_present.logical_bytes = 0;
+        return world_texture_;
+    }
 
     // Deterministic per-pixel grain, stable across frames (no shimmer).
     auto grain = [](int x, int y) -> int {
@@ -413,20 +462,23 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
         water_dst[3] = clamp_channel(wa);
     };
 
+    const auto paint_t0 = std::chrono::steady_clock::now();
     uint8_t *w = pixel_bytes_.ptrw();
     uint8_t *water_w = water_pixel_bytes_.ptrw();
+    std::uint64_t painted_pixels = 0;
+    std::uint64_t logical_cells = 0;
 
     // Partial CPU-side path: repaint only dirty 64x64 chunks intersecting the
     // presentation window. The single ImageTexture still requires a full GPU
     // upload via update(), so GPU-side remains monolithic by design (see P1.2).
     const std::size_t kFullRepaintThreshold = 8;
     bool use_partial = !dirty.empty() && dirty.size() <= kFullRepaintThreshold;
-    if (dirty.empty()) {
-        return world_texture_;
-    }
 
     if (!use_partial) {
+        const auto read_t0 = std::chrono::steady_clock::now();
         world_.copy_rect({0, 0}, {world_width_ - 1, world_height_ - 1}, cell_buffer_);
+        g_last_present.material_read_ms = present_ms_between(read_t0, std::chrono::steady_clock::now());
+        logical_cells = static_cast<std::uint64_t>(world_width_) * static_cast<std::uint64_t>(world_height_);
         for (int y = 0; y < world_height_; ++y) {
             for (int x = 0; x < world_width_; ++x) {
                 const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
@@ -455,9 +507,14 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
                     depth = height;
                 }
                 paint_cell(x, y, mat, depth, surface, w + i * 4, water_w + i * 4);
+                ++painted_pixels;
             }
         }
     } else {
+        // Partial path reads cells inline via world_.cell() during the paint
+        // loops below (no separate copy_rect), so there is no isolated
+        // material-read phase here: it is timed within paint.
+        g_last_present.material_read_ms = 0.0;
         for (const ashfall::CellPosition chunk : dirty) {
             const int base_x = chunk.x * ashfall::kChunkSize;
             const int base_y = chunk.y * ashfall::kChunkSize;
@@ -489,15 +546,26 @@ Ref<ImageTexture> AshfallWorld::update_world_texture() {
                     }
                     const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
                     paint_cell(x, y, mat, depth, surface, w + offset, water_w + offset);
+                    ++painted_pixels;
+                    ++logical_cells;
                 }
             }
         }
     }
+    g_last_present.paint_ms = present_ms_between(paint_t0, std::chrono::steady_clock::now());
+    g_last_present.dirty_pixels = painted_pixels;
+    g_last_present.logical_bytes = logical_cells; // u8 ids: 1 byte per logical cell
 
+    const auto set_data_t0 = std::chrono::steady_clock::now();
     world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
-    world_texture_->update(world_image_);
     water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    g_last_present.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
+    const auto submit_t0 = std::chrono::steady_clock::now();
+    world_texture_->update(world_image_);
     water_texture_->update(water_image_);
+    g_last_present.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
+    g_last_present.texture_submits += 2; // base + water update() calls
+    ++g_last_present.present_flushes;
     // Presentation consumed the dirty set.
     world_.clear_dirty_chunks();
 
