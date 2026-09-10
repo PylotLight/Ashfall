@@ -243,7 +243,7 @@ do the dense-chunk migration BEFORE that cliff, not after.
       the worst case for weak multiplicative hashes. [R2] No seeded/keyed hashes
       (would break determinism assumptions); splitmix64-class fixed mix if the
       current hash clusters. Exit: measured, not theorized.
-- [ ] **S1. Save/load limits + duplicates.** Format caps (file bytes, cell/temp
+- [x] **S1. Save/load limits + duplicates.** Format caps (file bytes, cell/temp
       counts, coord bounds — validate count BEFORE `reserve_for`), duplicate cell +
       temp rejection (needs `try_emplace`-style insert or pre-check; load path so
       perf is irrelevant), unsorted-acceptance policy DECIDED + tested. [R2]
@@ -275,7 +275,7 @@ do the dense-chunk migration BEFORE that cliff, not after.
       Migration policy: readers v1…vN retained, writer latest, fixture + test +
       paragraph per bump; v3 is the first bump that REJECTS previously-accepted
       inputs — call it out. Exit: skew tests loud, v1/v2 fixtures load.
-- [ ] **S5. Commit-phase exception safety.** Build chunk map into a local, commit
+- [x] **S5. Commit-phase exception safety.** Build chunk map into a local, commit
       with non-throwing moves, tick last — "failed load ⇒ untouched" holds even
       under `bad_alloc`. Exit: holds under injection.
 - [ ] **S6. Serializer sweeps in CI.** Truncation sweep (every prefix → false +

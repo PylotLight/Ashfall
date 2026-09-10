@@ -69,7 +69,8 @@ All layers reviewed. Execution order from the backlogs:
    test/docs commit below for T1–T6 + golden bytes + contracts doc).
 2. **Group 2 — correctness, versioned:** heat-transport ownership (+ cell-owned
    heat), reactant exclusivity, validator parity, save duplicates + policy,
-   transactional output, `find_or_insert`, commit-phase safety.
+    transactional output, `find_or_insert`, commit-phase safety. Status 2026-09-10:
+    DONE (F/V/R/S/H committed; T pins green, uncommitted — integrator commits).
 3. **Group 3 — hardening + formats:** limits everywhere, strict unknown keys, v3
    design→implement, P1–P4 tests, sweeps, presentation tests §F 1–7.
 4. **Group 4 — measured optimizations:** runtime table, scratch sizing, compiled

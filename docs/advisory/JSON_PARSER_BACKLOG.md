@@ -36,7 +36,7 @@ Design decisions to make before/during (reviewer gives options, we choose):
       accumulation (`(kMax - digit)/10`); document −1e9..+1e9 token policy; optional
       `assert(low <= high)` hygiene. Full boundary corpus in §12 table. Exit:
       numeric boundary corpus passes.
-- [ ] **3. Presence-based reactant exclusivity (§5).** Check field PRESENCE, not
+- [x] **3. Presence-based reactant exclusivity (§5).** Check field PRESENCE, not
       value validity; reject unknown slot keys. Early isolated patch. Note the
       subtle case: `{"material":"water","tag":"liquid"}` must FAIL (both keys
       present) even though each value is valid. Exit: all malformed dual-key cases
@@ -46,14 +46,14 @@ Design decisions to make before/during (reviewer gives options, we choose):
       optionals (`min_temperatue`, `hardnes`, `product_temperatur`) must fail loudly
       — today they silently disable gates/outputs. Explicit `metadata` object if
       extensions needed. Exit: optional-field typos cannot silently remove behavior.
-- [ ] **5. Material validator parity (§7).** Enforce density range + exhaustive
+- [x] **5. Material validator parity (§7).** Enforce density range + exhaustive
       `Movement` switch + 256-count bound in `validate_material_table()` (C++ route),
       not just JSON route — today an invalid programmatic enum reaches `step()` and
       the cell silently disappears (not static, no powder/liquid/gas branch places
       it). Remove unreachable solid/gas duplicate branch. No invented restrictions
       (zero-density dynamic, static nonsolid stay legal; lint, don't reject).
       Exit: invalid C++ enums/densities reject.
-- [ ] **6. Transactional output + error contract** — see Design decisions above.
+- [x] **6. Transactional output + error contract** — see Design decisions above.
       Exit: failed reload preserves prior table.
 - [ ] **7. Path/location diagnostics** — see Design decisions above. Exit: errors
       identify row + field.
