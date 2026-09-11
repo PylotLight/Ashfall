@@ -79,9 +79,12 @@ All layers reviewed. Execution order from the backlogs:
 5. **Group 5 — storage migration:** DONE (`29e3673` vsync probe V; `607eefd`
    chunk-authoritative cells + shift/mask math (1024² dynamics −7% vs FlatMap);
    `ab8325e` §7 gaps + F2 + bench E).
-6. **Group 6 — fuzzing + CI:** PLANNED, runbook ready at
-   `~/.claude/plans/survival-rpg-mvp/2026-09-10-group6-fuzzing-ci.md`. Rounds:
-   F0 toolchain+wiring alone → F1/F2/F3 targets+corpus + F4 sanitizer suite +
-   F5 CI + F6 differential (parallel) → slice commits. Notes: Apple Clang has no
-   libFuzzer (LLVM clang via brew required); no `.github/` yet (greenfield);
-   ASan/UBSan verified working locally.
+6. **Group 6 — fuzzing + sanitizers (CI skipped, local-only):** DONE (`cfff9e5`
+   FUZZ=ON wiring + probe + README → `1ca7cee` LLVM `<algorithm>` fix →
+   `1d32a2b` 3 JSON targets + dict + 62 seeds → `fbc9603` 2 structured targets →
+   `c8e5d3e` 2 save targets + 20 seeds → `a0672c3` offline differential +
+   verdict shim). Zero findings: 60 s smokes clean (~2.3M struct fills, ~1.3M
+   JSON runs), sanitizer suite 2/2 on LLVM + Apple Clang, differential 357/357.
+   Notes: LLVM clang 23 via brew required (Apple Clang can't link libFuzzer);
+   run fuzzers against /tmp corpus copies (never the repo dir); CI job
+   (.github/workflows) deferred — no push planned.
