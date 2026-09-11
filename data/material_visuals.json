@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "visuals": [
+    {
+      "material": "air",
+      "palette": ["#121418", "#121418"],
+      "pattern": "quiet",
+      "pattern_scale": 1,
+      "detail_strength": 0.0,
+      "edge_response": 0.0,
+      "opacity": 0.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "stone",
+      "palette": ["#292b35", "#414450", "#666775"],
+      "pattern": "strata",
+      "pattern_scale": 4,
+      "detail_strength": 0.12,
+      "edge_response": 0.25,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "sand",
+      "palette": ["#c99b3f", "#e6af32", "#f5d47a"],
+      "pattern": "clusters",
+      "pattern_scale": 2,
+      "detail_strength": 0.1,
+      "edge_response": 0.15,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "water",
+      "palette": ["#2f6f8f", "#56b2d6", "#9fdcef"],
+      "pattern": "quiet",
+      "pattern_scale": 3,
+      "detail_strength": 0.08,
+      "edge_response": 0.6,
+      "opacity": 0.85,
+      "opacity_mode": "translucent",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "flow"
+    },
+    {
+      "material": "steam",
+      "palette": ["#c9c9d2", "#cdccd2", "#e8e8ec"],
+      "pattern": "plume",
+      "pattern_scale": 3,
+      "detail_strength": 0.15,
+      "edge_response": 0.1,
+      "opacity": 0.45,
+      "opacity_mode": "translucent",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "wisp"
+    },
+    {
+      "material": "fire",
+      "palette": ["#ff3d00", "#ff8c1a", "#ffd94d", "#fff6c9"],
+      "pattern": "plume",
+      "pattern_scale": 2,
+      "detail_strength": 0.35,
+      "edge_response": 0.0,
+      "opacity": 1.0,
+      "opacity_mode": "additive",
+      "emission": {"color": "#ff7a00", "strength": 2.5},
+      "animation": "flame"
+    },
+    {
+      "material": "wood",
+      "palette": ["#6b4a26", "#92683a", "#b98d55"],
+      "pattern": "grain",
+      "pattern_scale": 3,
+      "detail_strength": 0.18,
+      "edge_response": 0.3,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "lava",
+      "palette": ["#7a1500", "#ff500a", "#ffc14d"],
+      "pattern": "crust",
+      "pattern_scale": 3,
+      "detail_strength": 0.3,
+      "edge_response": 0.2,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#ff4400", "strength": 1.5},
+      "animation": "ember"
+    },
+    {
+      "material": "rock",
+      "palette": ["#4a4640", "#78736e", "#a39d94"],
+      "pattern": "strata",
+      "pattern_scale": 5,
+      "detail_strength": 0.14,
+      "edge_response": 0.3,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "oil",
+      "palette": ["#4a2c0c", "#7a4812", "#a06a24"],
+      "pattern": "quiet",
+      "pattern_scale": 2,
+      "detail_strength": 0.08,
+      "edge_response": 0.4,
+      "opacity": 0.9,
+      "opacity_mode": "translucent",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "flow"
+    }
+  ]
+}
