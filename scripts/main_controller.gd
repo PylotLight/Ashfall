@@ -7,8 +7,11 @@ extends Control
 # Controls: WASD/arrows = move avatar (S keeps move-down); N = single sim
 # tick (rebound from S in Group 3 — S both moved down and stepped, so the
 # step key moved to the unused N); SPACE = play/pause; R = reset level;
-# E = dig at avatar; F = place held material; F5 = save; F9 = load;
-# 1..0 = palette shortcuts in table order; mouse paint on the world view.
+# E = dig at avatar; F = place held material; C = follow-camera on/off;
+# mouse wheel over the world view = camera zoom; F1 = debug panel (the
+# sim-control buttons live there, hidden from the play view); F5 = save;
+# F9 = load; 1..0 = palette shortcuts in table order; mouse paint on the
+# world view.
 #
 # Presentation cadence (Group 3, Task B4): sim/edit paths only accumulate
 # engine dirtiness; _process calls world.flush_present() exactly once per
@@ -28,6 +31,22 @@ extends Control
 @onready var frame_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/FrameValue
 @onready var sim_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/SimValue
 @onready var palette_box: VBoxContainer = $MainLayout/SidebarScroll/Sidebar/PaletteBox
+
+# P3A Slice A, Task A2: follow camera + HUD separation live in NEW script
+# files (region lock); this controller only wires them. No class_name on
+# those scripts (parallel A1 must not collide); preload consts instead.
+const FollowCamera = preload("res://scripts/follow_camera.gd")
+const HudPanels = preload("res://scripts/hud_panels.gd")
+
+# Camera state: cropped AtlasTexture views over the live bridge textures
+# (TextureRect stack stays for P3A — no world-space refactor). The view
+# region is the single source of truth for display mapping below.
+var _camera = null
+var _base_atlas: AtlasTexture
+var _water_atlas: AtlasTexture
+var _view_region: Rect2i = Rect2i(0, 0, 0, 0)
+# Debug panel (sim-control buttons, hidden from the play view).
+var _debug_panel: PopupPanel
 
 var current_material: int = AshfallWorld.MATERIAL_SAND
 var brush_size: int = 4
@@ -98,23 +117,27 @@ func _ready() -> void:
 	water_display.texture = world.get_water_texture()
 	_build_palette()
 	_update_hud()
+	_init_camera()
 	_update_marker()
+	_refresh_group3_labels()
+	_init_hud_separation()
 
 func _process(delta: float) -> void:
 	# Frame-time EMA for the perf HUD (cheap, every frame).
 	if delta > 0.0:
 		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
 	_move_player(delta)
+	_update_camera(delta)
 	_update_marker()
 	# Group 3, Task B7: drawing state tracks the physical buttons, so a
 	# release outside the drawing control still ends the stroke.
 	if is_drawing and not (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)):
 		is_drawing = false
 	# Group 3, Task B4: exactly one present flush per rendered frame, then
-	# rebind both layers (bridge recovery replaces texture objects).
+	# rebind both layers through the camera atlases (rebind covers
+	# bridge-side presentation recovery, which replaces texture objects).
 	world.flush_present()
-	texture_display.texture = world.get_world_texture()
-	water_display.texture = world.get_water_texture()
+	_refresh_textures()
 	if _transient_ttl > 0.0:
 		_transient_ttl -= delta
 		if _transient_ttl <= 0.0:
@@ -137,6 +160,102 @@ func _set_transient(msg: String) -> void:
 func _respawn_player() -> void:
 	var spawn: Vector2i = world.get_player_spawn()
 	player_pos = Vector2(float(spawn.x), float(spawn.y))
+	_snap_camera()
+
+func _world_size() -> Vector2i:
+	return Vector2i(world.get_world_width(), world.get_world_height())
+
+func _init_camera() -> void:
+	# P3A A2: the TextureRects show cropped AtlasTexture views over the
+	# live bridge textures. The center-sample-only water shader (no
+	# neighborhood reads) is crop-safe; plain texture() keeps working
+	# because AtlasTexture remaps UVs to the region.
+	_camera = FollowCamera.new()
+	_base_atlas = AtlasTexture.new()
+	_water_atlas = AtlasTexture.new()
+	_refresh_textures()
+	texture_display.texture = _base_atlas
+	water_display.texture = _water_atlas
+	_view_region = _camera.snap_to(player_pos, _world_size(), texture_display.size)
+	_apply_view_region()
+
+func _update_camera(delta: float) -> void:
+	if _camera == null:
+		return
+	var region: Rect2i = _camera.update(delta, player_pos, _world_size(), texture_display.size)
+	if region != _view_region:
+		_view_region = region
+		_apply_view_region()
+
+func _snap_camera() -> void:
+	# Player teleports (spawn/reset/load): jump-cut, never smooth-pan.
+	if _camera == null:
+		return
+	_view_region = _camera.snap_to(player_pos, _world_size(), texture_display.size)
+	_apply_view_region()
+
+func _zoom_camera(dir: int) -> void:
+	if _camera == null:
+		return
+	_view_region = _camera.zoom_step(dir, _world_size(), texture_display.size)
+	_apply_view_region()
+
+func _toggle_follow_camera() -> void:
+	if _camera == null:
+		return
+	_view_region = _camera.set_follow(not _camera.follow_enabled, player_pos, _world_size(), texture_display.size)
+	_apply_view_region()
+	_set_transient("CAM: FOLLOW ON" if _camera.follow_enabled else "CAM: FOLLOW OFF")
+
+func _apply_view_region() -> void:
+	# AtlasTexture.region is Rect2; the Rect2i stays the source of truth.
+	_base_atlas.region = Rect2(_view_region)
+	_water_atlas.region = Rect2(_view_region)
+
+func _refresh_textures() -> void:
+	# Rebind through the atlases so bridge recovery (replaced texture
+	# objects) keeps working; skip no-op assignments.
+	var base_tex := world.get_world_texture()
+	if _base_atlas == null:
+		texture_display.texture = base_tex
+		water_display.texture = world.get_water_texture()
+		return
+	if _base_atlas.atlas != base_tex:
+		_base_atlas.atlas = base_tex
+	var water_tex := world.get_water_texture()
+	if _water_atlas.atlas != water_tex:
+		_water_atlas.atlas = water_tex
+
+func _init_hud_separation() -> void:
+	# P3A A2: sim-control buttons leave the play sidebar for a hidden
+	# debug panel. Play HUD (InfoBox), palette, title, and help stay.
+	var sidebar: VBoxContainer = get_node_or_null("MainLayout/SidebarScroll/Sidebar")
+	if sidebar == null:
+		return
+	_debug_panel = HudPanels.build_debug_panel(self, sidebar)
+	var opener: Button = sidebar.get_node_or_null(NodePath(HudPanels.OPENER_NAME))
+	if opener != null:
+		opener.pressed.connect(_toggle_debug_panel)
+
+func _toggle_debug_panel() -> void:
+	HudPanels.toggle_debug_panel(_debug_panel)
+
+func _refresh_group3_labels() -> void:
+	# Group-3 leftover that bites (fixed here in code — A2 region lock
+	# forbids scene edits): the step key moved S -> N, but the button label
+	# and help text still said S. Deliberately LEFT ALONE (verified, no
+	# bite): S move-down vs N single-step dispatch, outside-image click
+	# rejection, focus-loss drawing reset, marker throttle — all still
+	# correct, now camera-aware where mapping is involved.
+	var sidebar: Node = get_node_or_null("MainLayout/SidebarScroll/Sidebar")
+	if sidebar == null:
+		return
+	var step_btn: Button = sidebar.get_node_or_null("StepBtn")
+	if step_btn != null:
+		step_btn.text = "[N] Single Step"
+	var help_label: Label = sidebar.get_node_or_null("HelpText")
+	if help_label != null:
+		help_label.text = "Controls:\n• WASD / Arrows: Move avatar (stone blocks)\n• Left Click/Drag: Paint material\n• Right Click: Erase cells\n• Wheel over world: Zoom camera\n• E: Dig sand/water at avatar\n• F: Place material at avatar\n• Space: Toggle simulation\n• N: Step single tick\n• C: Follow camera on/off\n• F1: Debug panel (sim controls)\n• R: Reset level\n• F5 / F9: Save / Load"
 
 func _box_passable(px: float, py: float) -> bool:
 	var x1: int = floori(px - PLAYER_HALF_W)
@@ -280,6 +399,7 @@ func _load_game() -> void:
 		_set_transient("LOAD FAILED")
 		return
 	player_pos = Vector2(px, py)
+	_snap_camera()
 	# Stable-name remap: unknown names fall back to the first table material
 	# with a transient notice (UX fallback, not sim integrity).
 	current_material = _material_id_for_name(mat_name)
@@ -317,40 +437,19 @@ func _update_hud() -> void:
 	player_label.text = "(%d, %d)" % [roundi(player_pos.x), roundi(player_pos.y)]
 
 func _display_scale() -> Vector2:
-	# KEEP_ASPECT_CENTERED letterbox: uniform scale plus centered offset.
-	var cs: Vector2 = texture_display.size
-	var world_w: float = float(world.get_world_width())
-	var world_h: float = float(world.get_world_height())
-	if cs.x <= 0.0 or cs.y <= 0.0:
-		return Vector2.ZERO
-	var s: float = minf(cs.x / world_w, cs.y / world_h)
-	return Vector2(s, s)
+	# P3A A2: KEEP_ASPECT_CENTERED letterbox for the CURRENT camera view
+	# (was: whole world). Follow-off shows the full grid, pixel-identical
+	# to the old fit math.
+	return FollowCamera.view_scale(texture_display.size, _view_region)
 
 func _display_offset(scale: Vector2) -> Vector2:
-	var cs: Vector2 = texture_display.size
-	return Vector2(
-		(cs.x - float(world.get_world_width()) * scale.x) * 0.5,
-		(cs.y - float(world.get_world_height()) * scale.y) * 0.5)
+	return FollowCamera.view_offset(texture_display.size, _view_region, scale)
 
 func _world_to_display(cell: Vector2) -> Vector2:
-	var s := _display_scale()
-	var o := _display_offset(s)
-	return Vector2(o.x + cell.x * s.x, o.y + cell.y * s.y)
+	return FollowCamera.world_to_screen(cell, texture_display.size, _view_region)
 
 func _display_to_world(local_pos: Vector2) -> Vector2i:
-	var s := _display_scale()
-	var o := _display_offset(s)
-	var world_w: int = world.get_world_width()
-	var world_h: int = world.get_world_height()
-	if s.x <= 0.0:
-		return Vector2i(-1, -1)
-	# Group 3, Task B7: letterbox clicks OUTSIDE the image are rejected
-	# pre-clamp (clamping painted border cells from the margins).
-	var fx: float = (local_pos.x - o.x) / s.x
-	var fy: float = (local_pos.y - o.y) / s.y
-	if fx < 0.0 or fy < 0.0 or fx >= float(world_w) or fy >= float(world_h):
-		return Vector2i(-1, -1)
-	return Vector2i(int(floor(fx)), int(floor(fy)))
+	return FollowCamera.screen_to_world(local_pos, texture_display.size, _view_region, _world_size())
 
 func _update_marker() -> void:
 	# Avatar box in display space (same letterbox as the world texture).
@@ -393,6 +492,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_dig_at_player()
 			KEY_F:
 				_place_at_player()
+			KEY_C:
+				_toggle_follow_camera()
+			KEY_F1:
+				_toggle_debug_panel()
 			KEY_F5:
 				_save_game()
 			KEY_F9:
@@ -443,6 +546,10 @@ func _on_world_texture_gui_input(event: InputEvent) -> void:
 			draw_material = AshfallWorld.MATERIAL_AIR
 			if is_drawing:
 				_draw_at(event.position)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.is_pressed():
+			_zoom_camera(1)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.is_pressed():
+			_zoom_camera(-1)
 	elif event is InputEventMouseMotion and is_drawing:
 		_draw_at(event.position)
 
