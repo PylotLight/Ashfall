@@ -1,4 +1,6 @@
 .godot/
 build/
+build-fuzz/
+build-san/
 bin/
 .DS_Store
