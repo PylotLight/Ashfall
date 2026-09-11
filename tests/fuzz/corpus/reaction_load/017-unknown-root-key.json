@@ -1,0 +1,1 @@
+{"version": 1, "metadata": {}, "reactions": [{"name": "burnout", "probability": 8, "reactants": [{"material": "fire"}], "products": [{"material": "air"}]}]}
