@@ -109,6 +109,15 @@ if(ASHFALL_BUILD_TESTS)
     add_executable(oracle_record bench/oracle_record.cpp)
     target_link_libraries(oracle_record PRIVATE ashfall_sim)
     target_include_directories(oracle_record PRIVATE tests)
+    # F4 hash-verdict probe harness: measures FlatMap probe distributions on
+    # the review's workloads. Manual tool, NOT in ctest.
+    add_executable(bench_hash_probes bench/bench_hash_probes.cpp)
+    target_link_libraries(bench_hash_probes PRIVATE ashfall_sim)
+    if(MSVC)
+        target_compile_options(bench_hash_probes PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(bench_hash_probes PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
 endif()
 
 # GDExtension bridge using godot-cpp
