@@ -7,9 +7,10 @@ extends Control
 # API (init_world/fill_rect/set_cell/step) — no engine, bridge, or data
 # changes. Content: irregular rock silhouette with stone lining, background
 # rock mass (distinct wall tones), wood platform structure, water reservoir,
-# oil + wood combustible area with a fresh fire bed, warm light source
-# (PointLight2D + additive glow decal over the fire pit), character-sized
-# player placeholder, stable pixel scaling (nearest world, letterboxed).
+# oil + wood combustible area with a fresh fire bed, warm light pool over
+# the fire pit (textured PointLight2D budget-6 cluster rig + additive glow
+# decal), character-sized player placeholder, stable pixel scaling
+# (nearest world, letterboxed).
 #
 # Resolution ladder (P3A task A3, review 12.2) for this scene:
 #   sim           512x512 cells (1 cell = 1 sim unit, authoritative)
@@ -32,6 +33,11 @@ extends Control
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
 @onready var water_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WaterOverlay
 @onready var cave_light: PointLight2D = $MainLayout/ViewportContainer/WorldStack/CaveLight
+@onready var cluster_light_1: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight1
+@onready var cluster_light_2: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight2
+@onready var cluster_light_3: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight3
+@onready var cluster_light_4: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight4
+@onready var cluster_light_5: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight5
 @onready var fire_glow: TextureRect = $MainLayout/ViewportContainer/WorldStack/FireGlow
 @onready var player_marker: ColorRect = $MainLayout/ViewportContainer/WorldStack/PlayerMarker
 @onready var tick_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/TickValue
@@ -80,7 +86,12 @@ var _marker_mat: int = -1
 # Mirrors main_controller.gd; the helpers are scene-agnostic (NodePath-guarded).
 const FollowCamera = preload("res://scripts/follow_camera.gd")
 const HudPanels = preload("res://scripts/hud_panels.gd")
+const ClusterLights = preload("res://scripts/light_cluster_manager.gd")
+const MatVisuals = preload("res://scripts/material_visuals.gd")
 var _camera = null
+var _cluster_mgr = null
+var _emissive: Dictionary = {}
+var _light_nodes: Array = []
 var _base_atlas: AtlasTexture
 var _water_atlas: AtlasTexture
 var _view_region: Rect2i = Rect2i(0, 0, 0, 0)
@@ -112,6 +123,7 @@ func _ready() -> void:
 	_build_palette()
 	_update_hud()
 	_init_camera()
+	_init_cluster_lights()
 	_update_marker()
 	_init_hud_separation()
 
@@ -198,7 +210,7 @@ func _process(delta: float) -> void:
 	_move_player(delta)
 	_update_camera(delta)
 	_update_marker()
-	_update_light()
+	_update_light(delta)
 	if is_drawing and not (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)):
 		is_drawing = false
 	world.flush_present()
@@ -492,13 +504,63 @@ func _update_marker() -> void:
 	else:
 		material_label.text = world.get_material_name(current_material).capitalize()
 
-func _update_light() -> void:
-	# Warm source tracks the fire pit in display space (same letterbox as
-	# the world texture). C2 will replace this single light with clustered
-	# lights; the anchor math stays.
+func _update_light(delta: float) -> void:
+	# Warm pool over the fire pit: the glow decal holds the FIRE_ANCHOR
+	# math every frame (that anchor stays), while the fixed-budget
+	# PointLight2D rig (slot 0 seeded at the anchor) is eased by the
+	# Stage-A cluster manager toward live emissive regions. Lights are
+	# presentation-only — the sim never sees them.
 	var center := _world_to_display(FIRE_ANCHOR)
-	cave_light.position = center
 	fire_glow.position = center - fire_glow.size * 0.5
+	if _cluster_mgr == null or _light_nodes.is_empty():
+		cave_light.position = center
+		return
+	var slots: Array = _cluster_mgr.update(world, delta)
+	for i in _light_nodes.size():
+		var lamp: PointLight2D = _light_nodes[i]
+		if i < slots.size():
+			var s: Dictionary = slots[i]
+			lamp.position = _world_to_display(s["pos"] as Vector2)
+			lamp.color = s["color"] as Color
+			lamp.energy = float(s["energy"])
+		else:
+			lamp.energy = 0.0
+
+## P3A Slice C, task C2: cluster input comes from the presentation-owned
+## material_visuals.json emission fields (never sim temperature, never RGB
+## recovery — hot water stays dark because its emission strength is 0).
+## Rejected/missing data falls back to the built-in fire/lava emission so
+## the warm pool survives bad data; boot never fails here.
+func _init_cluster_lights() -> void:
+	_light_nodes = [cave_light, cluster_light_1, cluster_light_2,
+		cluster_light_3, cluster_light_4, cluster_light_5]
+	var ids: PackedInt32Array = world.get_material_ids()
+	var names: Array = []
+	var id_by_name := {}
+	for id in ids:
+		var mat_name: String = world.get_material_name(id)
+		names.append(mat_name)
+		id_by_name[mat_name] = id
+	var res: Dictionary = MatVisuals.load_from_file("res://data/material_visuals.json", names)
+	_emissive.clear()
+	var profiles: Dictionary = res["profiles"]
+	for key in profiles.keys():
+		if not id_by_name.has(key):
+			continue
+		var prof: Dictionary = profiles[key]
+		var em: Dictionary = prof["emission"]
+		if float(em["strength"]) > 0.0:
+			_emissive[int(id_by_name[key])] = {
+				"color": em["color"] as Color,
+				"strength": float(em["strength"]),
+			}
+	if not bool(res["ok"]):
+		push_warning("cave_benchmark: material_visuals rejected (%s)" % String(res["error"]))
+	if _emissive.is_empty():
+		_emissive[AshfallWorld.MATERIAL_FIRE] = {"color": Color(1.0, 0.48, 0.0), "strength": 2.5}
+		_emissive[AshfallWorld.MATERIAL_LAVA] = {"color": Color(1.0, 0.27, 0.0), "strength": 1.5}
+	_cluster_mgr = ClusterLights.new()
+	_cluster_mgr.setup(_emissive, FIRE_ANCHOR, Color(1.0, 0.55, 0.25))
 
 func _on_focus_lost() -> void:
 	is_drawing = false

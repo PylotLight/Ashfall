@@ -29,6 +29,18 @@ fill_to = Vector2(1, 0.5)
 [sub_resource type="CanvasItemMaterial" id="CanvasItemMaterial_glow"]
 blend_mode = 1
 
+[sub_resource type="Gradient" id="Gradient_lightfall"]
+offsets = PackedFloat32Array(0, 0.45, 1)
+colors = PackedColorArray(1, 1, 1, 1, 0.5, 0.5, 0.5, 0.45, 0, 0, 0, 0)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_lightfall"]
+gradient = SubResource("Gradient_lightfall")
+width = 256
+height = 256
+fill = 1
+fill_from = Vector2(0.5, 0.5)
+fill_to = Vector2(1, 0.5)
+
 [node name="CaveBenchmark" type="Control"]
 layout_mode = 3
 anchors_preset = 15
@@ -39,7 +51,7 @@ grow_vertical = 2
 script = ExtResource("1_cave")
 metadata/sim = "512x512 cells, authoritative"
 metadata/world_render = "512x512 px textures, 1px per cell, nearest"
-metadata/lighting = "canvas-resolution 2D light + glow decal, at-or-below display"
+metadata/lighting = "clustered 2D lights (budget 6, textured falloff), at-or-below display"
 metadata/display = "1280x720 viewport, KEEP_ASPECT_CENTERED letterbox upscale"
 metadata/ui = "same-canvas vector controls, resolution-independent, crisp"
 
@@ -56,7 +68,7 @@ mouse_filter = 2
 color = Color(0.05, 0.04, 0.05, 1)
 
 [node name="CanvasModulate" type="CanvasModulate" parent="."]
-color = Color(0.82, 0.8, 0.85, 1)
+color = Color(0.75, 0.73, 0.8, 1)
 
 [node name="MainLayout" type="HBoxContainer" parent="."]
 layout_mode = 1
@@ -116,9 +128,40 @@ offset_right = 220.0
 offset_bottom = 220.0
 
 [node name="CaveLight" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
 color = Color(1, 0.55, 0.25, 1)
 energy = 1.2
-texture_scale = 6.0
+texture_scale = 2.5
+
+[node name="ClusterLight1" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
+color = Color(1, 0.55, 0.25, 1)
+energy = 0.0
+texture_scale = 2.5
+
+[node name="ClusterLight2" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
+color = Color(1, 0.55, 0.25, 1)
+energy = 0.0
+texture_scale = 2.5
+
+[node name="ClusterLight3" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
+color = Color(1, 0.55, 0.25, 1)
+energy = 0.0
+texture_scale = 2.5
+
+[node name="ClusterLight4" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
+color = Color(1, 0.55, 0.25, 1)
+energy = 0.0
+texture_scale = 2.5
+
+[node name="ClusterLight5" type="PointLight2D" parent="MainLayout/ViewportContainer/WorldStack"]
+texture = SubResource("GradientTexture2D_lightfall")
+color = Color(1, 0.55, 0.25, 1)
+energy = 0.0
+texture_scale = 2.5
 
 [node name="PlayerMarker" type="ColorRect" parent="MainLayout/ViewportContainer/WorldStack"]
 layout_mode = 1
