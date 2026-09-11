@@ -12,6 +12,7 @@
 // steady-state movement path uses clear+swap of scratch tables instead of
 // erase.
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
