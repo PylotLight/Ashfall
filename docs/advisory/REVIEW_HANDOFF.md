@@ -64,20 +64,24 @@ and verified — all 7 suites green (sim tests, P0/P1/P2 headless verifies, visu
 
 All layers reviewed. Execution order from the backlogs:
 
-1. **Group 1 — instrument + contracts, no behavior change:** DONE (`da5e170`
-   harness + phase/probe counters + F1 + S2 + bridge timer split;
-   test/docs commit below for T1–T6 + golden bytes + contracts doc).
-2. **Group 2 — correctness, versioned:** heat-transport ownership (+ cell-owned
-   heat), reactant exclusivity, validator parity, save duplicates + policy,
-    transactional output, `find_or_insert`, commit-phase safety. Status 2026-09-10:
-    DONE (F/V/R/S/H committed; T pins green, uncommitted — integrator commits).
-3. **Group 3 — hardening + formats:** limits everywhere, strict unknown keys, v3
-   design→implement, P1–P4 tests, sweeps, presentation tests §F 1–7. Status
-   2026-09-10: DONE (J+S+B committed; T battery green — integrator commits).
-4. **Group 4 — measured optimizations:** runtime table, scratch sizing, compiled
-   matching, static fast path, sparse conduction, changed-position diff.
-5. **Group 5 — storage migration:** oracle + differential replay + §7 additions.
-   Status 2026-09-11: DONE (M chunk-authoritative `607eefd`; M3 pins + §7 gaps +
-   F2 + bench E green, uncommitted — integrator commits).
-6. **Group 6 — fuzzing + CI:** parser/serializer targets, sanitizers, corpus,
-   cross-arch replay hashes.
+1. **Group 1 — instrument + contracts:** DONE (`da5e170` harness/counters/F1/S2/bridge
+   timers; `656e938` T1–T6 + golden bytes + contracts doc).
+2. **Group 2 — correctness, versioned:** DONE (`ad48a29` R pins → `107a760` find_or_insert
+   → `1cbcee7` v2-strict + commit safety → `8bcd5fd` loader validators → `8d64884`
+   cell-owned heat + `405baf7` ambient fast path → `1fc2458` pins; P1 still 51840).
+3. **Group 3 — hardening + formats:** DONE (`e8cf03a` JSON P1/P2/P4/P7/P8 + hyphen
+   identifiers → `2dc9c79` save v3 → `41762cb` presentation/cadence/host →
+   `efa3200` batteries + v3 goldens).
+4. **Group 4 — measured optimizations:** DONE (`e6052f5` oracle → `2758afb` runtime
+   table + scratch/reserves → `96bc8b8` tile repaint 8.7× → `b891e65` compiled
+   matching → `0a3136e` static fast path → `ae0cc73` sparse conduction + reconcile).
+   Closing bench: A 3.46 / B 1.68 / C 0.24 / D 0.00 ms/step.
+5. **Group 5 — storage migration:** DONE (`29e3673` vsync probe V; `607eefd`
+   chunk-authoritative cells + shift/mask math (1024² dynamics −7% vs FlatMap);
+   `ab8325e` §7 gaps + F2 + bench E).
+6. **Group 6 — fuzzing + CI:** PLANNED, runbook ready at
+   `~/.claude/plans/survival-rpg-mvp/2026-09-10-group6-fuzzing-ci.md`. Rounds:
+   F0 toolchain+wiring alone → F1/F2/F3 targets+corpus + F4 sanitizer suite +
+   F5 CI + F6 differential (parallel) → slice commits. Notes: Apple Clang has no
+   libFuzzer (LLVM clang via brew required); no `.github/` yet (greenfield);
+   ASan/UBSan verified working locally.
