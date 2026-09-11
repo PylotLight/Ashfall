@@ -88,3 +88,10 @@ All layers reviewed. Execution order from the backlogs:
    Notes: LLVM clang 23 via brew required (Apple Clang can't link libFuzzer);
    run fuzzers against /tmp corpus copies (never the repo dir); CI job
    (.github/workflows) deferred — no push planned.
+7. **Post-P4A close-outs (2026-09-11):** F4 hash verdict MEASURED (`b05391a`
+   `bench/bench_hash_probes`, not in ctest) — dense @50% hit p95=3 meets the
+   review criterion exactly, production runs ~25% (p95=2); `{64i+ox}` clustering
+   real but bounded (max 11) and synthetic-only; live-world p95 1–2. Verdict:
+   KEEP, no candidates evaluated. Clamp asymmetry documented at
+   `set_temperature` (`6e6cef0`). Test-file audit still needs the external
+   reviewer; MT/GPU/pressure/Option-B/parser-replacement explicitly deferred.
