@@ -76,6 +76,10 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_world_image"), &AshfallWorld::get_world_image);
     ClassDB::bind_method(D_METHOD("get_water_texture"), &AshfallWorld::get_water_texture);
     ClassDB::bind_method(D_METHOD("get_water_image"), &AshfallWorld::get_water_image);
+    ClassDB::bind_method(D_METHOD("get_identity_texture"), &AshfallWorld::get_identity_texture);
+    ClassDB::bind_method(D_METHOD("get_identity_image"), &AshfallWorld::get_identity_image);
+    ClassDB::bind_method(D_METHOD("get_seed_texture"), &AshfallWorld::get_seed_texture);
+    ClassDB::bind_method(D_METHOD("get_seed_image"), &AshfallWorld::get_seed_image);
     ClassDB::bind_method(D_METHOD("get_last_step_ms"), &AshfallWorld::get_last_step_ms);
     ClassDB::bind_method(D_METHOD("get_world_width"), &AshfallWorld::get_world_width);
     ClassDB::bind_method(D_METHOD("get_world_height"), &AshfallWorld::get_world_height);
@@ -146,11 +150,16 @@ void AshfallWorld::init_world(int p_width, int p_height) {
     cell_buffer_.assign(total_cells, ashfall::kAir);
 
     fill_background_pixels();
+    fill_identity_seed_background();
 
     world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     world_texture_ = ImageTexture::create_from_image(world_image_);
     water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
     water_texture_ = ImageTexture::create_from_image(water_image_);
+    identity_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    identity_texture_ = ImageTexture::create_from_image(identity_image_);
+    seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
+    seed_texture_ = ImageTexture::create_from_image(seed_image_);
     force_full_repaint_ = false;
     world_.clear_dirty_chunks();
     step_accumulator_ = 0.0;
@@ -413,6 +422,10 @@ void AshfallWorld::debug_drop_presentation() {
     world_texture_.unref();
     water_image_.unref();
     water_texture_.unref();
+    identity_image_.unref();
+    identity_texture_.unref();
+    seed_image_.unref();
+    seed_texture_.unref();
 }
 
 std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
@@ -436,13 +449,21 @@ std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
 }
 
 bool AshfallWorld::presentation_resources_valid() const {
-    // B2: the null/degraded check covers BOTH layers (base + water).
+    // B2: the null/degraded check covers ALL layers (base + water + identity
+    // + seed). Seed bytes never change with sim, but the objects still need
+    // the same lifetime/validity discipline.
     if (world_image_.is_null() || world_texture_.is_null()) return false;
     if (water_image_.is_null() || water_texture_.is_null()) return false;
+    if (identity_image_.is_null() || identity_texture_.is_null()) return false;
+    if (seed_image_.is_null() || seed_texture_.is_null()) return false;
     if (world_image_->get_width() != world_width_ || world_image_->get_height() != world_height_) return false;
     if (water_image_->get_width() != world_width_ || water_image_->get_height() != world_height_) return false;
+    if (identity_image_->get_width() != world_width_ || identity_image_->get_height() != world_height_) return false;
+    if (seed_image_->get_width() != world_width_ || seed_image_->get_height() != world_height_) return false;
     const int64_t expect = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_) * 4;
     if (pixel_bytes_.size() != expect || water_pixel_bytes_.size() != expect) return false;
+    const int64_t expect_ids = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    if (identity_bytes_.size() != expect_ids || seed_bytes_.size() != expect_ids) return false;
     return true;
 }
 
@@ -467,6 +488,33 @@ void AshfallWorld::fill_background_pixels() {
     }
 }
 
+void AshfallWorld::fill_identity_seed_background() {
+    // P3A B2: identity starts as air everywhere; seed is a pure function of
+    // coords (stable across frames, ticks, and boots by construction).
+    const int64_t total_cells = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    identity_bytes_.resize(total_cells);
+    seed_bytes_.resize(total_cells);
+    uint8_t *id = identity_bytes_.ptrw();
+    uint8_t *sd = seed_bytes_.ptrw();
+    for (int y = 0; y < world_height_; ++y) {
+        for (int x = 0; x < world_width_; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+            id[i] = ashfall::kAir;
+            sd[i] = stable_seed(x, y);
+        }
+    }
+}
+
+std::uint8_t AshfallWorld::stable_seed(int x, int y) {
+    // Same hash family as the painter grain (deterministic, no RNG state),
+    // full-byte output instead of the grain's -6..+6 range.
+    std::uint32_t h = static_cast<std::uint32_t>(x) * 0x9E3779B1u;
+    h ^= static_cast<std::uint32_t>(y) * 0x85EBCA77u + 0x9E3779B9u + (h << 6) + (h >> 2);
+    h ^= h >> 13;
+    h ^= h >> 7;
+    return static_cast<std::uint8_t>(h & 0xFFu);
+}
+
 void AshfallWorld::recover_presentation_resources() {
     // B2: recreate presentation objects + full repaint from the CURRENT
     // world. Zero sim mutation: world_, its tick, cells, temps, and table are
@@ -477,10 +525,15 @@ void AshfallWorld::recover_presentation_resources() {
         static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
     cell_buffer_.assign(total_cells, ashfall::kAir);
     fill_background_pixels();
+    fill_identity_seed_background();
     world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     world_texture_ = ImageTexture::create_from_image(world_image_);
     water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
     water_texture_ = ImageTexture::create_from_image(water_image_);
+    identity_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    identity_texture_ = ImageTexture::create_from_image(identity_image_);
+    seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
+    seed_texture_ = ImageTexture::create_from_image(seed_image_);
     force_full_repaint_ = true;
 }
 
@@ -581,6 +634,10 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
     const auto paint_t0 = std::chrono::steady_clock::now();
     uint8_t *w = pixel_bytes_.ptrw();
     uint8_t *water_w = water_pixel_bytes_.ptrw();
+    // P3A B2: identity upload rides the same repaint set as the CPU paint
+    // (no extra world queries — mat is already in hand per cell). Seed bytes
+    // are coordinate-pure and never rewritten here.
+    uint8_t *id_w = identity_bytes_.ptrw();
     std::uint64_t painted_pixels = 0;
     std::uint64_t logical_cells = 0;
 
@@ -625,6 +682,7 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
                     depth = height;
                 }
                 paint_cell(x, y, mat, depth, surface, w + i * 4, water_w + i * 4);
+                id_w[i] = static_cast<std::uint8_t>(mat);
                 ++painted_pixels;
             }
         }
@@ -689,6 +747,8 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
                     }
                     const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
                     paint_cell(x, y, mat, depth, surface, w + offset, water_w + offset);
+                    id_w[static_cast<std::size_t>(y * world_width_ + x)] =
+                        static_cast<std::uint8_t>(mat);
                     ++painted_pixels;
                     ++logical_cells;
                 }
@@ -704,12 +764,15 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
     const auto set_data_t0 = std::chrono::steady_clock::now();
     world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    identity_image_->set_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
     last_present_.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
     const auto submit_t0 = std::chrono::steady_clock::now();
     world_texture_->update(world_image_);
     water_texture_->update(water_image_);
+    identity_texture_->update(identity_image_);
+    // Seed is coordinate-pure (init/recover only): no per-flush upload.
     last_present_.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
-    last_present_.texture_submits += 2; // base + water update() calls
+    last_present_.texture_submits += 3; // base + water + identity update() calls
     ++last_present_.present_flushes;
     force_full_repaint_ = false;
     // Presentation consumed the dirty set.
@@ -732,6 +795,22 @@ Ref<ImageTexture> AshfallWorld::get_water_texture() const {
 
 Ref<Image> AshfallWorld::get_water_image() const {
     return water_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_identity_texture() const {
+    return identity_texture_;
+}
+
+Ref<Image> AshfallWorld::get_identity_image() const {
+    return identity_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_seed_texture() const {
+    return seed_texture_;
+}
+
+Ref<Image> AshfallWorld::get_seed_image() const {
+    return seed_image_;
 }
 
 } // namespace godot

@@ -52,6 +52,20 @@ private:
     PackedByteArray water_pixel_bytes_;
     Ref<Image> water_image_;
     Ref<ImageTexture> water_texture_;
+    // P3A B2: shader-side profile-evaluation inputs (additive presentation
+    // plumbing; sim untouched). identity: R8, one byte per cell = stable
+    // material id (categorical — must be sampled NEAREST with no mipmaps and
+    // decoded with round(v*255); R8 has no sRGB variant so bytes survive
+    // sampling unmodified). seed: R8, stable per-cell variation seed
+    // hash(x,y), filled once per init/recover (never changes with sim).
+    // Liquid coverage filtering stays on the separate linear water layer;
+    // identity is never filtered for coverage.
+    PackedByteArray identity_bytes_;
+    Ref<Image> identity_image_;
+    Ref<ImageTexture> identity_texture_;
+    PackedByteArray seed_bytes_;
+    Ref<Image> seed_image_;
+    Ref<ImageTexture> seed_texture_;
     // Renderer cache: base color, precomputed deep-shade color, movement
     // class, and known-flag per id, refreshed from the world table on
     // init/load. Unknown ids default to background/static so stale cells
@@ -157,6 +171,13 @@ public:
     Ref<Image> get_world_image() const;
     Ref<ImageTexture> get_water_texture() const;
     Ref<Image> get_water_image() const;
+    // P3A B2 identity/seed views for the profile shader (presentation only;
+    // tick/phase reach the shader as GDScript-fed uniforms, see
+    // scripts/material_profile_glue.gd — get_tick() already exists).
+    Ref<ImageTexture> get_identity_texture() const;
+    Ref<Image> get_identity_image() const;
+    Ref<ImageTexture> get_seed_texture() const;
+    Ref<Image> get_seed_image() const;
     double get_last_step_ms() const { return last_step_ms_; }
     int get_world_width() const { return world_width_; }
     int get_world_height() const { return world_height_; }
@@ -171,7 +192,7 @@ private:
         double paint_ms = 0.0; // ptrw() acquire + per-pixel paint loops
         double set_data_ms = 0.0; // Image::set_data() x2 (CPU upload staging)
         double submit_ms = 0.0; // ImageTexture::update() x2 (GPU submit)
-        std::uint64_t texture_submits = 0; // cumulative update() calls (2 per painted flush: base + water)
+        std::uint64_t texture_submits = 0; // cumulative update() calls (3 per painted flush: base + water + identity)
         std::uint64_t present_flushes = 0; // cumulative flush_present() calls that painted (updates-per-frame source)
         std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
         std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
@@ -189,6 +210,11 @@ private:
     // Zero sim mutation (Group 3, Task B2): never resets or loads the world.
     void recover_presentation_resources();
     void fill_background_pixels();
+    void fill_identity_seed_background();
+    // Stable per-cell variation seed: pure function of coords (identical
+    // every frame/boot; never advances with ticks — Slice D animates via
+    // tick/phase uniforms, never by mutating this).
+    [[nodiscard]] static std::uint8_t stable_seed(int x, int y);
     [[nodiscard]] bool validate_material_id(int p_material_id) const;
 };
 
