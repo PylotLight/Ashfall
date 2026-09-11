@@ -2227,6 +2227,11 @@ bool SimulationWorld::set_temperature(CellPosition position, int temperature) {
     // erased otherwise (true). Not [[nodiscard]] so existing call sites
     // compile unchanged.
     if (cell(position) == kAir) return false;
+    // Clamp is asymmetric by design: -32767..32767 reserves INT16_MIN as the
+    // "no stored temp" sentinel width (erase-on-zero keeps temps_ free of
+    // ambient entries); full int16 range would make -32768 storable but
+    // undistinguishable from unset in serialized deltas. Reviewer decision in
+    // docs/advisory/PERF_TASK_BACKLOG.md (comment-level batch): document, keep.
     const int clamped = std::clamp(temperature, -32767, 32767);
     if (clamped == 0) {
         temps_.erase(position);
