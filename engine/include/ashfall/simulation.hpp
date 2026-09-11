@@ -100,7 +100,7 @@ public:
     void fill_rect(CellPosition first, CellPosition last, MaterialId material);
     void step();
 
-    [[nodiscard]] std::size_t occupied_cell_count() const noexcept { return cells_.size(); }
+    [[nodiscard]] std::size_t occupied_cell_count() const noexcept { return total_occupied_; }
     // (Group 4, Task O4:) exact count of non-static cells (movement !=
     // Static), maintained on every mutation path; the step() fast-path hook
     // reads it. Exposed for the counter test only.
@@ -181,8 +181,10 @@ public:
 private:
     // Flat open-addressing storage for the hot path: step() performs ~100k
     // inserts/lookups per tick at 512x512, where unordered_map node traffic
-    // dominates. cells_ is authoritative and persistent; the scratch tables
-    // are cleared and reused every tick (never reallocated in steady state).
+    // dominates. (Group 5, Task M:) the persistent authoritative cell store
+    // is the chunk directory (chunks_ + chunk_occupancy_ + total_occupied_);
+    // the scratch tables below are cleared and reused every tick (never
+    // reallocated in steady state).
     using FlatCells = FlatMap<CellPosition, MaterialId, CellPositionHash>;
     using FlatMarks = FlatMap<CellPosition, std::uint8_t, CellPositionHash>;
     using DynCells = std::vector<std::pair<CellPosition, MaterialId>>;
@@ -198,6 +200,36 @@ private:
     void write_chunk_cell(CellPosition position, MaterialId material_id);
     void write_chunk_cell_deferred(
         CellPosition position, MaterialId material_id, std::set<CellPosition>* maybe_emptied);
+    // (Group 5, Task M, Stage 1:) chunk-backed read/query helpers. Same
+    // math as write_chunk_cell (chunk_pos_of + positive_modulo +
+    // chunk_index); missing chunk or air slot reads as kAir. The chunk
+    // directory is authoritative — these were differential-proven first.
+    // (Stage 5:) header-inlining was tried for these (movement/reconcile
+    // probe volume) and reverted: measured worse on the 1024² micro
+    // (263 vs 252 ms/step) and B (2.40 vs 2.25) — loop bloat beats call
+    // overhead here. Outlined definitions live in the .cpp.
+    [[nodiscard]] MaterialId cell_from_chunks(CellPosition position) const;
+    [[nodiscard]] bool contains_in_chunks(CellPosition position) const;
+    // (Group 5, Task M, Stage 3:) chunk-walk iteration: std::map key order
+    // + row-major within each dense vector. Only the VISITED SET feeds
+    // consumers — classify is totally resorted by order_dynamic_cells
+    // (y-desc, x-asc), reactions are totally conflict-sorted by (pos, own,
+    // rule, primary), and extents/conduction accumulate order-independently
+    // — so walk order never feeds a simulation decision.
+    template <typename Fn>
+    void for_each_chunk_cell(Fn&& fn) const {
+        for (const auto& [chunk_position, storage] : chunks_) {
+            for (std::size_t index = 0; index < storage.size(); ++index) {
+                const MaterialId material_id = storage[index];
+                if (material_id == kAir) continue;
+                fn(CellPosition{chunk_position.x * kChunkSize +
+                                    static_cast<int>(index % static_cast<std::size_t>(kChunkSize)),
+                                chunk_position.y * kChunkSize +
+                                    static_cast<int>(index / static_cast<std::size_t>(kChunkSize))},
+                   material_id);
+            }
+        }
+    }
     [[nodiscard]] static std::size_t chunk_index(int local_x, int local_y) noexcept {
         return static_cast<std::size_t>(local_y * kChunkSize + local_x);
     }
@@ -213,11 +245,11 @@ private:
     // in step() proves this coverage every debug tick.
     void touch_next(CellPosition position) { touch_scratch_.push_back(position); }
 
-    // cells_ is the authoritative occupied set, persistent across ticks:
-    // step() reads it in place and swaps in the next state, so there is no
-    // per-tick collect/rebuild pass. chunks_ mirrors it for chunk-granular
-    // presentation and read_chunk queries.
-    FlatCells cells_;
+    // (Group 5, Task M:) chunks_ is the authoritative occupied set,
+    // persistent across ticks: step() classifies from the chunk walk and
+    // reconciles movement diffs back into it, so there is no per-tick
+    // collect/rebuild pass and no global material map. The same dense
+    // vectors serve chunk-granular presentation and read_chunk queries.
     FlatCells next_scratch_;
     FlatMarks stayed_scratch_;
     DynCells dyn_scratch_;
@@ -267,7 +299,7 @@ private:
     FlatTemps temps_;
     FlatTemps temp_scratch_;
     // Next-state temperatures staged by movement, committed into temps_ after
-    // the cells_ swap. Cleared + reserve_for(temps_.size() + 16) at step top
+    // the old global-map swap. Cleared + reserve_for(temps_.size() + 16) at step top
     // (F3 spirit: sized from the working set). Sparse invariant: only nonzero
     // is stored, mirroring temps_.
     FlatTemps heat_next_scratch_;
@@ -329,6 +361,14 @@ private:
     [[nodiscard]] static std::uint32_t reaction_roll(
         CellPosition position, std::uint64_t tick, std::uint32_t rule);
     void run_reactions();
+    // (Group 5, Task M, Stage 5 verdict:) the directory STAYS std::map
+    // (owner decision). The swap conditional triggered on the 1024² micro
+    // (+19.6% vs pre-migration), so a sorted-vector directory was
+    // implemented, measured, and reverted: map ≡ vector on the micro and
+    // A/C/D, vector −4-6% on B. Profiles show the delta is per-read
+    // coordinate math + probe structure (not tree traversal), so no
+    // directory type recovers it — a movement chunk-locality redesign
+    // would, and that is future work, not this task.
     std::map<CellPosition, std::vector<MaterialId>> chunks_;
     // (Group 4, Task O6:) per-chunk occupancy (non-air slot count).
     // Invariant: an entry exists iff the chunk exists, and the count equals
@@ -337,6 +377,12 @@ private:
     // reset-clear); emptiness queries read it (O(1)) instead of scanning the
     // dense vector. fill_rect(air) inherits this (no rescans).
     std::map<CellPosition, std::size_t> chunk_occupancy_;
+    // (Group 5, Task M, Stage 2:) exact global occupied count, maintained
+    // alongside chunk_occupancy_ on every chunk-mirror write path (plus
+    // load-commit rebuilds and reset-clear). It backs occupied_cell_count();
+    // O(1), exact. Agreement with the old global map was proven by the
+    // /tmp Stage-2 scratch after every step.
+    std::size_t total_occupied_ = 0;
     // (Group 4, Task O6:) vector-backed dirty set with IDENTICAL observable
     // semantics to the old std::set: mark=push_back (duplicates allowed),
     // read=sorted-unique copy, clear=empty. dirty_chunks() still returns a

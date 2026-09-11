@@ -32,10 +32,9 @@ int floor_divide(int value, int divisor) {
     return value % divisor < 0 ? quotient - 1 : quotient;
 }
 
-int positive_modulo(int value, int divisor) {
-    const int remainder = value % divisor;
-    return remainder < 0 ? remainder + divisor : remainder;
-}
+// NOTE: positive_modulo was removed (Group 5 follow-up) — every chunk-local
+// site now uses chunk_local() (mask, exact for 2^6 chunks); floor_divide
+// above stays for the cold save/load order-key helpers.
 
 // C++20 two's-complement makes this bit pattern exact for negative coords:
 // callers pass static_cast<std::uint32_t>(position.x), and load round-trips
@@ -133,6 +132,14 @@ std::uint32_t crc32_bytes(std::span<const std::uint8_t> data) {
     return crc32_update(0xFFFFFFFFu, data.data(), data.size()) ^ 0xFFFFFFFFu;
 }
 
+// Positive-modulo twin of chunk_pos_of: v & 63 == (v % 64 + 64) % 64 for
+// all int (two's complement bit ops; e.g. -1 & 63 == 63, -64 & 63 == 0).
+// Used at every chunk-local site (hot and cold alike).
+inline int chunk_local(int value) {
+    static_assert(kChunkSize == 64, "mask chunk math requires 2^6 chunks");
+    return value & 63;
+}
+
 // v3 chunk-major order key (cx, cy, ly, lx): chunk position first, then the
 // row-major offset within the dense chunk vector. The writer walks chunks_
 // (std::map, ordered) with ascending vector indices, so emission is
@@ -140,11 +147,18 @@ std::uint32_t crc32_bytes(std::span<const std::uint8_t> data) {
 std::tuple<int, int, int, int> save_order_key(CellPosition position) {
     const int chunk_x = floor_divide(position.x, kChunkSize);
     const int chunk_y = floor_divide(position.y, kChunkSize);
-    return {chunk_x, chunk_y, positive_modulo(position.y, kChunkSize), positive_modulo(position.x, kChunkSize)};
+    return {chunk_x, chunk_y, chunk_local(position.y), chunk_local(position.x)};
 }
 
 CellPosition chunk_pos_of(CellPosition pos) {
-    return {floor_divide(pos.x, kChunkSize), floor_divide(pos.y, kChunkSize)};
+    // Fast path (Group 5 follow-up): kChunkSize == 64 == 2^6, so chunk search
+    // is an arithmetic shift, not a division. >> on negatives is arithmetic
+    // under C++20 two's complement: pos.x >> 6 == floor(pos.x / 64) exactly
+    // (e.g. -1 >> 6 == -1, -65 >> 6 == -2). This is the hottest integer math
+    // in the migrated engine (every chunk-backed cell read probes it);
+    // measured integer division here cost ~25% on 1024² dynamics.
+    static_assert(kChunkSize == 64, "shift/mask chunk math requires 2^6 chunks");
+    return {pos.x >> 6, pos.y >> 6};
 }
 
 // (Group 2, Task S1 chunk-bomb guard:) sortable chunk identity for a cell:
@@ -372,8 +386,8 @@ bool SimulationWorld::load_reactions(const ReactionTable& table) {
 }
 
 MaterialId SimulationWorld::cell(CellPosition position) const {
-    const MaterialId* found = cells_.find(position);
-    return found == nullptr ? kAir : *found;
+    // (Group 5, Task M:) chunk-backed read (the old global-map lookup).
+    return cell_from_chunks(position);
 }
 
 void SimulationWorld::reset() {
@@ -383,7 +397,8 @@ void SimulationWorld::reset() {
     chunks_.clear();
     // (Group 4, Task O6:) occupancy tracks chunks_ 1:1 — no chunks, no counts.
     chunk_occupancy_.clear();
-    cells_.clear();
+    // (Group 5, Task M, Stage 2:) the global count tracks the mirror too.
+    total_occupied_ = 0;
     temps_.clear();
     temp_scratch_.clear();
     temp_prune_scratch_.clear();
@@ -397,16 +412,39 @@ void SimulationWorld::write_chunk_cell(CellPosition position, MaterialId materia
     write_chunk_cell_deferred(position, material_id, nullptr);
 }
 
+// (Group 5, Task M, Stage 1:) chunk-backed reads. Map find → vector index
+// via chunk_pos_of + chunk_local + chunk_index — the same math as
+// write_chunk_cell_deferred, so the mirror answers identically to the old global map
+// (proven by the /tmp Stage-1 differential, formalized in M3).
+MaterialId SimulationWorld::cell_from_chunks(CellPosition position) const {
+    const auto chunk_it = chunks_.find(chunk_pos_of(position));
+    if (chunk_it == chunks_.end()) return kAir;
+    const int local_x = chunk_local(position.x);
+    const int local_y = chunk_local(position.y);
+    return chunk_it->second[chunk_index(local_x, local_y)];
+}
+
+bool SimulationWorld::contains_in_chunks(CellPosition position) const {
+    const auto chunk_it = chunks_.find(chunk_pos_of(position));
+    if (chunk_it == chunks_.end()) return false;
+    const int local_x = chunk_local(position.x);
+    const int local_y = chunk_local(position.y);
+    return chunk_it->second[chunk_index(local_x, local_y)] != kAir;
+}
+
 void SimulationWorld::write_chunk_cell_deferred(
     CellPosition position, MaterialId material_id, std::set<CellPosition>* maybe_emptied) {
     const CellPosition chunk_position = chunk_pos_of(position);
-    const int local_x = positive_modulo(position.x, kChunkSize);
-    const int local_y = positive_modulo(position.y, kChunkSize);
+    const int local_x = chunk_local(position.x);
+    const int local_y = chunk_local(position.y);
     const std::size_t index = chunk_index(local_x, local_y);
     // (Group 4, Task O6:) occupancy-maintained mirror writes. The
     // chunk_occupancy_ invariant (entry exists iff chunk exists; count ==
     // non-air slots) is updated on every slot transition, so emptiness is an
     // O(1) map lookup — no dense-vector rescans anywhere on this path.
+    // (Group 5, Task M, Stage 2:) total_occupied_ rides the same
+    // transitions (air→occupied ++, occupied→air --, occupied→occupied
+    // unchanged), so the global count is exact without scanning.
     if (material_id == kAir) {
         const auto chunk_it = chunks_.find(chunk_position);
         if (chunk_it == chunks_.end()) return;
@@ -418,6 +456,7 @@ void SimulationWorld::write_chunk_cell_deferred(
             return;
         }
         chunk_it->second[index] = kAir;
+        --total_occupied_;
         const auto occ_it = chunk_occupancy_.find(chunk_position);
         assert(occ_it != chunk_occupancy_.end() && occ_it->second > 0);
         if (occ_it == chunk_occupancy_.end() || occ_it->second == 0) return; // backstop; invariant holds
@@ -446,14 +485,16 @@ void SimulationWorld::write_chunk_cell_deferred(
         const auto occ_it = chunk_occupancy_.find(chunk_position);
         assert(occ_it != chunk_occupancy_.end());
         if (occ_it != chunk_occupancy_.end()) ++occ_it->second;
+        ++total_occupied_;
     }
     chunk_it->second[index] = material_id;
 }
 
 void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
     if (!materials_.contains(material_id)) return;
-    const MaterialId* found = cells_.find(position);
-    const MaterialId previous = found == nullptr ? kAir : *found;
+    // (Group 5, Task M, Stage 4:) previous state reads the authority
+    // (chunks); the chunk write below is the ONLY cell mutation.
+    const MaterialId previous = cell_from_chunks(position);
     if (previous == material_id) return;
     // (Group 4, Task O4:) counter delta from the old/new movement classes
     // (old lookup already exists above). Air counts as static; ids here are
@@ -465,13 +506,12 @@ void SimulationWorld::set_cell(CellPosition position, MaterialId material_id) {
         material_id != kAir && material_fast(material_id).movement != Movement::Static;
     if (is_dynamic && !was_dynamic) ++non_static_count_;
     else if (was_dynamic && !is_dynamic) --non_static_count_;
-    if (material_id == kAir) {
-        cells_.erase(position);
-        temps_.erase(position);
-    } else {
-        cells_.insert_or_assign(position, material_id);
-    }
+    // (Group 5, Task M:) the chunk write below IS the mutation — there is
+    // no second store to mirror into (the old global map is gone).
     write_chunk_cell(position, material_id);
+    if (material_id == kAir) {
+        temps_.erase(position);
+    }
     mark_chunk_dirty(chunk_pos_of(position));
 }
 
@@ -486,11 +526,12 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
             for (int x = min_x; x <= max_x; ++x) {
                 const CellPosition position{x, y};
                 temps_.erase(position);
-                const MaterialId* found = cells_.find(position);
-                if (found == nullptr) continue;
+                // (Group 5, Task M, Stage 4:) previous state reads the
+                // authority (chunks); the chunk write is the cell mutation.
+                const MaterialId previous = cell_from_chunks(position);
+                if (previous == kAir) continue;
                 // (Group 4, Task O4:) accumulate the counter over erased cells.
-                if (material_fast(*found).movement != Movement::Static) --non_static_count_;
-                cells_.erase(position);
+                if (material_fast(previous).movement != Movement::Static) --non_static_count_;
                 write_chunk_cell(position, kAir);
             }
         }
@@ -501,15 +542,13 @@ void SimulationWorld::fill_rect(CellPosition first, CellPosition last, MaterialI
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
                 const CellPosition position{x, y};
-                const MaterialId* found = cells_.find(position);
-                const MaterialId previous = found == nullptr ? kAir : *found;
+                const MaterialId previous = cell_from_chunks(position);
                 if (previous != material_id) {
                     const bool was_dynamic = previous != kAir &&
-                                             material_fast(previous).movement != Movement::Static;
+                                              material_fast(previous).movement != Movement::Static;
                     if (new_dynamic && !was_dynamic) ++non_static_count_;
                     else if (was_dynamic && !new_dynamic) --non_static_count_;
                 }
-                cells_.insert_or_assign(position, material_id);
                 write_chunk_cell(position, material_id);
             }
         }
@@ -551,13 +590,16 @@ void SimulationWorld::run_reactions() {
 #endif
     std::vector<Hit>& hits = hits_;
     // (Group 4, Task O3:) member scratch — capacity retained across ticks,
-    // sized from measured last-tick hits (64 floor), NOT cells_.size().
+    // sized from measured last-tick hits (64 floor), NOT the occupied count.
     hits.clear();
     hits.reserve(std::max<std::size_t>(64, last_hits_ * 2));
 #ifdef ASHFALL_STEP_INSTRUMENT
     std::size_t visited_cells = 0;
 #endif
-    cells_.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+    // (Group 5, Task M:) chunk-walk scan (was the global-map scan).
+    // Set-identical; visit order is order-independent by the total hit sort
+    // below (position, own-first, rule, primary).
+    for_each_chunk_cell([&](const CellPosition& position, const MaterialId& material_id) {
 #ifdef ASHFALL_STEP_INSTRUMENT
         ++visited_cells;
 #endif
@@ -596,13 +638,15 @@ void SimulationWorld::run_reactions() {
                            : CellPosition{position.x - 1, position.y}};
             bool owned = false;
             for (const CellPosition neighbor : neighbors) {
-                const MaterialId* found = cells_.find(neighbor);
-                const bool empty = found == nullptr;
+                // (Group 5, Task M, Stage 3:) chunk-backed neighbor read
+                // (was the global-map lookup) — kAir covers both missing and empty.
+                const MaterialId neighbor_id = cell_from_chunks(neighbor);
+                const bool empty = neighbor_id == kAir;
                 // Air-r2 special case preserved: an empty second slot matches,
                 // an occupied one never does. Non-air slots test the bitset.
                 const bool match = compiled.second_is_air
                                        ? empty
-                                       : (!empty && compiled.reactant_bits[1].test(*found));
+                                       : (!empty && compiled.reactant_bits[1].test(neighbor_id));
                 if (!match) continue;
                 // Full match (R1 + R2 + gate): this rule owns the primary
                 // this tick, whether or not the roll lands. R1-only matches
@@ -690,8 +734,8 @@ void SimulationWorld::step() {
         timings.conduct_ms = step_ms_between(conduct_t0, std::chrono::steady_clock::now());
         timings.total_ms = step_ms_between(step_t0, std::chrono::steady_clock::now());
         last_timings_ = timings; // every other phase field defaults to 0.0
-        last_counters_.occupied = cells_.size();
-        last_counters_.static_cells = cells_.size();
+        last_counters_.occupied = total_occupied_;
+        last_counters_.static_cells = total_occupied_;
         last_counters_.dynamic_cells = 0;
         last_counters_.powder_moves = 0;
         last_counters_.liquid_moves = 0;
@@ -704,17 +748,18 @@ void SimulationWorld::step() {
 #endif
         return;
     }
-    // cells_ IS the tick-start state: no collect copy. next replaces it.
-    const FlatCells& current = cells_;
+    // (Group 5, Task M, Stage 3:) chunks_ IS the tick-start state: no
+    // collect copy. next replaces it. (The old tick-start table alias is
+    // gone; every tick-start read below is chunk-backed.)
     FlatCells& next = next_scratch_;
 #ifdef ASHFALL_STEP_INSTRUMENT
     const auto clear_t0 = std::chrono::steady_clock::now();
 #endif
     next.clear();
-    next.reserve_for(cells_.size() + 16);
+    next.reserve_for(total_occupied_ + 16);
     DynCells& dynamic_cells = dyn_scratch_;
     dynamic_cells.clear();
-    dynamic_cells.reserve(cells_.size());
+    dynamic_cells.reserve(total_occupied_);
     // Homes of cells that stayed put this tick. Sand may only displace water
     // at a settled home (owner relocates to the swap source, which is safe);
     // overwriting an in-flight arrival would destroy a cell and break mass
@@ -734,7 +779,7 @@ void SimulationWorld::step() {
     // vector::reserve never shrinks, so steady-state capacity sticks at the
     // max with no churn.
     touch_scratch_.clear();
-    touch_scratch_.reserve(cells_.size() * 2 + 16);
+    touch_scratch_.reserve(total_occupied_ * 2 + 16);
 #ifdef ASHFALL_STEP_INSTRUMENT
     // clear_reserve covers next.clear/reserve + scratch clears/reserves at
     // the top of step() (stayed is sized post-classify from D — see below).
@@ -742,7 +787,10 @@ void SimulationWorld::step() {
     const auto classify_t0 = std::chrono::steady_clock::now();
 #endif
 
-    current.for_each([&](const CellPosition& position, const MaterialId& material_id) {
+    // (Group 5, Task M, Stage 3:) chunk-walk classify (was
+    // current.for_each). Set-identical; the SET feeds order_dynamic_cells'
+    // total sort (y-desc, x-asc), so walk order is erased before movement.
+    for_each_chunk_cell([&](const CellPosition& position, const MaterialId& material_id) {
         if (material_fast(material_id).movement == Movement::Static) {
             next.insert_or_assign(position, material_id);
             // (Group 4, Task O6:) NO touch here (perf §9.2: candidates are
@@ -763,7 +811,7 @@ void SimulationWorld::step() {
     timings.classify_ms = step_ms_between(classify_t0, std::chrono::steady_clock::now());
     // Classified exactly once each: static = tick-start size minus dynamic.
     const std::size_t step_dynamic_count = dynamic_cells.size();
-    const std::size_t step_static_count = current.size() - step_dynamic_count;
+    const std::size_t step_static_count = total_occupied_ - step_dynamic_count;
     const auto ordering_t0 = std::chrono::steady_clock::now();
 #endif
     // (Group 4, Task O2:) stayed marks dynamic place-backs only (statics
@@ -972,7 +1020,9 @@ void SimulationWorld::step() {
                                 for (int dist = 1; dist <= kDispersion; ++dist) {
                                     const CellPosition target{source.x + step_x * dist, source.y};
                                     if (is_solid(target)) break;
-                                    if (current.contains(target)) continue;
+                                    // (Group 5, Task M, Stage 3:) tick-start
+                                    // ownership read, chunk-backed.
+                                    if (contains_in_chunks(target)) continue;
                                     if (!next.contains(target)) {
                                         next.insert_or_assign(target, material_id);
                                         // (Group 4, Task O6:) liquid lateral endpoints
@@ -995,7 +1045,9 @@ void SimulationWorld::step() {
                         // instead of dotting slopes; packed water, buried
                         // water, and water over stone are unaffected.
                         const CellPosition above{source.x, source.y - 1};
-                        const bool open_above = !current.contains(above);
+                        // (Group 5, Task M, Stage 3:) tick-start reads,
+                        // chunk-backed (kAir covers missing).
+                        const bool open_above = !contains_in_chunks(above);
                         const MaterialId* below_now = next.find(down);
                         // Any powder here: settled or in flight. Swapping
                         // relocates (never overwrites), so percolation is
@@ -1011,8 +1063,8 @@ void SimulationWorld::step() {
                         // forth every tick: visible flicker, zero drainage.
                         // A dot in a fully-cupped pit stays put (a puddle).
                         auto escapable = [&](CellPosition p) -> bool {
-                            const MaterialId* found = current.find(p);
-                            return found == nullptr || material_fast(*found).movement == Movement::Liquid;
+                            const MaterialId id = cell_from_chunks(p);
+                            return id == kAir || material_fast(id).movement == Movement::Liquid;
                         };
                         const CellPosition seep_l{source.x - 1, source.y + 1};
                         const CellPosition seep_r{source.x + 1, source.y + 1};
@@ -1076,7 +1128,8 @@ void SimulationWorld::step() {
                 : std::array<CellPosition, 2>{side_r, side_l};
 
             auto gas_free = [&](CellPosition p) -> bool {
-                return !next.contains(p) && !current.contains(p);
+                // (Group 5, Task M, Stage 3:) tick-start half, chunk-backed.
+                return !next.contains(p) && !contains_in_chunks(p);
             };
 
             bool moved = false;
@@ -1111,7 +1164,9 @@ void SimulationWorld::step() {
                         for (int dist = 1; dist <= kDispersion; ++dist) {
                             const CellPosition target{source.x + step_x * dist, source.y};
                             if (is_solid(target)) break;
-                            if (current.contains(target)) continue;
+                            // (Group 5, Task M, Stage 3:) tick-start
+                            // ownership read, chunk-backed.
+                            if (contains_in_chunks(target)) continue;
                             if (!next.contains(target)) {
                                 next.insert_or_assign(target, material_id);
                                 // (Group 4, Task O6:) gas lateral endpoints
@@ -1178,15 +1233,17 @@ void SimulationWorld::step() {
     touch_scratch_.erase(
         std::unique(touch_scratch_.begin(), touch_scratch_.end()), touch_scratch_.end());
 #ifndef NDEBUG
-    // Full-reconstruction oracle: the OLD two-loop diff (over ALL of current
-    // + next) recomputed here and asserted equal to the candidate single-pass
-    // classification. Debug-only (Release compiles it out); the /tmp
-    // -O0 -UNDEBUG full-suite run is the proof — any divergence aborts via
-    // assert. Encoding: (pos, new material), kAir == removal.
+    // Full-reconstruction oracle: the OLD two-loop diff (over ALL of the
+    // tick-start chunk state + next) recomputed here and asserted equal to
+    // the candidate single-pass classification. Debug-only (Release compiles
+    // it out); the /tmp -O0 -UNDEBUG full-suite run is the proof — any
+    // divergence aborts via assert. Encoding: (pos, new material), kAir ==
+    // removal. (Group 5, Task M, Stage 3:) the tick-start side is the chunk
+    // walk (was the global-map loops).
     {
         std::vector<std::pair<CellPosition, MaterialId>> expected;
         expected.reserve(touch_scratch_.size());
-        cells_.for_each([&](const CellPosition& pos, const MaterialId& mat) {
+        for_each_chunk_cell([&](const CellPosition& pos, const MaterialId& mat) {
             const MaterialId* updated = next.find(pos);
             if (updated == nullptr) {
                 expected.emplace_back(pos, kAir);
@@ -1195,18 +1252,18 @@ void SimulationWorld::step() {
             }
         });
         next.for_each([&](const CellPosition& pos, const MaterialId& mat) {
-            if (!cells_.contains(pos)) expected.emplace_back(pos, mat);
+            if (!contains_in_chunks(pos)) expected.emplace_back(pos, mat);
         });
         std::vector<std::pair<CellPosition, MaterialId>> candidate;
         candidate.reserve(touch_scratch_.size());
         for (const CellPosition pos : touch_scratch_) {
             const MaterialId* updated = next.find(pos);
-            const MaterialId* before = current.find(pos);
+            const MaterialId before = cell_from_chunks(pos);
             if (updated == nullptr) {
-                if (before != nullptr) candidate.emplace_back(pos, kAir);
-            } else if (before == nullptr) {
+                if (before != kAir) candidate.emplace_back(pos, kAir);
+            } else if (before == kAir) {
                 candidate.emplace_back(pos, *updated);
-            } else if (*updated != *before) {
+            } else if (*updated != before) {
                 candidate.emplace_back(pos, *updated);
             }
         }
@@ -1225,23 +1282,25 @@ void SimulationWorld::step() {
     std::set<CellPosition> maybe_emptied;
     for (const CellPosition pos : touch_scratch_) {
         const MaterialId* updated = next.find(pos);
-        const MaterialId* before = current.find(pos);
+        // (Group 5, Task M, Stage 3:) tick-start side chunk-backed
+        // (was current.find); kAir covers missing.
+        const MaterialId before = cell_from_chunks(pos);
         if (updated == nullptr) {
-            if (before == nullptr) continue; // cannot happen (touched ⇒ in some state); guard only
+            if (before == kAir) continue; // cannot happen (touched ⇒ in some state); guard only
             write_chunk_cell_deferred(pos, kAir, &maybe_emptied);
             mark_chunk_dirty(chunk_pos_of(pos));
 #ifdef ASHFALL_STEP_INSTRUMENT
             ++changed_positions;
             ++dirty_chunk_marks;
 #endif
-        } else if (before == nullptr) {
+        } else if (before == kAir) {
             write_chunk_cell(pos, *updated);
             mark_chunk_dirty(chunk_pos_of(pos));
 #ifdef ASHFALL_STEP_INSTRUMENT
             ++changed_positions;
             ++dirty_chunk_marks;
 #endif
-        } else if (*updated != *before) {
+        } else if (*updated != before) {
             write_chunk_cell(pos, *updated);
             mark_chunk_dirty(chunk_pos_of(pos));
 #ifdef ASHFALL_STEP_INSTRUMENT
@@ -1260,7 +1319,11 @@ void SimulationWorld::step() {
         }
     }
 
-    std::swap(cells_, next);
+    // (Group 5, Task M, Stage 4:) the movement commit writes the chunk
+    // mirror directly (reconcile above); the authority already holds the
+    // new state, so there is no swap — next_scratch_ is just cleared at the
+    // top of the next step. (The retired Stage-2 note described the old global-map
+    // and its swap are gone.)
 #ifdef ASHFALL_STEP_INSTRUMENT
     // reconcile covers both diff loops + the emptiness sweep + the swap.
     timings.reconcile_ms = step_ms_between(reconcile_t0, std::chrono::steady_clock::now());
@@ -1281,8 +1344,10 @@ void SimulationWorld::step() {
     // patched (this structural discard is what eliminates the §3.1
     // duplication class — no explicit source-clearing pass exists).
 #ifndef NDEBUG
+    // (Group 5, Task M, Stage 3:) staged heat lands on written next cells,
+    // which the commit above mirrored into chunks — chunk-backed check.
     heat_next_scratch_.for_each([&](const CellPosition& position, const std::int16_t&) {
-        assert(cells_.contains(position));
+        assert(contains_in_chunks(position));
     });
 #endif
     temps_.clear();
@@ -1302,7 +1367,7 @@ void SimulationWorld::step() {
     // reaction_cells/reaction_hits were stored by run_reactions() above;
     // every other field is filled here (never whole-struct-assigned, so the
     // reaction fields survive).
-    last_counters_.occupied = cells_.size();
+    last_counters_.occupied = total_occupied_;
     last_counters_.static_cells = step_static_count;
     last_counters_.dynamic_cells = step_dynamic_count;
     last_counters_.powder_moves = powder_moves;
@@ -1439,7 +1504,7 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
     // content identity; extents bound the payload; CRC32 seals prefix..temps.
     // Guarantees: chunk-major sorted, unique, capped, no air-temps.
     std::vector<std::uint8_t> bytes;
-    bytes.reserve(64 + material_order_.size() * 16 + cells_.size() * 9 + temps_.size() * 10);
+    bytes.reserve(64 + material_order_.size() * 16 + total_occupied_ * 9 + temps_.size() * 10);
     bytes.insert(bytes.end(), kSaveMagicPrefix.begin(), kSaveMagicPrefix.end());
     bytes.push_back(kSaveVersion3);
     append_u64(bytes, tick_);
@@ -1457,7 +1522,9 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
     // Extents (empty world -> all 0), precomputed since they precede cells.
     std::int32_t min_x = 0, max_x = 0, min_y = 0, max_y = 0;
     bool have_cell = false;
-    cells_.for_each([&](const CellPosition& position, const MaterialId&) {
+    // (Group 5, Task M, Stage 3:) extents walk the chunks (was
+    // global-map scan) — set-identical.
+    for_each_chunk_cell([&](const CellPosition& position, const MaterialId&) {
         if (!have_cell) {
             min_x = max_x = position.x;
             min_y = max_y = position.y;
@@ -1473,7 +1540,7 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
     append_u32(bytes, static_cast<std::uint32_t>(max_x));
     append_u32(bytes, static_cast<std::uint32_t>(min_y));
     append_u32(bytes, static_cast<std::uint32_t>(max_y));
-    append_u32(bytes, static_cast<std::uint32_t>(cells_.size()));
+    append_u32(bytes, static_cast<std::uint32_t>(total_occupied_));
     std::vector<std::pair<CellPosition, std::int16_t>> temp_entries;
     temp_entries.reserve(temps_.size());
     bool have_prev = false;
@@ -1500,7 +1567,7 @@ std::vector<std::uint8_t> SimulationWorld::save() const {
             }
         }
     }
-    assert(emitted_cells == cells_.size());
+    assert(emitted_cells == total_occupied_);
     assert(!have_cell == (emitted_cells == 0));
     (void)have_prev;
     (void)emitted_cells;
@@ -1815,8 +1882,8 @@ bool SimulationWorld::load_with_diagnostic(
                 floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
             auto [chunk, inserted] = fresh_chunks.try_emplace(chunk_position);
             if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
-            const int local_x = positive_modulo(position.x, kChunkSize);
-            const int local_y = positive_modulo(position.y, kChunkSize);
+            const int local_x = chunk_local(position.x);
+            const int local_y = chunk_local(position.y);
             chunk->second[static_cast<std::size_t>(local_y * kChunkSize + local_x)] = material_id;
         });
         std::set<CellPosition> changed_chunks;
@@ -1827,9 +1894,13 @@ bool SimulationWorld::load_with_diagnostic(
             changed_chunks.insert(chunk_position);
         }
         chunks_ = std::move(fresh_chunks);
-        cells_ = std::move(loaded);
         temps_ = std::move(loaded_temps);
         tick_ = saved_tick;
+        // (Group 5, Task M, Stage 4:) the committed mirror defines the count
+        // exactly (loaded.size() == emitted chunk cells by construction).
+        // `loaded` stays a validation-time local only (order/duplicate/cap
+        // checks above); it is NOT committed anywhere.
+        total_occupied_ = loaded.size();
         // (Group 4, Task O6:) rebuild occupancy wholesale from the committed
         // mirror (load bypasses write_chunk_cell): count non-air slots per
         // chunk. Every committed chunk holds >= 1 cell by construction.
@@ -1845,7 +1916,7 @@ bool SimulationWorld::load_with_diagnostic(
         // Committed ids are remapped to the current table (valid), so the
         // material_fast asserts hold.
         non_static_count_ = 0;
-        cells_.for_each([&](const CellPosition&, const MaterialId& id) {
+        for_each_chunk_cell([&](const CellPosition&, const MaterialId& id) {
             if (material_fast(id).movement != Movement::Static) ++non_static_count_;
         });
         for (const CellPosition chunk_position : changed_chunks) {
@@ -2026,8 +2097,8 @@ bool SimulationWorld::load_with_diagnostic(
             floor_divide(position.x, kChunkSize), floor_divide(position.y, kChunkSize)};
         auto [chunk, inserted] = fresh_chunks.try_emplace(chunk_position);
         if (inserted) chunk->second.assign(static_cast<std::size_t>(kChunkSize * kChunkSize), kAir);
-        const int local_x = positive_modulo(position.x, kChunkSize);
-        const int local_y = positive_modulo(position.y, kChunkSize);
+        const int local_x = chunk_local(position.x);
+        const int local_y = chunk_local(position.y);
         chunk->second[static_cast<std::size_t>(local_y * kChunkSize + local_x)] = material_id;
     });
     std::set<CellPosition> changed_chunks;
@@ -2038,9 +2109,11 @@ bool SimulationWorld::load_with_diagnostic(
         changed_chunks.insert(chunk_position);
     }
     chunks_ = std::move(fresh_chunks);
-    cells_ = std::move(loaded);
     temps_ = std::move(loaded_temps);
     tick_ = saved_tick;
+    // (Group 5, Task M, Stage 4:) the committed mirror defines the count
+    // exactly (see the v3 path above). `loaded` stays validation-only.
+    total_occupied_ = loaded.size();
     // (Group 4, Task O6:) rebuild occupancy wholesale from the committed
     // mirror (load bypasses write_chunk_cell) — see the v3 path above.
     chunk_occupancy_.clear();
@@ -2055,7 +2128,7 @@ bool SimulationWorld::load_with_diagnostic(
     // Committed ids passed the materials_.contains gate above (valid), so the
     // material_fast asserts hold.
     non_static_count_ = 0;
-    cells_.for_each([&](const CellPosition&, const MaterialId& id) {
+    for_each_chunk_cell([&](const CellPosition&, const MaterialId& id) {
         if (material_fast(id).movement != Movement::Static) ++non_static_count_;
     });
     for (const CellPosition chunk_position : changed_chunks) {
@@ -2236,7 +2309,8 @@ void SimulationWorld::conduct_temperature() {
     // alloc, capacity sticks at max H.
     temp_prune_scratch_.reserve(temps_.size());
     temps_.for_each([&](const CellPosition& position, const std::int16_t&) {
-        if (!cells_.contains(position)) temp_prune_scratch_.push_back(position);
+        // (Group 5, Task M, Stage 3:) occupancy backstop, chunk-backed.
+        if (!contains_in_chunks(position)) temp_prune_scratch_.push_back(position);
     });
     for (const CellPosition position : temp_prune_scratch_) temps_.erase(position);
     if (temps_.empty()) return;
@@ -2288,8 +2362,10 @@ void SimulationWorld::conduct_temperature() {
     // (identical stencil). The 1/2 crossover is a heuristic, not a measured
     // optimum — a chunk-local dense-pass crossover study is future work,
     // not this task.
-    if (candidates.size() > cells_.size() / 2) {
-        cells_.for_each([&](const CellPosition& position, const MaterialId&) {
+    if (candidates.size() > total_occupied_ / 2) {
+        // (Group 5, Task M, Stage 3:) full occupied scan over the chunk
+        // walk (was the global-map scan) — set-identical, same stencil.
+        for_each_chunk_cell([&](const CellPosition& position, const MaterialId&) {
             int sum = temperature_at(position);
             sum += temperature_at({position.x - 1, position.y});
             sum += temperature_at({position.x + 1, position.y});
@@ -2300,7 +2376,7 @@ void SimulationWorld::conduct_temperature() {
         });
     } else {
         for (const CellPosition position : candidates) {
-            if (!cells_.contains(position)) continue;
+            if (!contains_in_chunks(position)) continue;
             int sum = temperature_at(position);
             sum += temperature_at({position.x - 1, position.y});
             sum += temperature_at({position.x + 1, position.y});
