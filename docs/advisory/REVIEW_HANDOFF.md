@@ -77,5 +77,7 @@ All layers reviewed. Execution order from the backlogs:
 4. **Group 4 — measured optimizations:** runtime table, scratch sizing, compiled
    matching, static fast path, sparse conduction, changed-position diff.
 5. **Group 5 — storage migration:** oracle + differential replay + §7 additions.
+   Status 2026-09-11: DONE (M chunk-authoritative `607eefd`; M3 pins + §7 gaps +
+   F2 + bench E green, uncommitted — integrator commits).
 6. **Group 6 — fuzzing + CI:** parser/serializer targets, sanitizers, corpus,
    cross-arch replay hashes.

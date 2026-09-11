@@ -5,7 +5,8 @@
 // integrator wires it into CMake. Includes only ashfall/simulation.hpp.
 //
 // CLI:
-//   --scenario [A|B|C|D|all]  (default all)
+//   --scenario [A|B|C|D|E|all]  (default all; all = A-D, E is opt-in only —
+//                                 the 1024² world would dominate suite time)
 //   --ticks N                 (default 200) measured step() calls per repeat
 //   --repeats R               (default 5)
 //   --warmup W                (default 1) warmup ticks discarded per repeat
@@ -64,13 +65,14 @@ bool parse_int(const char* s, int& out) {
 }
 
 void print_usage() {
-    std::printf("usage: bench_step [--scenario A|B|C|D|all] [--ticks N] "
+    std::printf("usage: bench_step [--scenario A|B|C|D|E|all] [--ticks N] "
                 "[--repeats R] [--warmup W] [--mode trajectory|repeat]\n");
 }
 
 // Scenario builders: geometry + canonical settle ticks verbatim from
 // /tmp/bench_step.cpp. A settles 200 ticks, D settles 10, B/C measure from
-// the freshly built state.
+// the freshly built state. E (Group 5, Task M3: 1024² water basin, no
+// settle) is additive — A-D geometry untouched.
 bool build_scenario(char id, ashfall::SimulationWorld& world) {
     switch (id) {
         case 'A':
@@ -115,6 +117,18 @@ bool build_scenario(char id, ashfall::SimulationWorld& world) {
                 world.step();
             }
             return true;
+        case 'E': {
+            // 1024² scaling micro (Group 5, Task M3): B-class water basin
+            // scaled to the full 1024² extent — floor + side walls + a deep
+            // water body (~205k cells over a 16x7-chunk span). No settle:
+            // measures from the freshly built state, like B. Tracks the
+            // LLC-cliff scaling ratio vs B (the migration's raison d'être).
+            world.fill_rect({0, 1023}, {1023, 1023}, ashfall::kStone);
+            world.fill_rect({0, 800}, {0, 1023}, ashfall::kStone);
+            world.fill_rect({1023, 800}, {1023, 1023}, ashfall::kStone);
+            world.fill_rect({1, 823}, {1022, 1022}, ashfall::kWater);
+            return true;
+        }
         default:
             return false;
     }
@@ -130,6 +144,8 @@ const char* scenario_label(char id) {
             return "C wood-fire   ";
         case 'D':
             return "D static-box  ";
+        case 'E':
+            return "E water-1024  ";
         default:
             return "?             ";
     }
@@ -272,8 +288,8 @@ int main(int argc, char** argv) {
         }
     }
     if (opts.scenario != "A" && opts.scenario != "B" && opts.scenario != "C" &&
-        opts.scenario != "D" && opts.scenario != "all") {
-        std::printf("invalid --scenario (need A|B|C|D|all)\n");
+        opts.scenario != "D" && opts.scenario != "E" && opts.scenario != "all") {
+        std::printf("invalid --scenario (need A|B|C|D|E|all)\n");
         return 1;
     }
     if (opts.mode != "trajectory" && opts.mode != "repeat") {

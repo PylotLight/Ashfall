@@ -4314,6 +4314,244 @@ void test_o6_dirty_sequence() {
     o6_expect_dirty(world, {{{0, 0}, {5, 5}}}, "o6 load dirties old and new regions");
 }
 
+// Group 5 (Task M3, §7): occupied_cell_count() equals a globally scanned
+// count — the exact-counter pin for total_occupied_ (the chunk-authoritative
+// replacement for cells_.size()). Placement, erasure, ticks, load, reset.
+void test_m3_occupied_counter_matches_scan() {
+    auto scanned_occupied = [](ashfall::SimulationWorld& world, int x0, int y0, int x1, int y1) {
+        std::size_t count = 0;
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                if (world.cell({x, y}) != ashfall::kAir) ++count;
+            }
+        }
+        return count;
+    };
+    ashfall::SimulationWorld world;
+    // Spread across chunk boundaries, incl. negative coords.
+    world.fill_rect({-70, -70}, {-65, -60}, ashfall::kStone);
+    world.fill_rect({60, 60}, {70, 75}, ashfall::kSand);
+    world.set_cell({0, 0}, ashfall::kWater);
+    world.set_cell({-1, -1}, ashfall::kWater);
+    expect(world.occupied_cell_count() == scanned_occupied(world, -80, -80, 80, 80),
+        "m3 counter matches scan after placement");
+    // Erasures, incl. a whole-chunk wipe.
+    world.set_cell({0, 0}, ashfall::kAir);
+    world.fill_rect({-70, -70}, {-65, -60}, ashfall::kAir);
+    expect(world.occupied_cell_count() == scanned_occupied(world, -80, -80, 80, 80),
+        "m3 counter matches scan after erasure");
+    // Ticks: movement relocates but preserves the multiset (the scan box
+    // covers the fall range).
+    for (int i = 0; i < 10; ++i) {
+        world.step();
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "m3 counter matches scan after tick %d", i);
+        expect(world.occupied_cell_count() == scanned_occupied(world, -80, -80, 90, 100), msg);
+    }
+    // Load twin recounts identically; reset zeroes.
+    ashfall::SimulationWorld twin;
+    expect(twin.load(world.save()), "m3 counter twin loads");
+    expect(twin.occupied_cell_count() == world.occupied_cell_count(),
+        "m3 load recount matches source");
+    expect(twin.occupied_cell_count() == scanned_occupied(twin, -80, -80, 90, 100),
+        "m3 counter matches scan after load");
+    world.reset();
+    expect(world.occupied_cell_count() == 0, "m3 reset zeroes the counter");
+    expect(scanned_occupied(world, -80, -80, 90, 100) == 0, "m3 reset empties the scan");
+}
+
+// Group 5 (Task M3, §7 + insertion-history pin): grow-then-delete and
+// permuted builds of the same logical world yield identical save bytes —
+// the F2-flavored proof for the chunk-walk invariant (canonical by
+// construction; history must not leak into bytes). Extends S3 P1 (which
+// covers forward/backward insertion only) with bulk-grow-then-wipe history.
+void test_m3_grow_delete_reinsert_history_independent() {
+    const std::vector<std::pair<ashfall::CellPosition, ashfall::MaterialId>> cells = {
+        {{0, 0}, ashfall::kFire}, {{1, 0}, ashfall::kWater}, {{2, 0}, ashfall::kWood},
+        {{0, 1}, ashfall::kStone}, {{1, 1}, ashfall::kSteam}, {{2, 1}, ashfall::kStone},
+        {{-70, -70}, ashfall::kSand}, {{130, 5}, ashfall::kOil},
+    };
+    ashfall::SimulationWorld direct;
+    for (const auto& [pos, mat] : cells) direct.set_cell(pos, mat);
+    // Grow-then-delete: bulk fill across chunks, then wipe the region back
+    // to air (dropping whole chunks) and rebuild the same logical set.
+    ashfall::SimulationWorld regrown;
+    regrown.fill_rect({-80, -80}, {140, 20}, ashfall::kSand);
+    regrown.fill_rect({-80, -80}, {140, 20}, ashfall::kAir);
+    for (const auto& [pos, mat] : cells) regrown.set_cell(pos, mat);
+    expect(regrown.save() == direct.save(), "m3 grow-then-delete matches direct build bytes");
+    // Strided permutation (3 coprime to 8 — deterministic, no RNG).
+    ashfall::SimulationWorld permuted;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const auto& [pos, mat] = cells[(i * 3) % cells.size()];
+        permuted.set_cell(pos, mat);
+    }
+    expect(permuted.save() == direct.save(), "m3 strided-permuted build matches direct bytes");
+    // Histories stay converged tick by tick (movement + heat-free settling).
+    for (int i = 0; i < 5; ++i) {
+        direct.step();
+        regrown.step();
+        permuted.step();
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "m3 regrown tracks tick %d", i);
+        expect(regrown.save() == direct.save(), msg);
+        std::snprintf(msg, sizeof(msg), "m3 permuted tracks tick %d", i);
+        expect(permuted.save() == direct.save(), msg);
+    }
+}
+
+// Group 5 (Task M3, §7): hot/cold powder-liquid swaps across a chunk
+// boundary (the pair straddles y=63/64) — the payload rides the material,
+// not the coordinate, and copy_rect/cell agree across the seam.
+void test_m3_hot_cold_swap_across_chunk_boundary() {
+    auto build_crossing = [](ashfall::MaterialId upper, ashfall::MaterialId lower, int hot_y) {
+        ashfall::SimulationWorld world;
+        world.fill_rect({-1, 65}, {1, 65}, ashfall::kStone); // floor in chunk {0, 1}
+        world.set_cell({0, 64}, lower); // chunk {0, 1}
+        world.set_cell({0, 63}, upper); // chunk {0, 0}: straddles y=63/64
+        expect(world.set_temperature({0, hot_y}, 100), "m3 crossing heat stages");
+        return world;
+    };
+    auto expect_seam_agreement = [](ashfall::SimulationWorld& world) {
+        std::vector<ashfall::MaterialId> rect(5 * 5, static_cast<ashfall::MaterialId>(0xFF));
+        world.copy_rect({-2, 62}, {2, 66}, rect);
+        for (int y = 62; y <= 66; ++y) {
+            for (int x = -2; x <= 2; ++x) {
+                const std::size_t index = static_cast<std::size_t>((y - 62) * 5 + (x + 2));
+                if (rect[index] != world.cell({x, y})) {
+                    char msg[128];
+                    std::snprintf(msg, sizeof(msg),
+                        "m3 copy_rect/cell agree at (%d,%d) across the seam", x, y);
+                    expect(false, msg);
+                }
+            }
+        }
+    };
+    // Hot sand above cold settled water: sand sinks across the seam.
+    {
+        ashfall::SimulationWorld world = build_crossing(ashfall::kSand, ashfall::kWater, 63);
+        world.step();
+        expect(world.cell({0, 64}) == ashfall::kSand, "m3 hot sand sinks across the chunk seam");
+        expect(world.cell({0, 63}) == ashfall::kWater, "m3 cold water rises across the seam");
+        expect(world.temperature({0, 64}) == 20, "m3 sunk sand keeps its payload");
+        expect(world.temperature({0, 63}) == 20, "m3 risen water warms by conduction only");
+        expect(world.temperature({0, 65}) == 20, "m3 floor warms under the hot sand");
+        expect(world.temperature_count() == 3, "m3 crossing carries exactly three entries");
+        expect_seam_agreement(world);
+    }
+    // Cold sand above hot settled water: the payload rides the water up.
+    {
+        ashfall::SimulationWorld world = build_crossing(ashfall::kSand, ashfall::kWater, 64);
+        world.step();
+        expect(world.cell({0, 64}) == ashfall::kSand, "m3 cold sand sinks across the seam");
+        expect(world.cell({0, 63}) == ashfall::kWater, "m3 hot water rises across the seam");
+        expect(world.temperature({0, 63}) == 20, "m3 risen water keeps its payload");
+        expect(world.temperature({0, 64}) == 20, "m3 sunk sand warms by conduction only");
+        expect(world.temperature({0, 65}) == 0, "m3 floor stays ambient under cold sand");
+        expect(world.temperature_count() == 2, "m3 reverse crossing carries exactly two entries");
+        expect_seam_agreement(world);
+    }
+}
+
+// Group 5 (Task M3, §7): exact temperature-gate boundaries + p=0/p=100
+// edges, on static materials (no movement between reaction and assert).
+void test_m3_reaction_gate_boundary_and_p_edges() {
+    auto gate_table = [](bool has_min, int min_value, bool has_max, int max_value, int probability) {
+        ashfall::ReactionTable table;
+        table.version = 1;
+        ashfall::ReactionSpec ignite;
+        ignite.name = "ignite";
+        ignite.probability = probability;
+        ignite.reactants = {{true, "burnable"}};
+        ignite.products = {{"fire"}};
+        ignite.gate.has_min = has_min;
+        ignite.gate.min_value = min_value;
+        ignite.gate.has_max = has_max;
+        ignite.gate.max_value = max_value;
+        table.reactions = {ignite};
+        return table;
+    };
+    auto count_in_box = [](ashfall::SimulationWorld& world, ashfall::MaterialId id) {
+        std::size_t count = 0;
+        for (int y = -3; y <= 1; ++y) {
+            for (int x = -2; x <= 12; ++x) {
+                if (world.cell({x, y}) == id) ++count;
+            }
+        }
+        return count;
+    };
+    // Exact min edge at p=100: temp == min fires, min-1 stays wood.
+    {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(gate_table(true, 25, false, 0, 100)), "m3 min-gate loads");
+        world.set_cell({0, 0}, ashfall::kWood);
+        world.set_cell({10, 0}, ashfall::kWood);
+        expect(world.set_temperature({0, 0}, 25), "m3 edge heat stages");
+        expect(world.set_temperature({10, 0}, 24), "m3 below-edge heat stages");
+        world.step(); // wood is static; the fresh flame rises one cell the same tick
+        expect(world.cell({10, 0}) == ashfall::kWood, "m3 min-1 wood never ignites");
+        expect(count_in_box(world, ashfall::kFire) == 1, "m3 exact-min wood ignites once");
+        expect(count_in_box(world, ashfall::kWood) == 1, "m3 only the edge cell transforms");
+    }
+    // Exact max edge at p=100: temp == max fires, max+1 stays wood.
+    {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(gate_table(false, 0, true, 25, 100)), "m3 max-gate loads");
+        world.set_cell({0, 0}, ashfall::kWood);
+        world.set_cell({10, 0}, ashfall::kWood);
+        expect(world.set_temperature({0, 0}, 25), "m3 edge heat stages");
+        expect(world.set_temperature({10, 0}, 26), "m3 above-edge heat stages");
+        world.step();
+        expect(world.cell({10, 0}) == ashfall::kWood, "m3 max+1 wood never ignites");
+        expect(count_in_box(world, ashfall::kFire) == 1, "m3 exact-max wood ignites once");
+        expect(count_in_box(world, ashfall::kWood) == 1, "m3 only the edge cell transforms");
+    }
+    // p=0 never fires on a full match; p=100 always fires (same gateless fixture).
+    {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(gate_table(false, 0, false, 0, 0)), "m3 p=0 loads");
+        world.set_cell({0, 0}, ashfall::kWood);
+        for (int i = 0; i < 5; ++i) world.step();
+        expect(world.cell({0, 0}) == ashfall::kWood, "m3 p=0 never fires on a full match");
+        expect(world.occupied_cell_count() == 1, "m3 p=0 preserves the cell");
+    }
+    {
+        ashfall::SimulationWorld world;
+        expect(world.load_reactions(gate_table(false, 0, false, 0, 100)), "m3 p=100 loads");
+        world.set_cell({0, 0}, ashfall::kWood);
+        world.step();
+        expect(count_in_box(world, ashfall::kFire) == 1, "m3 p=100 fires on the first tick");
+        expect(world.cell({0, 0}) != ashfall::kWood, "m3 p=100 consumes the wood");
+    }
+}
+
+// Group 5 (Task M3, migration pin): 1024² smoke — build + tick + save/load
+// round-trip on a big SPARSE world. Bounds the format (chunk directory over
+// a 16×16-chunk span), not a timing test: few ticks, sparse fills, fast.
+void test_m3_1024_sparse_smoke() {
+    ashfall::SimulationWorld world;
+    world.fill_rect({0, 1023}, {1023, 1023}, ashfall::kStone); // floor row
+    for (int i = 0; i < 16; ++i) {
+        const int c = i * 64;
+        world.set_cell({c, c}, ashfall::kSand);
+        world.set_cell({c + 63, c}, ashfall::kWater);
+    }
+    world.set_cell({-1, -1}, ashfall::kStone);
+    world.set_cell({1023, 0}, ashfall::kWood);
+    const std::size_t built = world.occupied_cell_count();
+    expect(built == 1024 + 32 + 2, "m3 smoke builds its sparse span");
+    for (int i = 0; i < 3; ++i) world.step();
+    expect(world.occupied_cell_count() == built, "m3 smoke conserves mass across ticks");
+    const auto saved = world.save();
+    ashfall::SimulationWorld twin;
+    expect(twin.load(saved), "m3 smoke save loads");
+    expect(twin.save() == saved, "m3 smoke round-trips byte-exact");
+    expect(twin.tick() == world.tick(), "m3 smoke tick preserved");
+    twin.step();
+    world.step();
+    expect(twin.save() == world.save(), "m3 smoke twin tracks post-load");
+}
+
 } // namespace
 
 int main() {
@@ -4438,6 +4676,11 @@ int main() {
     test_o6_mirror_cells_agreement();
     test_o6_occupancy_matches_scan();
     test_o6_dirty_sequence();
+    test_m3_occupied_counter_matches_scan();
+    test_m3_grow_delete_reinsert_history_independent();
+    test_m3_hot_cold_swap_across_chunk_boundary();
+    test_m3_reaction_gate_boundary_and_p_edges();
+    test_m3_1024_sparse_smoke();
     test_oracle_replay();
     std::cout << "All simulation tests passed.\n";
 }

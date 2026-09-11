@@ -10,10 +10,14 @@
 
 #include "ashfall/flat_cell_map.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -275,6 +279,64 @@ void test_insert_or_assign_still_overwrites() {
     expect(c.updates == 1u && c.inserts == 0u, "overwrite records an update, not an insert");
 }
 
+// (Group 5, Task M3, F2:) shuffled-insert determinism — the order-
+// independence role of the REMAINING FlatMaps (sparse temps_ + per-tick
+// scratch tables). Authoritative cell iteration is chunk-walk order now
+// (std::map key order + row-major within each dense vector — see
+// for_each_chunk_cell in engine/include/ashfall/simulation.hpp); the old
+// "iteration-order-is-layout" rule died with the global cells_ map, and no
+// remaining FlatMap's slot order may leak into observables. Same keys in
+// three shuffled build orders (incl. erase/reinsert tombstone history) →
+// identical sorted projections.
+void test_shuffled_insert_sorted_projection_identical() {
+    constexpr int kKeys = 200;
+    auto sorted_projection = [](const ashfall::FlatMap<int, int, IntHash>& map) {
+        std::vector<std::pair<int, int>> pairs;
+        map.for_each([&](int key, int value) { pairs.emplace_back(key, value); });
+        std::sort(pairs.begin(), pairs.end());
+        return pairs;
+    };
+    // orders: 0 = forward, 1 = reverse, 2 = strided (7 coprime to 200, so
+    // (i*7)%200 is a permutation — deterministic, no RNG).
+    for (int order = 0; order < 3; ++order) {
+        ashfall::FlatMap<int, int, IntHash> map;
+        for (int i = 0; i < kKeys; ++i) {
+            int key = order == 0 ? i : (order == 1 ? (kKeys - 1 - i) : (i * 7) % kKeys);
+            map.insert_or_assign(key, key * 10);
+        }
+        // Tombstone history in the same order: erase multiples of 7, then
+        // reinsert them with a new value (same final logical content).
+        for (int i = 0; i < kKeys; ++i) {
+            int key = order == 0 ? i : (order == 1 ? (kKeys - 1 - i) : (i * 7) % kKeys);
+            if (key % 7 == 0) map.erase(key);
+        }
+        for (int i = 0; i < kKeys; ++i) {
+            int key = order == 0 ? i : (order == 1 ? (kKeys - 1 - i) : (i * 7) % kKeys);
+            if (key % 7 == 0) map.insert_or_assign(key, key * 10 + 1);
+        }
+        const auto projection = sorted_projection(map);
+        expect(projection.size() == std::size_t{kKeys}, "shuffled build holds all keys");
+        for (int key = 0; key < kKeys; ++key) {
+            const auto& [got_key, got_value] = projection[static_cast<std::size_t>(key)];
+            if (got_key != key || got_value != key * 10 + (key % 7 == 0 ? 1 : 0)) {
+                char msg[128];
+                std::snprintf(msg, sizeof(msg),
+                    "shuffled order %d: sorted projection differs at key %d", order, key);
+                expect(false, msg);
+            }
+        }
+    }
+    // Cross-order identity: rebuild each order and compare projections directly.
+    ashfall::FlatMap<int, int, IntHash> forward, strided;
+    for (int i = 0; i < kKeys; ++i) forward.insert_or_assign(i, i * 10 + (i % 7 == 0 ? 1 : 0));
+    for (int i = 0; i < kKeys; ++i) {
+        const int key = (i * 7) % kKeys;
+        strided.insert_or_assign(key, key * 10 + (key % 7 == 0 ? 1 : 0));
+    }
+    expect(sorted_projection(forward) == sorted_projection(strided),
+        "forward vs strided builds project identically");
+}
+
 } // namespace
 
 int main() {
@@ -288,5 +350,6 @@ int main() {
     test_find_or_insert_growth_rules();
     test_find_or_insert_collision_chain();
     test_insert_or_assign_still_overwrites();
+    test_shuffled_insert_sorted_projection_identical();
     return 0;
 }

@@ -87,7 +87,7 @@ twin-world continuation); keep the data-only content gate (empty diff on
       (per-chunk flag + dirty vector + tombstones; keep unbounded-negative-coord
       support — no fixed bitset). Acceptance: mirror equals full reconstruction;
       same observable chunk contents (§16.10).
-- [ ] **Chunk-authoritative storage prototype (§11, §13, §16.11).** Sparse directory
+- [x] **Chunk-authoritative storage prototype (§11, §13, §16.11).** Sparse directory
       → dense per-chunk material arrays (+ optional thermal, occupancy/dynamic
       counts, activity metadata). Migration: oracle → chunk-backed query helpers →
       identical values → move authority → keep global order → remove global map.
@@ -156,7 +156,7 @@ heat-swap fixtures belong to the existing heat-correctness task (no duplicate bu
 - [ ] **Save-test isolation pre-v3.** Version-specific group (v1 hand-build, empty
       v2 size, `size()-5` mutation); v3 framing-vs-semantic rejection split;
       independent hand-built fixtures (never only `save()`-generated).
-- [ ] **Migration additions table (§7).** cell/copy_rect/read_chunk agreement;
+- [x] **Migration additions table (§7).** cell/copy_rect/read_chunk agreement;
       counter-vs-scan equality; last-cell deletion; reset/load dirtiness cleared;
       continuation; history independence; hot/cold cross-chunk swaps; competing
       reactions; gate boundary + p=0/p=100; span-size + negative-coord cases.
