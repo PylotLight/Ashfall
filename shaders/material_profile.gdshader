@@ -32,12 +32,34 @@ shader_type canvas_item;
 // - Crop note: under an AtlasTexture camera view the caller sets view_origin
 //   (top-left cell) + view_size (region cells) so cell coords stay in sim
 //   space; full-texture use is view_origin=(0,0), view_size=world_size.
+//   TEXTURE itself is the (possibly cropped) identity view: the center id
+//   decode below stays center-sample-only and crop-safe. Sections 8 (edge)
+//   and 9 (depth) instead sample the FULL identity/depth textures via
+//   sim-space UV ((cell+0.5)/world_size, neighbor offset = 1 full texel) —
+//   never TEXTURE offsets, which would clamp at crop borders (glue rule H3).
+//   Full textures upload monolithically each painted flush, so boundaries
+//   and overburden stay exact across 64-cell chunk borders by construction.
+// - R7 visual payoff: section 4 detail is three-scale (cell seed + 2x2 block
+//   + 4x4 mottle, all weighted by profile detail_strength); section 8
+//   darkens material boundaries by profile edge_response x edge_darkness;
+//   section 9 shades overburden with exp(-depth*rate), rate from LUT tex3.g
+//   (loader default — the JSON schema carries no depth_rate field by design).
+//   Branch discipline unchanged: below branches on profile numbers,
+//   coordinates/seed, or id EQUALITY between neighbors — never on a material
+//   constant.
 
 // Stable per-cell variation seed (bridge R8, hash(x,y) — static for all time).
 uniform sampler2D seed_tex : filter_nearest, repeat_disable;
+// Full identity layer (bridge R8, whole world — neighbor reads for section 8).
+uniform sampler2D identity_tex : filter_nearest, repeat_disable;
+// Full overburden depth layer (bridge R8, whole world — section 9).
+uniform sampler2D depth_tex : filter_nearest, repeat_disable;
+// Global tuning knobs (human-check dials; profile strengths stay in the LUT).
+uniform float edge_darkness = 0.35;
+uniform float depth_boost = 1.0;
 // Profile LUTs from the glue: 4 wide x 256 tall (row = material id).
 uniform sampler2D profile_palette : filter_nearest, repeat_disable; // RGBA8: 4 palette colors (unused slots repeat last)
-uniform sampler2D profile_params : filter_nearest, repeat_disable; // RGBAF: tex0=(pattern_mode,pattern_scale,detail,edge) tex1=(opacity,opacity_mode,emission_strength,anim) tex2=(emission rgb,-) tex3=(palette_count,-,-,-)
+uniform sampler2D profile_params : filter_nearest, repeat_disable; // RGBAF: tex0=(pattern_mode,pattern_scale,detail,edge) tex1=(opacity,opacity_mode,emission_strength,anim) tex2=(emission rgb,-) tex3=(palette_count,depth_rate,-,-)
 
 // Sim-space mapping.
 uniform vec2 world_size = vec2(512.0, 512.0);
@@ -66,7 +88,13 @@ void fragment() {
 	float prow = (clamp(idf, 0.0, 255.0) + 0.5) / 256.0;
 
 	// 2. Profile fetch. Row selects the profile; nothing below names a material.
-	float seed01 = texture(seed_tex, UV).r;
+	// Sim-space mapping FIRST: under an AtlasTexture crop, UV spans the crop
+	// while seed/identity/depth uniforms hold the FULL world textures, so
+	// they must be sampled at sim-space texel centers (cuv), never raw UV.
+	vec2 cell = view_origin + floor(UV * view_size);
+	vec2 ftexel = vec2(1.0 / world_size.x, 1.0 / world_size.y);
+	vec2 cuv = (cell + vec2(0.5)) / world_size;
+	float seed01 = texture(seed_tex, cuv).r;
 	vec4 pal0 = texture(profile_palette, vec2(0.125, prow));
 	vec4 pal1 = texture(profile_palette, vec2(0.375, prow));
 	vec4 pal2 = texture(profile_palette, vec2(0.625, prow));
@@ -79,7 +107,6 @@ void fragment() {
 	float pscale = max(P0.y, 1.0);
 	float detail = clamp(P0.z, 0.0, 1.0);
 	float count = max(floor(P3.x + 0.5), 1.0);
-	vec2 cell = view_origin + floor(UV * view_size);
 	float sstep = floor(seed01 * 255.0 + 0.5);
 
 	// 3. Pattern index from profile mode + coords + seed (never from identity).
@@ -120,21 +147,64 @@ void fragment() {
 		base = pal3.rgb;
 	}
 
-	// 4. Restrained per-cell detail (profile detail_strength; quiet stays quiet).
+	// 4. Three-scale detail (all weighted by profile detail_strength so quiet
+	// stays quiet): per-cell seed variation + 2x2 block structure + 4x4
+	// low-frequency mottling. Reads at 1px/cell; the block/mottle octaves
+	// keep large masses from flattening to noise.
 	vec3 col = base * (1.0 + (seed01 - 0.5) * 2.0 * detail);
-	// P0.w edge_response decoded for Slice C boundary treatment (reserved in B2).
+	float blk = hash12(floor(cell / 2.0));
+	float mot = hash12(floor(cell / 4.0) + 3.1);
+	col *= 1.0 + (blk - 0.5) * detail * 1.2 + (mot - 0.5) * detail * 0.8;
 
 	// 5. Coverage partition from profile opacity (never from identity):
 	// air (opacity ~0) and translucent liquids render background on the base
 	// layer — liquids live on the linear overlay; opaque/additive render here.
 	float opacity = P1.x;
 	float opmode = P1.y;
-	vec3 outc = col;
+	float rendered = 1.0;
 	if (opacity < 0.01) {
-		outc = bg_color;
+		rendered = 0.0;
 	} else if (opmode > 0.5 && opmode < 1.5) {
-		outc = bg_color;
+		rendered = 0.0;
 	}
+	vec3 outc = mix(bg_color, col, rendered);
+
+	// 8. Material-boundary darkening (R7): count 4-neighbors whose id differs
+	// from the center id, darken by profile edge_response. Reads ride the
+	// FULL identity texture at sim-space texel centers (see crop note) with
+	// coordinate guards at world borders; the equality test names no
+	// material, so the zero-material-branch contract holds.
+	float edge_response = clamp(P0.w, 0.0, 1.0);
+	float ebn = 0.0;
+	if (rendered > 0.5) {
+		float nid = 0.0;
+		if (cell.x > 0.0) {
+			nid = floor(texture(identity_tex, cuv - vec2(ftexel.x, 0.0)).r * 255.0 + 0.5);
+			ebn += step(0.5, abs(nid - idf));
+		}
+		if (cell.x < world_size.x - 1.0) {
+			nid = floor(texture(identity_tex, cuv + vec2(ftexel.x, 0.0)).r * 255.0 + 0.5);
+			ebn += step(0.5, abs(nid - idf));
+		}
+		if (cell.y > 0.0) {
+			nid = floor(texture(identity_tex, cuv - vec2(0.0, ftexel.y)).r * 255.0 + 0.5);
+			ebn += step(0.5, abs(nid - idf));
+		}
+		if (cell.y < world_size.y - 1.0) {
+			nid = floor(texture(identity_tex, cuv + vec2(0.0, ftexel.y)).r * 255.0 + 0.5);
+			ebn += step(0.5, abs(nid - idf));
+		}
+	}
+	float edge_f = 1.0 - edge_response * edge_darkness * clamp(ebn * 0.75, 0.0, 1.0);
+	outc *= mix(1.0, edge_f, rendered);
+
+	// 9. Overburden depth shading (R7): exponential falloff with the rate
+	// from LUT tex3.g (loader default; no JSON field by design). Deep masses
+	// sink toward black while surfaces stay bright; gated on rendered
+	// coverage so air/translucent base cells stay bg.
+	float depth_cells = texture(depth_tex, cuv).r * 255.0;
+	float dshade = exp(-depth_cells * P3.y * depth_boost);
+	outc *= mix(1.0, dshade, rendered);
 
 	// 6. Intrinsic emission (Slice C1 enabled via emission_mix = 1).
 	// Contract: lit = albedo x (ambient + local) + emission; emission =
@@ -143,12 +213,15 @@ void fragment() {
 	// edits are out of scope for C1), so heat_curve(T) is identically 0 BY
 	// CONSTRUCTION — hot water (strength 0) cannot glow; flames/lava are
 	// art-directed intrinsics, never a generic temperature ramp.
-	// Pattern-aware weight from final albedo luminance (profile-driven,
-	// never identity): flame plume cores emit ~full, edges dim; lava
-	// crust (~0.19 lum) emits nothing, cracks (~0.78 lum) emit ~full.
-	// Gated on rendered coverage so air/translucent base cells stay bg;
-	// albedo itself is never darkened (ambient floor preserved).
-	float elum = clamp(dot(clamp(col, vec3(0.0), vec3(1.0)), vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+	// Pattern-aware weight from the pattern-picked BASE color (pre-detail,
+	// profile-driven, never identity): flame plume cores emit ~full, edges
+	// dim; lava crust (~0.14 lum) emits nothing, cracks (~0.78 lum) emit
+	// ~full. Base-driven (R7) so dark detail rolls modulate albedo only and
+	// never punch holes in flames. Gated on rendered coverage so
+	// air/translucent base cells stay bg. Added after edge/depth shading,
+	// so glowing cracks stay bright in the deep while lit rock still sinks
+	// with overburden.
+	float elum = clamp(dot(clamp(base, vec3(0.0), vec3(1.0)), vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
 	float eweight = clamp((elum - 0.25) / 0.55, 0.0, 1.0);
 	eweight *= eweight;
 	vec3 ecolor = mix(P2.rgb, vec3(1.0, 0.96, 0.88), eweight * 0.45);

@@ -67,6 +67,19 @@ private:
     PackedByteArray seed_bytes_;
     Ref<Image> seed_image_;
     Ref<ImageTexture> seed_texture_;
+    // P3A R7: Noita-style depth cue (presentation only; sim untouched).
+    // depth: R8, one byte per cell = consecutive piled-matter cells directly
+    // above (Static/Powder/Liquid movements; air and gas stop the run),
+    // clamped to 255. Air cells store their overburden too but render
+    // background, so the value is unused there. Painted in the same
+    // repaint-set pattern as identity (full path: column runs over the full
+    // copy; partial path: full-height strip over the repaint bounding box so
+    // bytes stay bit-identical to the full path and downward-propagating
+    // depth changes never seam at 64-cell chunk borders). Uploaded
+    // monolithically with the other layers (4 submits per painted flush).
+    PackedByteArray depth_bytes_;
+    Ref<Image> depth_image_;
+    Ref<ImageTexture> depth_texture_;
     // Renderer cache: base color, precomputed deep-shade color, movement
     // class, and known-flag per id, refreshed from the world table on
     // init/load. Unknown ids default to background/static so stale cells
@@ -193,6 +206,9 @@ public:
     Ref<Image> get_identity_image() const;
     Ref<ImageTexture> get_seed_texture() const;
     Ref<Image> get_seed_image() const;
+    // P3A R7 depth views for the profile shader (presentation only).
+    Ref<ImageTexture> get_depth_texture() const;
+    Ref<Image> get_depth_image() const;
     double get_last_step_ms() const { return last_step_ms_; }
     int get_world_width() const { return world_width_; }
     int get_world_height() const { return world_height_; }
@@ -205,9 +221,9 @@ private:
         double dirty_collect_ms = 0.0; // dirty_chunks() copy
         double material_read_ms = 0.0; // full-path copy_rect(); 0 on partial path (reads inline, timed in paint)
         double paint_ms = 0.0; // ptrw() acquire + per-pixel paint loops
-        double set_data_ms = 0.0; // Image::set_data() x2 (CPU upload staging)
-        double submit_ms = 0.0; // ImageTexture::update() x2 (GPU submit)
-        std::uint64_t texture_submits = 0; // cumulative update() calls (3 per painted flush: base + water + identity)
+        double set_data_ms = 0.0; // Image::set_data() x4 (CPU upload staging)
+        double submit_ms = 0.0; // ImageTexture::update() x4 (GPU submit)
+        std::uint64_t texture_submits = 0; // cumulative update() calls (4 per painted flush: base + water + identity + depth)
         std::uint64_t present_flushes = 0; // cumulative flush_present() calls that painted (updates-per-frame source)
         std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
         std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
@@ -235,6 +251,7 @@ private:
     void recover_presentation_resources();
     void fill_background_pixels();
     void fill_identity_seed_background();
+    void fill_depth_background();
     // Stable per-cell variation seed: pure function of coords (identical
     // every frame/boot; never advances with ticks — Slice D animates via
     // tick/phase uniforms, never by mutating this).

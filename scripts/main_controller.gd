@@ -37,6 +37,7 @@ extends Control
 # those scripts (parallel A1 must not collide); preload consts instead.
 const FollowCamera = preload("res://scripts/follow_camera.gd")
 const HudPanels = preload("res://scripts/hud_panels.gd")
+const ProfileGlue = preload("res://scripts/material_profile_glue.gd")
 
 # Camera state: cropped AtlasTexture views over the live bridge textures
 # (TextureRect stack stays for P3A — no world-space refactor). The view
@@ -118,6 +119,7 @@ func _ready() -> void:
 	_build_palette()
 	_update_hud()
 	_init_camera()
+	_init_profile_material()
 	_update_marker()
 	_refresh_group3_labels()
 	_init_hud_separation()
@@ -138,6 +140,8 @@ func _process(delta: float) -> void:
 	# bridge-side presentation recovery, which replaces texture objects).
 	world.flush_present()
 	_refresh_textures()
+	if _profile_mat != null:
+		ProfileGlue.update_present(_profile_mat, world, _view_region.position, _view_region.size)
 	if _transient_ttl > 0.0:
 		_transient_ttl -= delta
 		if _transient_ttl <= 0.0:
@@ -212,10 +216,28 @@ func _apply_view_region() -> void:
 	_base_atlas.region = Rect2(_view_region)
 	_water_atlas.region = Rect2(_view_region)
 
+# P3A R7: the DISPLAYED base layer is the identity texture under the profile
+# ShaderMaterial (see _init_profile_material). The CPU RGBA layer keeps
+# painting every flush as the static reference (fixtures depend on it) but is
+# no longer shown. Water overlay is untouched.
+var _profiles: Dictionary = {}
+var _profile_mat: ShaderMaterial
+
+
+func _init_profile_material() -> void:
+	var res: Dictionary = ProfileGlue.load_profiles(world)
+	if not bool(res["ok"]):
+		push_warning("main_controller: material_visuals rejected (%s), profile LUTs are safe defaults" % String(res["error"]))
+	_profiles = res["profiles"]
+	_profile_mat = ProfileGlue.make_material(world, _profiles, _view_region.position, _view_region.size)
+	texture_display.material = _profile_mat
+	_refresh_textures()
+
+
 func _refresh_textures() -> void:
 	# Rebind through the atlases so bridge recovery (replaced texture
 	# objects) keeps working; skip no-op assignments.
-	var base_tex := world.get_world_texture()
+	var base_tex := world.get_identity_texture()
 	if _base_atlas == null:
 		texture_display.texture = base_tex
 		water_display.texture = world.get_water_texture()

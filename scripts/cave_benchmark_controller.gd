@@ -88,6 +88,7 @@ const FollowCamera = preload("res://scripts/follow_camera.gd")
 const HudPanels = preload("res://scripts/hud_panels.gd")
 const ClusterLights = preload("res://scripts/light_cluster_manager.gd")
 const MatVisuals = preload("res://scripts/material_visuals.gd")
+const ProfileGlue = preload("res://scripts/material_profile_glue.gd")
 var _camera = null
 var _cluster_mgr = null
 var _emissive: Dictionary = {}
@@ -123,15 +124,23 @@ func _ready() -> void:
 	_build_palette()
 	_update_hud()
 	_init_camera()
+	_init_profile_material()
 	_init_cluster_lights()
 	_update_marker()
 	_init_hud_separation()
 
 # Deterministic per-row jitter in [0, 1): integer hash, no RNG state, so
 # the silhouette is identical every boot.
+# R7 fix: the old LCG ((y*1103515245+12345)>>7)%100 stepped -3/+13 mod 100
+# on alternating rows — a ~20-row ramp-and-wrap sawtooth that carved regular
+# triangular wedges into the cavern wall (edge x0/x1 drifted +2.4px per two
+# rows, then snapped back ~21px). Avalanche hash below decorrelates rows
+# (same [0,1) range, same +-12px amplitude, no short-period structure).
 func _row_hash(y: int) -> float:
-	var h: int = (y * 1103515245 + 12345) & 0x7fffffff
-	return float((h >> 7) % 100) / 100.0
+	var h: int = (y * 0x9E3779B1) & 0xFFFFFFFF
+	h = (h ^ (h >> 13)) & 0xFFFFFFFF
+	h = (h ^ (h >> 7)) & 0xFFFFFFFF
+	return float(h % 100) / 100.0
 
 func _mat_id(mat_name: String, fallback: int) -> int:
 	for id in world.get_material_ids():
@@ -215,6 +224,8 @@ func _process(delta: float) -> void:
 		is_drawing = false
 	world.flush_present()
 	_refresh_textures()
+	if _profile_mat != null:
+		ProfileGlue.update_present(_profile_mat, world, _view_region.position, _view_region.size)
 	if _transient_ttl > 0.0:
 		_transient_ttl -= delta
 		if _transient_ttl <= 0.0:
@@ -480,8 +491,26 @@ func _apply_view_region() -> void:
 	_base_atlas.region = Rect2(_view_region)
 	_water_atlas.region = Rect2(_view_region)
 
+# P3A R7: the DISPLAYED base layer is the identity texture under the profile
+# ShaderMaterial (see _init_profile_material). The CPU RGBA layer keeps
+# painting every flush as the static reference (fixtures depend on it) but is
+# no longer shown. Water overlay, lights, and bloom are untouched.
+var _profiles: Dictionary = {}
+var _profile_mat: ShaderMaterial
+
+
+func _init_profile_material() -> void:
+	var res: Dictionary = ProfileGlue.load_profiles(world)
+	if not bool(res["ok"]):
+		push_warning("cave_benchmark: material_visuals rejected (%s), profile LUTs are safe defaults" % String(res["error"]))
+	_profiles = res["profiles"]
+	_profile_mat = ProfileGlue.make_material(world, _profiles, _view_region.position, _view_region.size)
+	texture_display.material = _profile_mat
+	_refresh_textures()
+
+
 func _refresh_textures() -> void:
-	var base_tex := world.get_world_texture()
+	var base_tex := world.get_identity_texture()
 	if _base_atlas == null:
 		texture_display.texture = base_tex
 		water_display.texture = world.get_water_texture()

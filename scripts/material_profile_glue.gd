@@ -25,17 +25,33 @@ extends RefCounted
 #   H2 Every vertical read radius r must be covered by repaint expansion: the
 #      bridge expands dirty +-1 cy (64 rows) >> the 5-row paint halo. Never
 #      shrink the expansion below 6 rows without a re-proof.
-#   H3 Shader-side neighbor sampling is FORBIDDEN on cropped views: profile +
-#      water shading stay per-texel center-sample-only, and update_present
-#      maps view_origin/view_size in sim space so crops stay consecutive.
+#   H3 (R7 revision) Shader-side neighbor sampling MUST ride full-texture
+#      uniforms through the view uniforms: the center id decode stays
+#      per-texel center-sample-only on the (possibly AtlasTexture-cropped)
+#      TEXTURE, while material-boundary reads (identity_tex) and overburden
+#      reads (depth_tex) use sim-space UV ((cell+0.5)/world_size with 1-texel
+#      offsets of the FULL texture). Raw TEXTURE offsets stay FORBIDDEN —
+#      they clamp at crop borders. Seams cannot appear: full layers upload
+#      monolithically each painted flush and identity/depth bytes are exact
+#      for every cell (R7 depth rewrites full affected columns, so downward
+#      propagation never seams at chunk borders). update_present keeps
+#      mapping view_origin/view_size in sim space so crops stay consecutive.
 #   H4 Camera moves (AtlasTexture region / view_origin) must never dirty the
 #      sim or trigger rebakes — pan/zoom across chunk edges submits nothing.
 #   H5 Animation inputs are uniforms only (present_tick/phase, anim_mix);
 #      identity/seed/snapshot bytes are never mutated for looks — animated
 #      (flickering) frames submit 0 uploads at 0 dirty px.
-#   H6 GPU upload stays monolithic per painted flush (full-texture update x3,
-#      P1.2 design); batching rule: exactly one flush_present per frame, and
-#      idle frames submit nothing.
+#   H6 GPU upload stays monolithic per painted flush (full-texture update x4
+#      since R7 depth, P1.2 design); batching rule: exactly one
+#      flush_present per frame, and idle frames submit nothing.
+#
+# P3A R7 — visual payoff slice (attach + depth + edge + tune):
+#   The profile material MUST be attached to the WorldTexture node with the
+#   identity texture as its texture (callers: cave + demo controllers); the
+#   CPU RGBA layer keeps painting underneath as the static reference but is
+#   no longer displayed. Depth rate has NO JSON field by design (schema
+#   untouched): it rides LUT tex3.g with DEFAULT_DEPTH_RATE below, so E2's
+#   pinned LUT shapes/bytes stay green (tex3.r count channel untouched).
 
 const PROFILE_SHADER: Shader = preload("res://shaders/material_profile.gdshader")
 # A2 precedent: preload const, no class_name (parallel-slice safe).
@@ -50,6 +66,13 @@ const OPACITY_INDEX := {"opaque": 0.0, "translucent": 1.0, "additive": 2.0}
 const ANIM_INDEX := {"static": 0.0, "flame": 1.0, "ember": 2.0, "flow": 3.0, "wisp": 4.0}
 
 const BG_COLOR := Color(18.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0)
+
+# R7 depth-curve default (LUT tex3.g for every row — no JSON field by design,
+# see header). exp(-depth*rate): 0.06 gives 0.55x at 10 cells, 0.30x at 20,
+# 0.09x at 40 — surfaces read, deep masses sink without crushing mid-tones.
+const DEFAULT_DEPTH_RATE := 0.06
+const DEFAULT_EDGE_DARKNESS := 0.35
+const DEFAULT_DEPTH_BOOST := 1.0
 
 
 ## Loaded-profile result straight from the B1 loader (roster = live table names).
@@ -72,7 +95,10 @@ static func build_palette_image(profiles: Dictionary, world: AshfallWorld) -> Im
 
 ## 4x256 RGBAF: tex0=(pattern_mode,pattern_scale,detail,edge)
 ## tex1=(opacity,opacity_mode,emission_strength,anim)
-## tex2=(emission rgb,0) tex3=(palette_count,0,0,0).
+## tex2=(emission rgb,0) tex3=(palette_count,depth_rate,0,0).
+## depth_rate is the R7 LUT spare channel: the JSON schema has NO depth field
+## by design, so every row carries DEFAULT_DEPTH_RATE (E2's pinned count
+## channel tex3.r is untouched, shapes stay 4x256 RGBAF).
 static func build_params_image(profiles: Dictionary, world: AshfallWorld) -> Image:
 	var img := Image.create(PARAM_W, PROFILE_ROWS, false, Image.FORMAT_RGBAF)
 	for id in PROFILE_ROWS:
@@ -85,7 +111,7 @@ static func build_params_image(profiles: Dictionary, world: AshfallWorld) -> Ima
 		img.set_pixel(1, id, Color(prof["opacity"], OPACITY_INDEX[prof["opacity_mode"]],
 			em["strength"], ANIM_INDEX[prof["animation"]]))
 		img.set_pixel(2, id, Color(emc.r, emc.g, emc.b, 0.0))
-		img.set_pixel(3, id, Color(float(pal.size()), 0.0, 0.0, 0.0))
+		img.set_pixel(3, id, Color(float(pal.size()), DEFAULT_DEPTH_RATE, 0.0, 0.0))
 	return img
 
 
@@ -98,6 +124,10 @@ static func make_material(world: AshfallWorld, profiles: Dictionary,
 	var sm := ShaderMaterial.new()
 	sm.shader = PROFILE_SHADER
 	sm.set_shader_parameter("seed_tex", world.get_seed_texture())
+	sm.set_shader_parameter("identity_tex", world.get_identity_texture())
+	sm.set_shader_parameter("depth_tex", world.get_depth_texture())
+	sm.set_shader_parameter("edge_darkness", DEFAULT_EDGE_DARKNESS)
+	sm.set_shader_parameter("depth_boost", DEFAULT_DEPTH_BOOST)
 	sm.set_shader_parameter("profile_palette",
 		ImageTexture.create_from_image(build_palette_image(profiles, world)))
 	sm.set_shader_parameter("profile_params",
@@ -150,13 +180,19 @@ static func resolve_animation(world: AshfallWorld) -> Dictionary:
 	return {"tick": tick, "phase": phase, "mix": mix}
 
 
-## Per-frame present refresh: world clock only (tick/phase declared for Slice D).
+## Per-frame present refresh: world clock + view rect + full-texture binds.
+## Texture objects are rebound every flush (cheap pointer sets) so bridge-side
+## presentation recovery and init_world swaps (which replace the objects)
+## can never leave the material sampling a dead texture.
 static func update_present(sm: ShaderMaterial, world: AshfallWorld,
 		view_origin: Vector2i = Vector2i.ZERO, view_size: Vector2i = Vector2i.ZERO) -> void:
 	var a := resolve_animation(world)
 	sm.set_shader_parameter("present_tick", int(a["tick"]))
 	sm.set_shader_parameter("present_phase", float(a["phase"]))
 	sm.set_shader_parameter("anim_mix", float(a["mix"]))
+	sm.set_shader_parameter("seed_tex", world.get_seed_texture())
+	sm.set_shader_parameter("identity_tex", world.get_identity_texture())
+	sm.set_shader_parameter("depth_tex", world.get_depth_texture())
 	var region := view_size
 	if region == Vector2i.ZERO:
 		region = Vector2i(world.get_world_width(), world.get_world_height())
@@ -179,20 +215,24 @@ static func stable_seed(x: int, y: int) -> int:
 	return int(h & 0xFF)
 
 
-## CPU mirror of the shader's static evaluation (anim_mix = 0, emission on:
-## emission_mix = 1 intrinsic-only — no temperature input exists, so heat
-## contributes nothing by construction). Mirrors shader section 6 exactly:
-## luminance weight ((lum-0.25)/0.55 clamped, squared), core whitening
-## (emission color lerped toward (1,0.96,0.88) by weight*0.45), gated on
-## rendered coverage (air/translucent cells return background, unlit).
-static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int, seed_byte: int) -> Color:
-	var prof: Dictionary = profiles.get(mat_name, Visuals.default_profile(mat_name))
+## R7 section 8 mirror: boundary darkening factor for diff_count differing
+## 4-neighbors (id equality only — never material identity).
+static func eval_edge_factor(edge_response: float, diff_count: int, darkness := DEFAULT_EDGE_DARKNESS) -> float:
+	return 1.0 - clampf(edge_response, 0.0, 1.0) * darkness * clampf(float(diff_count) * 0.75, 0.0, 1.0)
+
+
+## R7 section 9 mirror: exponential overburden falloff.
+static func eval_depth_factor(depth_cells: int, rate := DEFAULT_DEPTH_RATE, boost := DEFAULT_DEPTH_BOOST) -> float:
+	return exp(-float(maxi(depth_cells, 0)) * rate * boost)
+
+
+## Shared pattern pick (shader section 3): palette entry pre-detail. The
+## emission weight derives from this base (R7), never from dark detail rolls.
+static func _eval_pattern(prof: Dictionary, x: int, y: int, seed_byte: int) -> Color:
 	var pal: Array = row_palette_for(prof)
 	var mode: float = PATTERN_INDEX[prof["pattern"]]
 	var pscale: float = maxf(float(prof["pattern_scale"]), 1.0)
-	var detail: float = clampf(float(prof["detail_strength"]), 0.0, 1.0)
 	var count: float = maxf(float(pal.size()), 1.0)
-	var seed01 := float(seed_byte) / 255.0
 	var sstep := float(seed_byte)
 	var cell := Vector2(x, y)
 	var pidx := 0.0
@@ -214,23 +254,85 @@ static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int
 		var h := _hash12(blk2.x + 7.3, blk2.y + 7.3)
 		pidx = 0.0 if h < 0.7 else (1.0 if h < 0.9 else count - 1.0)
 	var base: Color = pal[clampi(int(floor(pidx + 0.5)), 0, 3)]
+	return base
+
+
+## Shared three-scale detail (shader section 4): per-cell seed + 2x2 block +
+## 4x4 mottle, all x detail_strength. Modulates albedo only.
+static func _eval_detail(prof: Dictionary, base: Color, x: int, y: int, seed_byte: int) -> Color:
+	var detail: float = clampf(float(prof["detail_strength"]), 0.0, 1.0)
+	var seed01 := float(seed_byte) / 255.0
+	var cell := Vector2(x, y)
 	var col := base * (1.0 + (seed01 - 0.5) * 2.0 * detail)
-	if float(prof["opacity"]) < 0.01:
+	var blk := _hash12(floor(cell.x / 2.0), floor(cell.y / 2.0))
+	var mot := _hash12(floor(cell.x / 4.0) + 3.1, floor(cell.y / 4.0) + 3.1)
+	col *= 1.0 + (blk - 0.5) * detail * 1.2 + (mot - 0.5) * detail * 0.8
+	return col
+
+
+## CPU mirror of the shader's static evaluation (anim_mix = 0, emission on:
+## emission_mix = 1 intrinsic-only — no temperature input exists, so heat
+## contributes nothing by construction). Depth/edge neutral here (surface
+## interior reference): use eval_full_cpu for the shaded proof. Mirrors
+## shader section 6 exactly: luminance weight from the pattern BASE
+## ((lum-0.25)/0.55 clamped, squared — R7, dark detail rolls never dim
+## flames), core whitening (emission color lerped toward (1,0.96,0.88) by
+## weight*0.45), gated on rendered coverage (air/translucent cells return
+## background, unlit).
+static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int, seed_byte: int) -> Color:
+	var prof: Dictionary = profiles.get(mat_name, Visuals.default_profile(mat_name))
+	var base := _eval_pattern(prof, x, y, seed_byte)
+	return _eval_lit(prof, _eval_detail(prof, base, x, y, seed_byte), base)
+
+
+## Full R7 mirror: albedo x edge x depth + intrinsic emission (anim_mix = 0).
+## Headless proof only — never drives rendering. depth_cells mirrors the
+## bridge depth byte; diff_count mirrors the 4-neighbor id-difference count.
+static func eval_full_cpu(profiles: Dictionary, mat_name: String, x: int, y: int,
+		seed_byte: int, depth_cells: int = 0, diff_count: int = 0) -> Color:
+	var prof: Dictionary = profiles.get(mat_name, Visuals.default_profile(mat_name))
+	var base := _eval_pattern(prof, x, y, seed_byte)
+	if not _is_rendered(prof):
 		return BG_COLOR
+	var shaded := _eval_detail(prof, base, x, y, seed_byte)
+	shaded *= eval_edge_factor(float(prof["edge_response"]), diff_count)
+	shaded *= eval_depth_factor(depth_cells)
+	return _eval_add(prof, shaded, base)
+
+
+## Coverage gate shared by both mirrors (shader section 5).
+static func _is_rendered(prof: Dictionary) -> bool:
+	if float(prof["opacity"]) < 0.01:
+		return false
 	var opmode: float = OPACITY_INDEX[prof["opacity_mode"]]
 	if opmode > 0.5 and opmode < 1.5:
+		return false
+	return true
+
+
+## Intrinsic-emission add shared by both mirrors (shader section 6, albedo in,
+## lit color out — weight from the pattern BASE per the shader, add on the
+## shaded output).
+static func _eval_lit(prof: Dictionary, col: Color, base: Color) -> Color:
+	if not _is_rendered(prof):
 		return BG_COLOR
+	return _eval_add(prof, col, base)
+
+
+## Emission add with a separate weight source (shader section 6: elum/ecolor
+## derive from pattern-picked `emis_src`, the add lands on shaded `outc`).
+static func _eval_add(prof: Dictionary, outc: Color, emis_src: Color) -> Color:
 	# Section 6 mirror: intrinsic emission only (emission_mix = 1).
 	var em: Dictionary = prof["emission"]
 	var emc: Color = em["color"]
 	var estr := float(em["strength"])
-	var cc := Color(clampf(col.r, 0.0, 1.0), clampf(col.g, 0.0, 1.0), clampf(col.b, 0.0, 1.0))
+	var cc := Color(clampf(emis_src.r, 0.0, 1.0), clampf(emis_src.g, 0.0, 1.0), clampf(emis_src.b, 0.0, 1.0))
 	var elum := clampf(0.299 * cc.r + 0.587 * cc.g + 0.114 * cc.b, 0.0, 1.0)
 	var eweight := clampf((elum - 0.25) / 0.55, 0.0, 1.0)
 	eweight *= eweight
 	var ecolor: Color = emc.lerp(Color(1.0, 0.96, 0.88), eweight * 0.45)
 	var e := estr * eweight # emission_mix = 1, coverage already gated above
-	return Color(col.r + ecolor.r * e, col.g + ecolor.g * e, col.b + ecolor.b * e, 1.0)
+	return Color(outc.r + ecolor.r * e, outc.g + ecolor.g * e, outc.b + ecolor.b * e, 1.0)
 
 
 # --- internals -------------------------------------------------------------

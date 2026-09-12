@@ -44,3 +44,13 @@ Input ≤ 1 MiB, entries ≤ 64, palette 2–4, any single string ≤ 256 chars.
 Godot's JSON parser resolves duplicate object keys last-wins (the Group-3 C++
 subset parser rejects them). This presentation loader cannot observe
 duplicates; authors must not rely on them.
+
+## R7 depth rate (no JSON field, by design)
+
+There is deliberately NO `depth_rate` entry field: the overburden curve
+(`exp(-depth*rate)` in `shaders/material_profile.gdshader` §9) rides LUT
+`tex3.g` (tex3.r stays the palette count), filled by
+`scripts/material_profile_glue.gd` with `DEFAULT_DEPTH_RATE` (0.06) for every
+row. Per-material depth tuning therefore means touching the glue constant or
+extending `build_params_image` — never this schema — so LUT shapes/bytes
+pinned by the E2 suite stay green.

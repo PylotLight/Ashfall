@@ -82,6 +82,8 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_identity_image"), &AshfallWorld::get_identity_image);
     ClassDB::bind_method(D_METHOD("get_seed_texture"), &AshfallWorld::get_seed_texture);
     ClassDB::bind_method(D_METHOD("get_seed_image"), &AshfallWorld::get_seed_image);
+    ClassDB::bind_method(D_METHOD("get_depth_texture"), &AshfallWorld::get_depth_texture);
+    ClassDB::bind_method(D_METHOD("get_depth_image"), &AshfallWorld::get_depth_image);
     ClassDB::bind_method(D_METHOD("get_last_step_ms"), &AshfallWorld::get_last_step_ms);
     ClassDB::bind_method(D_METHOD("get_world_width"), &AshfallWorld::get_world_width);
     ClassDB::bind_method(D_METHOD("get_world_height"), &AshfallWorld::get_world_height);
@@ -162,6 +164,9 @@ void AshfallWorld::init_world(int p_width, int p_height) {
     identity_texture_ = ImageTexture::create_from_image(identity_image_);
     seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
     seed_texture_ = ImageTexture::create_from_image(seed_image_);
+    fill_depth_background();
+    depth_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
+    depth_texture_ = ImageTexture::create_from_image(depth_image_);
     force_full_repaint_ = false;
     world_.clear_dirty_chunks();
     step_accumulator_ = 0.0;
@@ -435,6 +440,8 @@ void AshfallWorld::debug_drop_presentation() {
     identity_texture_.unref();
     seed_image_.unref();
     seed_texture_.unref();
+    depth_image_.unref();
+    depth_texture_.unref();
 }
 
 std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
@@ -459,8 +466,8 @@ std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
 
 bool AshfallWorld::presentation_resources_valid() const {
     // B2: the null/degraded check covers ALL layers (base + water + identity
-    // + seed). Seed bytes never change with sim, but the objects still need
-    // the same lifetime/validity discipline.
+    // + seed + R7 depth). Seed bytes never change with sim, but the objects
+    // still need the same lifetime/validity discipline.
     if (world_image_.is_null() || world_texture_.is_null()) return false;
     if (water_image_.is_null() || water_texture_.is_null()) return false;
     if (identity_image_.is_null() || identity_texture_.is_null()) return false;
@@ -469,10 +476,13 @@ bool AshfallWorld::presentation_resources_valid() const {
     if (water_image_->get_width() != world_width_ || water_image_->get_height() != world_height_) return false;
     if (identity_image_->get_width() != world_width_ || identity_image_->get_height() != world_height_) return false;
     if (seed_image_->get_width() != world_width_ || seed_image_->get_height() != world_height_) return false;
+    if (depth_image_.is_null() || depth_texture_.is_null()) return false;
+    if (depth_image_->get_width() != world_width_ || depth_image_->get_height() != world_height_) return false;
     const int64_t expect = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_) * 4;
     if (pixel_bytes_.size() != expect || water_pixel_bytes_.size() != expect) return false;
     const int64_t expect_ids = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
     if (identity_bytes_.size() != expect_ids || seed_bytes_.size() != expect_ids) return false;
+    if (depth_bytes_.size() != expect_ids) return false;
     return true;
 }
 
@@ -514,6 +524,18 @@ void AshfallWorld::fill_identity_seed_background() {
     }
 }
 
+void AshfallWorld::fill_depth_background() {
+    // P3A R7: depth starts at zero overburden everywhere; the next flush
+    // rewrites every byte (init runs before any present; recover forces a
+    // full repaint), so zeros here are only a validity placeholder.
+    const int64_t total_cells = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    depth_bytes_.resize(total_cells);
+    uint8_t *d = depth_bytes_.ptrw();
+    for (int64_t i = 0; i < total_cells; ++i) {
+        d[i] = 0;
+    }
+}
+
 std::uint8_t AshfallWorld::stable_seed(int x, int y) {
     // Same hash family as the painter grain (deterministic, no RNG state),
     // full-byte output instead of the grain's -6..+6 range.
@@ -543,6 +565,9 @@ void AshfallWorld::recover_presentation_resources() {
     identity_texture_ = ImageTexture::create_from_image(identity_image_);
     seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
     seed_texture_ = ImageTexture::create_from_image(seed_image_);
+    fill_depth_background();
+    depth_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
+    depth_texture_ = ImageTexture::create_from_image(depth_image_);
     force_full_repaint_ = true;
 }
 
@@ -663,6 +688,27 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
         world_.copy_rect({0, 0}, {world_width_ - 1, world_height_ - 1}, cell_buffer_);
         last_present_.material_read_ms = present_ms_between(read_t0, std::chrono::steady_clock::now());
         logical_cells = static_cast<std::uint64_t>(world_width_) * static_cast<std::uint64_t>(world_height_);
+        // P3A R7 depth (full path): column overburden runs over the full
+        // copy — O(cells), exact. depth(x,y) counts consecutive piled-matter
+        // cells directly above (Static/Powder/Liquid; air and gas stop the
+        // run), clamped to 255. Flames/steam must not cast depth (gas
+        // excluded); sand piles do (powder included).
+        {
+            static constexpr std::uint8_t kGasClass =
+                static_cast<std::uint8_t>(ashfall::Movement::Gas);
+            uint8_t *d = depth_bytes_.ptrw();
+            for (int x = 0; x < world_width_; ++x) {
+                int run = 0;
+                for (int y = 0; y < world_height_; ++y) {
+                    const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+                    d[i] = static_cast<uint8_t>(run > 255 ? 255 : run);
+                    const ashfall::MaterialId mat = cell_buffer_[i];
+                    const bool piled = mat != ashfall::kAir &&
+                        movements_[static_cast<std::size_t>(mat)] != kGasClass;
+                    run = piled ? run + 1 : 0;
+                }
+            }
+        }
         for (int y = 0; y < world_height_; ++y) {
             for (int x = 0; x < world_width_; ++x) {
                 const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
@@ -711,6 +757,48 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
         // (F1 partial==full). Copy time is reported in material_read_ms;
         // paint_ms excludes it so the phase split stays meaningful.
         double read_ms = 0.0;
+        // P3A R7 depth (partial path): full-height strip over the repaint
+        // bounding box, then column runs — bit-identical to the full path.
+        // Depth propagates DOWNWARD (a dig at the top reshades the whole
+        // column until the next air gap), so repainting only repaint rows
+        // would seam at 64-cell chunk borders; rewriting the full affected
+        // columns keeps every byte exact. Copy time joins material_read_ms.
+        {
+            static constexpr std::uint8_t kGasClass =
+                static_cast<std::uint8_t>(ashfall::Movement::Gas);
+            int min_x = world_width_, max_x = -1;
+            for (const ashfall::CellPosition chunk : repaint) {
+                const int base_x = chunk.x * ashfall::kChunkSize;
+                const int start_x = std::max(base_x, 0);
+                const int end_x = std::min(base_x + ashfall::kChunkSize - 1, world_width_ - 1);
+                if (end_x < start_x) continue;
+                min_x = std::min(min_x, start_x);
+                max_x = std::max(max_x, end_x);
+            }
+            if (max_x >= min_x) {
+                const int strip_w = max_x - min_x + 1;
+                tile_scratch_.resize(
+                    static_cast<std::size_t>(strip_w) * static_cast<std::size_t>(world_height_));
+                const auto strip_t0 = std::chrono::steady_clock::now();
+                world_.copy_rect({min_x, 0}, {max_x, world_height_ - 1},
+                    std::span<ashfall::MaterialId>(tile_scratch_));
+                read_ms += present_ms_between(strip_t0, std::chrono::steady_clock::now());
+                uint8_t *d = depth_bytes_.ptrw();
+                for (int sx = 0; sx < strip_w; ++sx) {
+                    int run = 0;
+                    for (int y = 0; y < world_height_; ++y) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(y * world_width_ + min_x + sx);
+                        d[i] = static_cast<uint8_t>(run > 255 ? 255 : run);
+                        const ashfall::MaterialId mat =
+                            tile_scratch_[static_cast<std::size_t>(y * strip_w + sx)];
+                        const bool piled = mat != ashfall::kAir &&
+                            movements_[static_cast<std::size_t>(mat)] != kGasClass;
+                        run = piled ? run + 1 : 0;
+                    }
+                }
+            }
+        }
         for (const ashfall::CellPosition chunk : repaint) {
             const int base_x = chunk.x * ashfall::kChunkSize;
             const int base_y = chunk.y * ashfall::kChunkSize;
@@ -774,14 +862,16 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
     world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
     water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
     identity_image_->set_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    depth_image_->set_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
     last_present_.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
     const auto submit_t0 = std::chrono::steady_clock::now();
     world_texture_->update(world_image_);
     water_texture_->update(water_image_);
     identity_texture_->update(identity_image_);
+    depth_texture_->update(depth_image_);
     // Seed is coordinate-pure (init/recover only): no per-flush upload.
     last_present_.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
-    last_present_.texture_submits += 3; // base + water + identity update() calls
+    last_present_.texture_submits += 4; // base + water + identity + depth update() calls
     ++last_present_.present_flushes;
     force_full_repaint_ = false;
     // Presentation consumed the dirty set.
@@ -861,6 +951,14 @@ Ref<ImageTexture> AshfallWorld::get_seed_texture() const {
 
 Ref<Image> AshfallWorld::get_seed_image() const {
     return seed_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_depth_texture() const {
+    return depth_texture_;
+}
+
+Ref<Image> AshfallWorld::get_depth_image() const {
+    return depth_image_;
 }
 
 } // namespace godot
