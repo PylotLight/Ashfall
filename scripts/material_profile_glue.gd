@@ -14,6 +14,8 @@ extends RefCounted
 #
 # eval_cell_cpu mirrors the shader's static (anim_mix = 0) evaluation so the
 # headless probe can assert profile fidelity per pixel without a GPU.
+# eval_anim_cpu / eval_anim_parts_cpu mirror shader section 7 (Slice D1) for
+# the tick-driven proof: inputs change with tick, freeze with tick.
 
 const PROFILE_SHADER: Shader = preload("res://shaders/material_profile.gdshader")
 # A2 precedent: preload const, no class_name (parallel-slice safe).
@@ -85,16 +87,56 @@ static func make_material(world: AshfallWorld, profiles: Dictionary,
 	sm.set_shader_parameter("view_size", Vector2(region))
 	sm.set_shader_parameter("bg_color", Vector3(BG_COLOR.r, BG_COLOR.g, BG_COLOR.b))
 	update_present(sm, world, view_origin, region)
-	sm.set_shader_parameter("anim_mix", 0.0) # B2 static (Slice D drives)
 	sm.set_shader_parameter("emission_mix", 1.0) # C1 enabled: intrinsic-only, no heat input
 	return sm
+
+
+## Slice D1 animation clock. update_present feeds present_tick from the world
+## tick every flush; present_phase is the optional 0..1 interpolation fraction
+## between sim ticks (held at 0.0 — no interpolation — until a slice owns it);
+## anim_mix is 1.0 live (0 selects the bit-exact static reference).
+## Forced capture values for E2 visual regression (determinism):
+##   set_animation_override(0, 0.0, 0.0) -> static bit-identical reference
+##   set_animation_override(N, 0.0, 1.0) -> forced animated frame at tick N
+## A negative channel selects the live value for that channel.
+static var _anim_override_tick := -1
+static var _anim_override_phase := -1.0
+static var _anim_override_mix := -1.0
+
+
+static func set_animation_override(tick := -1, phase := -1.0, mix := -1.0) -> void:
+	_anim_override_tick = tick
+	_anim_override_phase = phase
+	_anim_override_mix = mix
+
+
+static func clear_animation_override() -> void:
+	_anim_override_tick = -1
+	_anim_override_phase = -1.0
+	_anim_override_mix = -1.0
+
+
+## Resolved (tick, phase, mix) uniforms: live world values unless overridden.
+static func resolve_animation(world: AshfallWorld) -> Dictionary:
+	var tick := int(world.get_tick())
+	if _anim_override_tick >= 0:
+		tick = _anim_override_tick
+	var phase := 0.0
+	if _anim_override_phase >= 0.0:
+		phase = clampf(_anim_override_phase, 0.0, 1.0)
+	var mix := 1.0
+	if _anim_override_mix >= 0.0:
+		mix = clampf(_anim_override_mix, 0.0, 1.0)
+	return {"tick": tick, "phase": phase, "mix": mix}
 
 
 ## Per-frame present refresh: world clock only (tick/phase declared for Slice D).
 static func update_present(sm: ShaderMaterial, world: AshfallWorld,
 		view_origin: Vector2i = Vector2i.ZERO, view_size: Vector2i = Vector2i.ZERO) -> void:
-	sm.set_shader_parameter("present_tick", int(world.get_tick()))
-	sm.set_shader_parameter("present_phase", 0.0) # Slice D interpolation fraction
+	var a := resolve_animation(world)
+	sm.set_shader_parameter("present_tick", int(a["tick"]))
+	sm.set_shader_parameter("present_phase", float(a["phase"]))
+	sm.set_shader_parameter("anim_mix", float(a["mix"]))
 	var region := view_size
 	if region == Vector2i.ZERO:
 		region = Vector2i(world.get_world_width(), world.get_world_height())
@@ -172,6 +214,41 @@ static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int
 
 
 # --- internals -------------------------------------------------------------
+## CPU mirror of shader section 7 (Slice D1): raw amod before the coverage
+## gate and anim_mix, for (anim profile, cell, static seed, tick+phase).
+## Headless proof only — never drives rendering.
+static func eval_anim_cpu(anim: String, x: int, y: int, seed_byte: int, tick: int, phase: float) -> float:
+	var total := 0.0
+	for _k in eval_anim_parts_cpu(anim, x, y, seed_byte, tick, phase).values():
+		total += float(_k)
+	return total
+
+
+## Per-component mirror of section 7, so the proof can compare regional vs
+## cell structure directly. Keys per anim: flame -> {region, cell, rise},
+## ember -> {region}, flow -> {ripple, spark}, wisp -> {drift}, static -> {}.
+static func eval_anim_parts_cpu(anim: String, x: int, y: int, seed_byte: int, tick: int, phase: float) -> Dictionary:
+	var at := float(tick) + clampf(phase, 0.0, 1.0)
+	var seed01 := float(seed_byte) / 255.0
+	var cell := Vector2(x, y)
+	match anim:
+		"flame":
+			var rphase := _hash12(floor(cell.x / 4.0), floor(cell.y / 4.0)) * 6.2831
+			return {
+				"region": sin(at * 0.9 + rphase) * 0.10,
+				"cell": sin(at * 2.7 + seed01 * 6.2831) * 0.03,
+				"rise": sin((cell.y + at * 3.0) * 0.9 + (_hash12(cell.x, 3.7) - 0.5) * 4.0) * 0.04,
+			}
+		"ember":
+			var rphase := _hash12(floor(cell.x / 4.0), floor(cell.y / 4.0)) * 6.2831
+			return {"region": sin(at * 0.25 + rphase) * 0.05}
+		"flow":
+			var ripple := sin((cell.x + cell.y) * 0.35 + at * 0.5) * 0.015
+			var gate := 0.5 + 0.5 * sin(at * 0.5 + _hash12(floor(cell.x / 3.0), floor(cell.y / 3.0)) * 6.2831)
+			return {"ripple": ripple, "spark": gate * gate * gate * gate * 0.05}
+		"wisp":
+			return {"drift": sin((cell.y + at * 1.0) * 0.5 + _hash12(cell.x, 9.1) * 6.2831) * 0.03}
+	return {}
 
 static func row_profile(profiles: Dictionary, world: AshfallWorld, id: int) -> Dictionary:
 	var mat_name := ""
