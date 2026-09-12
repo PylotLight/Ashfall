@@ -86,7 +86,7 @@ static func make_material(world: AshfallWorld, profiles: Dictionary,
 	sm.set_shader_parameter("bg_color", Vector3(BG_COLOR.r, BG_COLOR.g, BG_COLOR.b))
 	update_present(sm, world, view_origin, region)
 	sm.set_shader_parameter("anim_mix", 0.0) # B2 static (Slice D drives)
-	sm.set_shader_parameter("emission_mix", 0.0) # B2 intrinsic-only (Slice C1 enables)
+	sm.set_shader_parameter("emission_mix", 1.0) # C1 enabled: intrinsic-only, no heat input
 	return sm
 
 
@@ -117,7 +117,12 @@ static func stable_seed(x: int, y: int) -> int:
 	return int(h & 0xFF)
 
 
-## CPU mirror of the shader's static evaluation (anim_mix = emission_mix = 0).
+## CPU mirror of the shader's static evaluation (anim_mix = 0, emission on:
+## emission_mix = 1 intrinsic-only — no temperature input exists, so heat
+## contributes nothing by construction). Mirrors shader section 6 exactly:
+## luminance weight ((lum-0.25)/0.55 clamped, squared), core whitening
+## (emission color lerped toward (1,0.96,0.88) by weight*0.45), gated on
+## rendered coverage (air/translucent cells return background, unlit).
 static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int, seed_byte: int) -> Color:
 	var prof: Dictionary = profiles.get(mat_name, Visuals.default_profile(mat_name))
 	var pal: Array = row_palette_for(prof)
@@ -153,7 +158,17 @@ static func eval_cell_cpu(profiles: Dictionary, mat_name: String, x: int, y: int
 	var opmode: float = OPACITY_INDEX[prof["opacity_mode"]]
 	if opmode > 0.5 and opmode < 1.5:
 		return BG_COLOR
-	return Color(col.r, col.g, col.b, 1.0)
+	# Section 6 mirror: intrinsic emission only (emission_mix = 1).
+	var em: Dictionary = prof["emission"]
+	var emc: Color = em["color"]
+	var estr := float(em["strength"])
+	var cc := Color(clampf(col.r, 0.0, 1.0), clampf(col.g, 0.0, 1.0), clampf(col.b, 0.0, 1.0))
+	var elum := clampf(0.299 * cc.r + 0.587 * cc.g + 0.114 * cc.b, 0.0, 1.0)
+	var eweight := clampf((elum - 0.25) / 0.55, 0.0, 1.0)
+	eweight *= eweight
+	var ecolor: Color = emc.lerp(Color(1.0, 0.96, 0.88), eweight * 0.45)
+	var e := estr * eweight # emission_mix = 1, coverage already gated above
+	return Color(col.r + ecolor.r * e, col.g + ecolor.g * e, col.b + ecolor.b * e, 1.0)
 
 
 # --- internals -------------------------------------------------------------

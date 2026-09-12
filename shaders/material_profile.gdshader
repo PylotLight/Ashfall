@@ -24,8 +24,9 @@ shader_type canvas_item;
 //   same partition the bridge painter uses.
 // - present_tick / present_phase / anim_mix are DECLARED now and wired to a
 //   flicker term scaled by anim_mix (0 in B2 ⇒ bit-exact static output);
-//   Slice D drives them. emission_mix likewise (0 in B2; Slice C1 enables).
-//   No blanket clock: pause freezes deterministically by construction.
+//   Slice D drives them. emission_mix likewise (1 from C1 — intrinsic-only,
+//   no heat input; B2 held 0). No blanket clock: pause freezes
+//   deterministically by construction.
 // - Crop note: under an AtlasTexture camera view the caller sets view_origin
 //   (top-left cell) + view_size (region cells) so cell coords stay in sim
 //   space; full-texture use is view_origin=(0,0), view_size=world_size.
@@ -46,8 +47,8 @@ uniform vec3 bg_color : source_color = vec3(0.0706, 0.0784, 0.0941); // (18,20,2
 uniform int present_tick = 0;
 uniform float present_phase = 0.0;
 uniform float anim_mix = 0.0;
-// Emission enable (Slice C1 turns on; B2 holds 0 ⇒ intrinsic only).
-uniform float emission_mix = 0.0;
+// Emission enable (Slice C1 holds 1: intrinsic-only, no heat input).
+uniform float emission_mix = 1.0;
 
 // Deterministic 0..1 hash, no RNG state.
 float hash12(vec2 p) {
@@ -133,8 +134,29 @@ void fragment() {
 		outc = bg_color;
 	}
 
-	// 6. Intrinsic emission (declared now; emission_mix = 0 in B2).
-	outc += P2.rgb * P1.z * emission_mix;
+	// 6. Intrinsic emission (Slice C1 enabled via emission_mix = 1).
+	// Contract: lit = albedo x (ambient + local) + emission; emission =
+	// intrinsic_material_emission + optional_heat_curve(T). There is NO
+	// temperature input to this shader (no new uniforms: engine/bridge
+	// edits are out of scope for C1), so heat_curve(T) is identically 0 BY
+	// CONSTRUCTION — hot water (strength 0) cannot glow; flames/lava are
+	// art-directed intrinsics, never a generic temperature ramp.
+	// Pattern-aware weight from final albedo luminance (profile-driven,
+	// never identity): flame plume cores emit ~full, edges dim; lava
+	// crust (~0.19 lum) emits nothing, cracks (~0.78 lum) emit ~full.
+	// Gated on rendered coverage so air/translucent base cells stay bg;
+	// albedo itself is never darkened (ambient floor preserved).
+	float elum = clamp(dot(clamp(col, vec3(0.0), vec3(1.0)), vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+	float eweight = clamp((elum - 0.25) / 0.55, 0.0, 1.0);
+	eweight *= eweight;
+	vec3 ecolor = mix(P2.rgb, vec3(1.0, 0.96, 0.88), eweight * 0.45);
+	float ecover = 1.0;
+	if (opacity < 0.01) {
+		ecover = 0.0;
+	} else if (opmode > 0.5 && opmode < 1.5) {
+		ecover = 0.0;
+	}
+	outc += ecolor * (P1.z * eweight * ecover) * emission_mix;
 
 	// 7. Tick-driven animation (declared now; anim_mix = 0 in B2 ⇒ static).
 	float flick = sin((cell.x + cell.y) * 0.7 + float(present_tick) * 0.9 + present_phase * 6.2831) * anim_mix * 0.05;
