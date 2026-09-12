@@ -111,3 +111,10 @@ All layers reviewed. Execution order from the backlogs:
    and fixed with an avalanche hash (cave occupied 163432→163348, engine
    untouched). Note: Godot strips window/stretch/aspect on every editor
    save — restore `keep` if the letterbox drifts again.
+   R8 (`cdd3946`): shader UV double-applied the atlas crop (Godot bakes the
+   region into fragment UVs) so patterns swam with the camera — fixed to
+   `floor(UV*world_size)`, anchored by construction, proved by a 140-check
+   headless probe incl. negative control; right-edge streaks were the same
+   bug (no bridge change). Cave re-authored Noita-style: 7 chambers,
+   tunnels/shafts, stalactites, ore veins, stone rind, basins (occupied
+   203819, spawn on the beam in the spawn hall).
