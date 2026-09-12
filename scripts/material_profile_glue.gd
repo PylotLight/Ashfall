@@ -16,6 +16,26 @@ extends RefCounted
 # headless probe can assert profile fidelity per pixel without a GPU.
 # eval_anim_cpu / eval_anim_parts_cpu mirror shader section 7 (Slice D1) for
 # the tick-driven proof: inputs change with tick, freeze with tick.
+#
+# P3A Slice D, task D3 — halo/gutter rules (measured by the throwaway
+# /tmp/d3_dirty_proof.gd against the live cave; dirty px/frame, submits, and
+# seam scans — not asserted). 64-cell seams cannot appear by construction:
+#   H1 CPU paint samples VERTICALLY ONLY (surface y-1, depth y+1..+5); no
+#      horizontal neighbor reads exist, so no +-cx halo is needed or allowed.
+#   H2 Every vertical read radius r must be covered by repaint expansion: the
+#      bridge expands dirty +-1 cy (64 rows) >> the 5-row paint halo. Never
+#      shrink the expansion below 6 rows without a re-proof.
+#   H3 Shader-side neighbor sampling is FORBIDDEN on cropped views: profile +
+#      water shading stay per-texel center-sample-only, and update_present
+#      maps view_origin/view_size in sim space so crops stay consecutive.
+#   H4 Camera moves (AtlasTexture region / view_origin) must never dirty the
+#      sim or trigger rebakes — pan/zoom across chunk edges submits nothing.
+#   H5 Animation inputs are uniforms only (present_tick/phase, anim_mix);
+#      identity/seed/snapshot bytes are never mutated for looks — animated
+#      (flickering) frames submit 0 uploads at 0 dirty px.
+#   H6 GPU upload stays monolithic per painted flush (full-texture update x3,
+#      P1.2 design); batching rule: exactly one flush_present per frame, and
+#      idle frames submit nothing.
 
 const PROFILE_SHADER: Shader = preload("res://shaders/material_profile.gdshader")
 # A2 precedent: preload const, no class_name (parallel-slice safe).
