@@ -30,15 +30,24 @@ shader_type canvas_item;
 //   emission_mix likewise (1 from C1 — intrinsic-only, no heat input; B2 held
 //   0). No blanket clock: pause freezes deterministically by construction.
 // - Crop note: under an AtlasTexture camera view the caller sets view_origin
-//   (top-left cell) + view_size (region cells) so cell coords stay in sim
-//   space; full-texture use is view_origin=(0,0), view_size=world_size.
-//   TEXTURE itself is the (possibly cropped) identity view: the center id
-//   decode below stays center-sample-only and crop-safe. Sections 8 (edge)
-//   and 9 (depth) instead sample the FULL identity/depth textures via
-//   sim-space UV ((cell+0.5)/world_size, neighbor offset = 1 full texel) —
-//   never TEXTURE offsets, which would clamp at crop borders (glue rule H3).
-//   Full textures upload monolithically each painted flush, so boundaries
-//   and overburden stay exact across 64-cell chunk borders by construction.
+//   (top-left cell) + view_size (region cells) so tooling/probes can
+//   cross-check the crop; full-texture use is view_origin=(0,0),
+//   view_size=world_size. TEXTURE itself is the (possibly cropped) identity
+//   view: the center id decode below stays center-sample-only and crop-safe.
+//   R8 anchor fix: fragment UVs arrive in FULL-atlas normalized space — the
+//   engine bakes the AtlasTexture region into the vertex UVs and TEXTURE is
+//   the whole atlas (canvas_item docs: region-enabled UVs "sample the entire
+//   texture"; AtlasTexture issues #61563/#57401). The atlas is exactly
+//   world_size px (1 px/cell, probe-asserted), so the world cell under this
+//   fragment is floor(UV * world_size): no view uniforms involved, anchored
+//   by construction (stale view uniforms cannot swim the pattern). The R7
+//   formula (view_origin + floor(UV * view_size)) treated atlas-space UV as
+//   region-local and is deleted. Sections 8 (edge) and 9 (depth) sample the
+//   FULL identity/depth textures via sim-space UV ((cell+0.5)/world_size,
+//   neighbor offset = 1 full texel) — never TEXTURE offsets, which would
+//   clamp at crop borders (glue rule H3). Full textures upload
+//   monolithically each painted flush, so boundaries and overburden stay
+//   exact across 64-cell chunk borders by construction.
 // - R7 visual payoff: section 4 detail is three-scale (cell seed + 2x2 block
 //   + 4x4 mottle, all weighted by profile detail_strength); section 8
 //   darkens material boundaries by profile edge_response x edge_darkness;
@@ -88,10 +97,14 @@ void fragment() {
 	float prow = (clamp(idf, 0.0, 255.0) + 0.5) / 256.0;
 
 	// 2. Profile fetch. Row selects the profile; nothing below names a material.
-	// Sim-space mapping FIRST: under an AtlasTexture crop, UV spans the crop
-	// while seed/identity/depth uniforms hold the FULL world textures, so
-	// they must be sampled at sim-space texel centers (cuv), never raw UV.
-	vec2 cell = view_origin + floor(UV * view_size);
+	// Sim-space mapping FIRST: fragment UV is FULL-atlas normalized (see crop
+	// note), and the atlas is exactly world_size px, so the world cell under
+	// this fragment is floor(UV * world_size) — the AtlasTexture crop is
+	// already baked into UV by the engine. Seed/identity/depth uniforms hold
+	// the FULL world textures and are sampled at sim-space texel centers
+	// (cuv), never raw UV. The +0.0005 guards float dust at exact texel
+	// borders (nearest-texel boundaries are 0.5 away, so no misattribution).
+	vec2 cell = floor(UV * world_size + vec2(0.0005));
 	vec2 ftexel = vec2(1.0 / world_size.x, 1.0 / world_size.y);
 	vec2 cuv = (cell + vec2(0.5)) / world_size;
 	float seed01 = texture(seed_tex, cuv).r;

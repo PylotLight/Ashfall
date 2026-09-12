@@ -5,12 +5,14 @@ extends Control
 #
 # The cave is authored procedurally at boot through the public AshfallWorld
 # API (init_world/fill_rect/set_cell/step) — no engine, bridge, or data
-# changes. Content: irregular rock silhouette with stone lining, background
-# rock mass (distinct wall tones), wood platform structure, water reservoir,
-# oil + wood combustible area with a fresh fire bed, warm light pool over
-# the fire pit (textured PointLight2D budget-6 cluster rig + additive glow
-# decal), character-sized player placeholder, stable pixel scaling
-# (nearest world, letterboxed).
+# changes. Content (R8 Noita-style): topsoil band, jittered chambers linked
+# by winding tunnels + vertical shafts, stone rind on rock/air borders,
+# stalactites/stalagmites, sand + lava veins sealed in rock, walled
+# reservoir + sealed lake + lipped pool, wood platform structure, oil + wood
+# combustible area with a fresh fire bed, warm light pool over the fire pit
+# (textured PointLight2D budget-6 cluster rig + additive glow decal),
+# character-sized player placeholder, stable pixel scaling (nearest world,
+# letterboxed).
 #
 # Resolution ladder (P3A task A3, review 12.2) for this scene:
 #   sim           512x512 cells (1 cell = 1 sim unit, authoritative)
@@ -129,18 +131,13 @@ func _ready() -> void:
 	_update_marker()
 	_init_hud_separation()
 
-# Deterministic per-row jitter in [0, 1): integer hash, no RNG state, so
-# the silhouette is identical every boot.
-# R7 fix: the old LCG ((y*1103515245+12345)>>7)%100 stepped -3/+13 mod 100
-# on alternating rows — a ~20-row ramp-and-wrap sawtooth that carved regular
-# triangular wedges into the cavern wall (edge x0/x1 drifted +2.4px per two
-# rows, then snapped back ~21px). Avalanche hash below decorrelates rows
-# (same [0,1) range, same +-12px amplitude, no short-period structure).
-func _row_hash(y: int) -> float:
-	var h: int = (y * 0x9E3779B1) & 0xFFFFFFFF
+# Deterministic 2D hash in [0, 1): integer math only, no RNG state, so the
+# cave is identical every boot. Salt decorrelates independent features.
+func _hash2(x: int, y: int, salt: int) -> float:
+	var h: int = ((x * 0x8DA6B343) ^ (y * 0xD8163841) ^ (salt * 0x9E3779B1)) & 0xFFFFFFFF
 	h = (h ^ (h >> 13)) & 0xFFFFFFFF
 	h = (h ^ (h >> 7)) & 0xFFFFFFFF
-	return float(h % 100) / 100.0
+	return float(h % 1000) / 1000.0
 
 func _mat_id(mat_name: String, fallback: int) -> int:
 	for id in world.get_material_ids():
@@ -149,6 +146,14 @@ func _mat_id(mat_name: String, fallback: int) -> int:
 	return fallback
 
 func _build_cave() -> void:
+	# Noita-style authoring (R8): a mostly-solid rock mass holding topsoil,
+	# jittered chambers, winding connecting tunnels + vertical shafts, a
+	# stone rind pass, ceiling/floor teeth, ore-style veins sealed in rock
+	# (sand lenses read gold-ish, lava lenses glow), a walled reservoir plus
+	# a sealed lake and a lipped chamber pool, and the preserved play
+	# structures (spawn platform, fire pit, fuel, dune). Deterministic:
+	# _hash2 only, no randf. Spawn (CAVE_SPAWN, feet on the beam top y=330
+	# inside the spawn hall) and FIRE_ANCHOR are unchanged.
 	var AIR: int = AshfallWorld.MATERIAL_AIR
 	var STONE: int = AshfallWorld.MATERIAL_STONE
 	var SAND: int = AshfallWorld.MATERIAL_SAND
@@ -156,53 +161,53 @@ func _build_cave() -> void:
 	var FIRE: int = AshfallWorld.MATERIAL_FIRE
 	var WOOD: int = AshfallWorld.MATERIAL_WOOD
 	var ROCK: int = AshfallWorld.MATERIAL_ROCK
+	var LAVA: int = AshfallWorld.MATERIAL_LAVA
 	var OIL: int = _mat_id("oil", 9)
 	world.init_world(512, 512)
-	# Background mass: everything starts as dark rock; the carved cavern
-	# reads against it as the background wall (rock outside, stone lining
-	# inside = two distinct wall tones).
 	world.fill_rect(0, 0, 511, 511, ROCK)
-	# Main cavern: ellipse with jittered edges (irregular silhouette).
-	var cx: float = 256.0
-	var cy: float = 285.0
-	var rx: float = 200.0
-	var ry: float = 160.0
-	for y in range(126, 445):
-		var ny: float = (float(y) - cy) / ry
-		var half: float = rx * sqrt(maxf(0.0, 1.0 - ny * ny))
-		var j: float = (_row_hash(y) - 0.5) * 24.0
-		var x0: int = clampi(int(cx - half + j), 1, 510)
-		var x1: int = clampi(int(cx + half + j), 1, 510)
+	_build_topsoil(SAND, STONE, WOOD, ROCK)
+	# Chambers (cx, cy, rx, ry, salt): spawn hall first (must contain the
+	# beam x150..330 @ y330..336 with air for the avatar box y328..329).
+	_carve_chamber(240.0, 298.0, 95.0, 58.0, 11, 0.35)
+	_carve_chamber(105.0, 250.0, 55.0, 38.0, 21, 0.30)
+	_carve_chamber(390.0, 255.0, 68.0, 44.0, 31, 0.30)
+	_carve_chamber(335.0, 118.0, 48.0, 24.0, 41, 0.30)
+	_carve_chamber(135.0, 398.0, 58.0, 34.0, 51, 0.30)
+	_carve_chamber(395.0, 395.0, 62.0, 38.0, 61, 0.30)
+	_carve_chamber(256.0, 415.0, 45.0, 25.0, 71, 0.30)
+	# Sealed lake pocket (no tunnels touch it): water stays put.
+	_carve_chamber(70.0, 175.0, 30.0, 18.0, 81, 0.25)
+	# Chimney vent to the surface (smoke/ember path), jittered walls.
+	for y in range(10, 131):
+		var j: float = (_hash2(256, y, 91) - 0.5) * 6.0
+		var x0: int = clampi(int(246.0 + j), 1, 510)
+		var x1: int = clampi(int(266.0 + j), 1, 510)
 		world.fill_rect(x0, y, x1, y, AIR)
-		# Stone lining ring just outside the carve (foreground rock layer).
-		world.fill_rect(maxi(0, x0 - 6), y, x0 - 1, y, STONE)
-		world.fill_rect(x1 + 1, y, mini(511, x1 + 6), y, STONE)
-	# Chimney vent to the surface (smoke/ember path for later slices).
-	world.fill_rect(246, 40, 266, 130, AIR)
-	world.fill_rect(240, 40, 245, 130, STONE)
-	world.fill_rect(267, 40, 272, 130, STONE)
-	# Stalactites: static teeth hanging from the ceiling.
-	world.fill_rect(180, 125, 190, 160, STONE)
-	world.fill_rect(300, 125, 308, 150, STONE)
-	world.fill_rect(340, 125, 346, 170, STONE)
-	# Floor slab across the cavern foot.
-	world.fill_rect(56, 448, 456, 470, STONE)
-	# Water reservoir (right): explicitly walled basin so containment never
-	# depends on where the ellipse edge lands.
+	world.fill_rect(240, 10, 245, 130, STONE)
+	world.fill_rect(267, 10, 272, 130, STONE)
+	# Tunnels/shafts (winding walks, overlapping discs => connected).
+	_carve_tunnel(256, 130, 300, 118, 3, 101) # chimney -> surface pocket
+	_carve_tunnel(360, 130, 390, 215, 3, 102) # surface pocket -> east hall
+	_carve_tunnel(100, 288, 120, 364, 3, 103) # west hall -> deep west shaft
+	_carve_tunnel(256, 356, 256, 392, 3, 104) # spawn hall -> deep central shaft
+	_carve_tunnel(300, 415, 335, 405, 3, 105) # deep central -> deep east
+	_carve_tunnel(330, 350, 350, 370, 3, 106) # crawl space -> deep east
+	# Explicit reservoir cut (merged with the deep-east chamber).
 	world.fill_rect(330, 370, 405, 447, AIR)
+	# Fire nook under the deep-central chamber (merges via overlap).
+	world.fill_rect(238, 438, 274, 447, AIR)
+	_build_stone_rind(STONE, ROCK, AIR)
+	_build_teeth(STONE, AIR)
+	_build_veins(SAND, LAVA, ROCK)
+	_build_structures(STONE, WOOD, OIL, SAND, AIR)
+	# Water: walled reservoir + sealed lake + lipped east-hall pool.
 	world.fill_rect(324, 370, 329, 447, STONE)
 	world.fill_rect(406, 370, 411, 447, STONE)
 	world.fill_rect(330, 410, 405, 447, WATER)
-	# Wood structure: platform beam on two posts down to the floor.
-	world.fill_rect(150, 330, 330, 336, WOOD)
-	world.fill_rect(150, 337, 156, 447, WOOD)
-	world.fill_rect(324, 337, 330, 447, WOOD)
-	# Combustible area (left of the fire bed): oil pool + wood pile.
-	world.fill_rect(120, 441, 185, 447, OIL)
-	world.fill_rect(96, 425, 114, 447, WOOD)
-	world.fill_rect(120, 435, 140, 440, WOOD)
-	# Dune patch for powder texture at play scale.
-	world.fill_rect(60, 442, 95, 447, SAND)
+	world.fill_rect(42, 182, 98, 190, WATER)
+	world.fill_rect(368, 290, 370, 300, STONE)
+	world.fill_rect(400, 290, 402, 300, STONE)
+	world.fill_rect(371, 294, 399, 298, WATER)
 	# Settle liquids/powders (fixed count => deterministic) BEFORE placing
 	# fire, so boot shows fresh flames instead of pre-burned fuel.
 	for i in 60:
@@ -212,6 +217,162 @@ func _build_cave() -> void:
 	world.fill_rect(269, 444, 274, 447, STONE)
 	world.fill_rect(244, 442, 268, 447, FIRE)
 	world.flush_present()
+
+
+## Topsoil: ragged sand (dirt) band with stone speckle + wood root flecks.
+func _build_topsoil(sand_mat: int, stone_mat: int, wood_mat: int, rock_mat: int) -> void:
+	for y in range(4, 70):
+		var edge: float = 58.0 + (_hash2(7, y, 11) - 0.5) * 12.0
+		if float(y) < edge:
+			world.fill_rect(1, y, 510, y, sand_mat)
+	for y in range(4, 66):
+		for x in range(1, 511, 3):
+			var h: float = _hash2(x, y, 12)
+			if h < 0.05 and world.get_cell(x, y) == sand_mat:
+				world.set_cell(x, y, stone_mat)
+			elif h > 0.985 and world.get_cell(x, y) == sand_mat:
+				world.set_cell(x, y, rock_mat)
+	for x in range(10, 505, 11):
+		if _hash2(x, 3, 13) < 0.55:
+			var y0: int = 10 + int(_hash2(x, 9, 14) * 30.0)
+			var ln: int = 3 + int(_hash2(x, 17, 15) * 5.0)
+			world.fill_rect(x, y0, x, mini(68, y0 + ln), wood_mat)
+
+
+## Jittered ellipse carve (one fill_rect per row, like the R7 silhouette).
+func _carve_chamber(cx: float, cy: float, rx: float, ry: float, salt: int, edge: float) -> void:
+	var AIR: int = AshfallWorld.MATERIAL_AIR
+	var y_lo: int = maxi(1, int(cy - ry) - 4)
+	var y_hi: int = mini(510, int(cy + ry) + 4)
+	for y in range(y_lo, y_hi + 1):
+		var ny: float = (float(y) - cy) / ry
+		var s: float = 1.0 - ny * ny
+		if s <= 0.0:
+			continue
+		var half: float = rx * sqrt(s)
+		var j: float = (_hash2(int(cx), y, salt) - 0.5) * 2.0 * rx * edge
+		var x0: int = clampi(int(cx - half + j), 1, 510)
+		var x1: int = clampi(int(cx + half + j), 1, 510)
+		if x1 >= x0:
+			world.fill_rect(x0, y, x1, y, AIR)
+
+
+## Winding tunnel: overlapping discs along an interpolation with hash wobble
+## (mid-weighted so endpoints land exactly on their chambers).
+func _carve_tunnel(ax: int, ay: int, bx: int, by: int, rad: int, salt: int) -> void:
+	var AIR: int = AshfallWorld.MATERIAL_AIR
+	var dx: int = bx - ax
+	var dy: int = by - ay
+	var n: int = maxi(maxi(absi(dx), absi(dy)) * 2, 8)
+	var px: float = -float(dy)
+	var py: float = float(dx)
+	var pl: float = sqrt(px * px + py * py)
+	if pl > 0.001:
+		px /= pl
+		py /= pl
+	for i in range(n + 1):
+		var t: float = float(i) / float(n)
+		var wob: float = (_hash2(i, salt, 77) - 0.5) * 10.0 * sin(t * 3.14159)
+		var cx: int = clampi(int(lerpf(float(ax), float(bx), t) + px * wob), 2, 509)
+		var cy: int = clampi(int(lerpf(float(ay), float(by), t) + py * wob), 2, 509)
+		world.fill_rect(maxi(1, cx - rad), maxi(1, cy - rad), mini(510, cx + rad), mini(510, cy + rad), AIR)
+
+
+## Stone rind: rock touching air reads as worked stone (Noita wall tone).
+func _build_stone_rind(stone_mat: int, rock_mat: int, air_mat: int) -> void:
+	for y in range(1, 511):
+		for x in range(1, 511):
+			if world.get_cell(x, y) != rock_mat:
+				continue
+			if world.get_cell(x - 1, y) != air_mat and world.get_cell(x + 1, y) != air_mat \
+					and world.get_cell(x, y - 1) != air_mat and world.get_cell(x, y + 1) != air_mat:
+				continue
+			if _hash2(x, y, 5) < 0.85:
+				world.set_cell(x, y, stone_mat)
+
+
+## Stalactites (ceilings) + stalagmites (floors) inside the big chambers.
+func _build_teeth(stone_mat: int, air_mat: int) -> void:
+	var boxes := [
+		Rect2i(145, 240, 190, 116), Rect2i(50, 212, 110, 76),
+		Rect2i(322, 211, 136, 88), Rect2i(77, 364, 116, 68),
+		Rect2i(333, 357, 124, 76),
+	]
+	for b in boxes:
+		var x: int = b.position.x + 3
+		while x < b.end.x - 3:
+			_place_tooth(x, b, stone_mat, air_mat, true)
+			_place_tooth(x + 3, b, stone_mat, air_mat, false)
+			x += 9 + int(_hash2(x, b.position.y, 201) * 7.0)
+
+
+## One tooth: scan for the ceiling (down=true) or floor, hash-gated, capped.
+func _place_tooth(x: int, b: Rect2i, stone_mat: int, air_mat: int, down: bool) -> void:
+	if _hash2(x, b.position.y if down else b.end.y, 202) < 0.35:
+		return
+	if down:
+		for y in range(b.position.y, b.end.y):
+			if world.get_cell(x, y) == air_mat and world.get_cell(x, y - 1) != air_mat:
+				var ln: int = mini(4 + int(_hash2(x, y, 203) * 8.0), 12)
+				world.fill_rect(x - 1, y, x + 1, mini(b.end.y, y + ln * 2 / 3), stone_mat)
+				world.fill_rect(x, y, x, mini(b.end.y, y + ln), stone_mat)
+				return
+	else:
+		for y in range(b.end.y - 1, b.position.y - 1, -1):
+			if world.get_cell(x, y) == air_mat and world.get_cell(x, y + 1) != air_mat:
+				var ln2: int = mini(3 + int(_hash2(x, y, 204) * 6.0), 9)
+				world.fill_rect(x - 1, maxi(b.position.y, y - ln2 * 2 / 3), x + 1, y, stone_mat)
+				world.fill_rect(x, maxi(b.position.y, y - ln2), x, y, stone_mat)
+				return
+
+
+## Ore-style veins sealed in rock: sand lenses (gold-ish) + lava lenses.
+## Writes land on ROCK only (lenses never breach air: per-cell enclosure).
+func _build_veins(sand_mat: int, lava_mat: int, rock_mat: int) -> void:
+	var AIR: int = AshfallWorld.MATERIAL_AIR
+	for k in 44:
+		var cx: int = 10 + int(_hash2(k, 1, 301) * 492.0)
+		var cy: int = 90 + int(_hash2(k, 2, 302) * 351.0)
+		var r: int = 2 + int(_hash2(k, 3, 303) * 4.0)
+		for dy in range(-r, r + 1):
+			for dx in range(-r, r + 1):
+				if dx * dx + dy * dy > r * r:
+					continue
+				var x: int = cx + dx
+				var y: int = cy + dy
+				if x >= 1 and x <= 510 and y >= 1 and y <= 510 \
+						and world.get_cell(x, y) == rock_mat:
+					world.set_cell(x, y, sand_mat)
+	for k in 8:
+		var lx: int = 60 + int(_hash2(k, 4, 304) * 392.0)
+		var ly: int = 380 + int(_hash2(k, 5, 305) * 62.0)
+		var lr: int = 2 + int(_hash2(k, 6, 306) * 2.0)
+		for dy2 in range(-lr, lr + 1):
+			for dx2 in range(-lr, lr + 1):
+				if dx2 * dx2 + dy2 * dy2 > lr * lr:
+					continue
+				var x2: int = lx + dx2
+				var y2: int = ly + dy2
+				if x2 < 1 or x2 > 510 or y2 < 1 or y2 > 510:
+					continue
+				if world.get_cell(x2, y2) != rock_mat:
+					continue
+				if world.get_cell(x2 - 1, y2) == AIR or world.get_cell(x2 + 1, y2) == AIR \
+						or world.get_cell(x2, y2 - 1) == AIR or world.get_cell(x2, y2 + 1) == AIR:
+					continue
+				world.set_cell(x2, y2, lava_mat)
+
+
+## Preserved play structures: floor slab, spawn platform + posts, fuel, dune.
+func _build_structures(stone_mat: int, wood_mat: int, oil_mat: int, sand_mat: int, _air: int) -> void:
+	world.fill_rect(56, 448, 456, 470, stone_mat)
+	world.fill_rect(150, 330, 330, 336, wood_mat)
+	world.fill_rect(150, 337, 156, 447, wood_mat)
+	world.fill_rect(324, 337, 330, 447, wood_mat)
+	world.fill_rect(120, 441, 185, 447, oil_mat)
+	world.fill_rect(96, 425, 114, 447, wood_mat)
+	world.fill_rect(120, 435, 140, 440, wood_mat)
+	world.fill_rect(60, 442, 95, 447, sand_mat)
 
 func _process(delta: float) -> void:
 	if delta > 0.0:
