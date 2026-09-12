@@ -405,8 +405,33 @@ func _update_hud() -> void:
 	fps_label.text = "%d fps%s" % [Engine.get_frames_per_second(),
 		"" if DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED else " (uncapped)"]
 	frame_label.text = "%.2f ms" % _frame_ms_ema
-	sim_label.text = "%.2f ms" % world.get_last_step_ms()
+	sim_label.text = _sim_split_text()
+	sim_label.tooltip_text = _sim_split_tooltip()
 	player_label.text = "(%d, %d)" % [roundi(player_pos.x), roundi(player_pos.y)]
+
+# E1 split-timer display (§10 CPU split; display only, no sim here).
+# Stepping model: fixed 60Hz physics accumulator (max 2 steps per physics
+# frame, backlog dropped — never spiral); exactly one flush_present() per
+# rendered frame. sim ms = last step() span ONLY, directly comparable to
+# bench_step/bench_e1 ms/step; present cost is separate (see tooltip).
+func _sim_split_text() -> String:
+	var ms: float = world.get_last_step_ms()
+	var ph: Dictionary = world.get_sim_phases()
+	if ph.is_empty():
+		return "%.2f ms" % ms
+	var react: float = float(ph.get("reactions_ms", 0.0))
+	var move: float = float(ph.get("powder_ms", 0.0)) + float(ph.get("liquid_ms", 0.0)) + float(ph.get("gas_ms", 0.0))
+	var temp: float = float(ph.get("heat_carry_ms", 0.0)) + float(ph.get("conduct_ms", 0.0))
+	var maint: float = float(ph.get("clear_reserve_ms", 0.0)) + float(ph.get("classify_ms", 0.0)) + float(ph.get("ordering_ms", 0.0)) + float(ph.get("reconcile_ms", 0.0))
+	return "%.2f ms (R %.2f M %.2f T %.2f A %.2f)" % [ms, react, move, temp, maint]
+
+func _sim_split_tooltip() -> String:
+	var tip: String = "stepping: fixed 60Hz physics accumulator, max 2 steps/physics frame, backlog dropped; 1 present flush per rendered frame; sim = last step() span (bench-comparable)"
+	var ph: Dictionary = world.get_sim_phases()
+	if not ph.is_empty():
+		tip += "\nsim splits ms: react %.3f clear %.3f classify %.3f order %.3f powder %.3f liquid %.3f gas %.3f reconcile %.3f heatcarry %.3f conduct %.3f" % [float(ph.get("reactions_ms", 0.0)), float(ph.get("clear_reserve_ms", 0.0)), float(ph.get("classify_ms", 0.0)), float(ph.get("ordering_ms", 0.0)), float(ph.get("powder_ms", 0.0)), float(ph.get("liquid_ms", 0.0)), float(ph.get("gas_ms", 0.0)), float(ph.get("reconcile_ms", 0.0)), float(ph.get("heat_carry_ms", 0.0)), float(ph.get("conduct_ms", 0.0))]
+	tip += "\npresent splits ms: dirty %.3f read %.3f paint %.3f setdata %.3f submit %.3f (submit = CPU ImageTexture::update call, not GPU execution)" % [world.get_present_dirty_collect_ms(), world.get_present_material_read_ms(), world.get_present_paint_ms(), world.get_present_set_data_ms(), world.get_present_submit_ms()]
+	return tip
 
 func _world_size() -> Vector2i:
 	return Vector2i(world.get_world_width(), world.get_world_height())

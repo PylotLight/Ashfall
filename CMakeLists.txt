@@ -8,6 +8,12 @@ option(ASHFALL_BUILD_FUZZ "libFuzzer targets (needs LLVM clang)" OFF)
 add_library(ashfall_sim engine/src/simulation.cpp engine/src/material_data.cpp engine/src/json_subset.cpp engine/src/reaction_data.cpp)
 target_include_directories(ashfall_sim PUBLIC engine/include)
 target_compile_features(ashfall_sim PUBLIC cxx_std_20)
+# E1 split timers (§10): engine StepTimings/StepCounters are write-only
+# instrumentation (sim code never reads them — determinism rule), so enabling
+# them changes no sim behavior/rules. PUBLIC so every TU including
+# simulation.hpp (engine lib, bridge, tests, bench) shares one layout (ODR).
+# The bridge surfaces the splits to the HUD; bench tools print them.
+target_compile_definitions(ashfall_sim PUBLIC ASHFALL_STEP_INSTRUMENT)
 
 if(MSVC)
     target_compile_options(ashfall_sim PRIVATE /W4 /permissive-)
@@ -105,6 +111,9 @@ if(ASHFALL_BUILD_TESTS)
     # Step benchmark harness (Group 1): manual tool, not part of ctest.
     add_executable(ashfall_bench bench/bench_step.cpp)
     target_link_libraries(ashfall_bench PRIVATE ashfall_sim)
+    # E1 benchmark worlds (§10): manual tool, not part of ctest.
+    add_executable(ashfall_bench_e1 bench/bench_e1.cpp)
+    target_link_libraries(ashfall_bench_e1 PRIVATE ashfall_sim)
     # Oracle recorder (Group 4, O0): regenerates tests/oracle/*.hash; manual tool.
     add_executable(oracle_record bench/oracle_record.cpp)
     target_link_libraries(oracle_record PRIVATE ashfall_sim)

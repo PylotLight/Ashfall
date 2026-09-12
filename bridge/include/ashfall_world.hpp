@@ -9,6 +9,7 @@
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/color.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -167,6 +168,20 @@ public:
     std::uint64_t get_present_flushes() const { return last_present_.present_flushes; }
     std::uint64_t get_present_dirty_pixels() const { return last_present_.dirty_pixels; }
     std::uint64_t get_present_logical_bytes() const { return last_present_.logical_bytes; }
+    // E1 split timers (§10 CPU split): the last step()'s engine phase splits
+    // + counters as Dictionaries (empty when built without
+    // ASHFALL_STEP_INSTRUMENT). Keys mirror the StepTimings/StepCounters
+    // field names (ms doubles / uint64 counts). §10 mapping: reactions =
+    // reactions_ms; powder/liquid/gas movement = powder/liquid/gas_ms;
+    // temperature = heat_carry_ms + conduct_ms; active-region maintenance =
+    // clear_reserve_ms + classify_ms + ordering_ms + reconcile_ms (scratch /
+    // dynamic-set / chunk-reconcile work — the engine has no separate
+    // active-region system); entities = N/A, the engine owns no entities
+    // (the avatar is host-side GDScript). Snapshot extraction / image prep /
+    // upload submission are the get_present_* phases above (material_read /
+    // paint+set_data / submit).
+    Dictionary get_sim_phases() const;
+    Dictionary get_sim_counters() const;
     Ref<ImageTexture> get_world_texture() const;
     Ref<Image> get_world_image() const;
     Ref<ImageTexture> get_water_texture() const;
@@ -196,6 +211,15 @@ private:
         std::uint64_t present_flushes = 0; // cumulative flush_present() calls that painted (updates-per-frame source)
         std::uint64_t dirty_pixels = 0; // pixels repainted in the last flush
         std::uint64_t logical_bytes = 0; // logical cells consumed in the last flush (u8 ids: 1 byte/cell)
+#ifdef ASHFALL_STEP_INSTRUMENT
+        // E1: verbatim snapshot of the engine's write-only StepTimings /
+        // StepCounters taken in step() (extends this struct — no parallel
+        // timing system). Snapshot, not live read, so the HUD sees the tick
+        // sim_ms belongs to.
+        ashfall::StepTimings sim_phases;
+        ashfall::StepCounters sim_counters;
+        bool sim_splits_valid = false;
+#endif
     };
     PresentPhases last_present_;
     bool force_full_repaint_ = false;

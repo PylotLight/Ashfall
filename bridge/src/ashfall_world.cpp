@@ -72,6 +72,8 @@ void AshfallWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_present_flushes"), &AshfallWorld::get_present_flushes);
     ClassDB::bind_method(D_METHOD("get_present_dirty_pixels"), &AshfallWorld::get_present_dirty_pixels);
     ClassDB::bind_method(D_METHOD("get_present_logical_bytes"), &AshfallWorld::get_present_logical_bytes);
+    ClassDB::bind_method(D_METHOD("get_sim_phases"), &AshfallWorld::get_sim_phases);
+    ClassDB::bind_method(D_METHOD("get_sim_counters"), &AshfallWorld::get_sim_counters);
     ClassDB::bind_method(D_METHOD("get_world_texture"), &AshfallWorld::get_world_texture);
     ClassDB::bind_method(D_METHOD("get_world_image"), &AshfallWorld::get_world_image);
     ClassDB::bind_method(D_METHOD("get_water_texture"), &AshfallWorld::get_water_texture);
@@ -181,6 +183,13 @@ void AshfallWorld::step() {
     const auto sim_t1 = std::chrono::steady_clock::now();
     last_present_.sim_ms = present_ms_between(sim_t0, sim_t1);
     last_step_ms_ = last_present_.sim_ms;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // E1 snapshot: the engine stored write-only splits/counters during
+    // step(); copy them next to sim_ms (sim code never reads them back).
+    last_present_.sim_phases = world_.last_step_timings();
+    last_present_.sim_counters = world_.last_step_counters();
+    last_present_.sim_splits_valid = true;
+#endif
 }
 
 bool AshfallWorld::validate_material_id(int p_material_id) const {
@@ -781,10 +790,51 @@ Ref<ImageTexture> AshfallWorld::flush_present() {
     return world_texture_;
 }
 
+Dictionary AshfallWorld::get_sim_phases() const {
+    Dictionary phases;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    if (!last_present_.sim_splits_valid) return phases;
+    const ashfall::StepTimings& t = last_present_.sim_phases;
+    phases["reactions_ms"] = t.reactions_ms;
+    phases["clear_reserve_ms"] = t.clear_reserve_ms;
+    phases["classify_ms"] = t.classify_ms;
+    phases["ordering_ms"] = t.ordering_ms;
+    phases["powder_ms"] = t.powder_ms;
+    phases["liquid_ms"] = t.liquid_ms;
+    phases["gas_ms"] = t.gas_ms;
+    phases["reconcile_ms"] = t.reconcile_ms;
+    phases["heat_carry_ms"] = t.heat_carry_ms;
+    phases["conduct_ms"] = t.conduct_ms;
+    phases["total_ms"] = t.total_ms;
+#endif
+    return phases;
+}
+
+Dictionary AshfallWorld::get_sim_counters() const {
+    Dictionary counters;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    if (!last_present_.sim_splits_valid) return counters;
+    const ashfall::StepCounters& c = last_present_.sim_counters;
+    counters["occupied"] = static_cast<std::uint64_t>(c.occupied);
+    counters["static_cells"] = static_cast<std::uint64_t>(c.static_cells);
+    counters["dynamic_cells"] = static_cast<std::uint64_t>(c.dynamic_cells);
+    counters["powder_moves"] = static_cast<std::uint64_t>(c.powder_moves);
+    counters["liquid_moves"] = static_cast<std::uint64_t>(c.liquid_moves);
+    counters["gas_moves"] = static_cast<std::uint64_t>(c.gas_moves);
+    counters["swaps"] = static_cast<std::uint64_t>(c.swaps);
+    counters["reaction_cells"] = static_cast<std::uint64_t>(c.reaction_cells);
+    counters["reaction_hits"] = static_cast<std::uint64_t>(c.reaction_hits);
+    counters["nonzero_temps"] = static_cast<std::uint64_t>(c.nonzero_temps);
+    counters["carried_heat"] = static_cast<std::uint64_t>(c.carried_heat);
+    counters["changed_positions"] = static_cast<std::uint64_t>(c.changed_positions);
+    counters["dirty_chunk_marks"] = static_cast<std::uint64_t>(c.dirty_chunk_marks);
+#endif
+    return counters;
+}
+
 Ref<ImageTexture> AshfallWorld::get_world_texture() const {
     return world_texture_;
 }
-
 Ref<Image> AshfallWorld::get_world_image() const {
     return world_image_;
 }
