@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" path="res://scripts/cave_benchmark_controller.gd" id="1_cave"]
 [ext_resource type="Shader" uid="uid://cuf1l7nt57pbs" path="res://shaders/water_fx.gdshader" id="2_waterfx"]
+[ext_resource type="Script" path="res://scripts/cave_bloom_toggle.gd" id="3_bloom"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_water"]
 shader = ExtResource("2_waterfx")
@@ -41,6 +42,29 @@ fill = 1
 fill_from = Vector2(0.5, 0.5)
 fill_to = Vector2(1, 0.5)
 
+; P3A Slice C, task C3 — restrained low-res bloom (presentation-only).
+; Reduced res by construction (full-res L1 off, coarse L4+ off; tight halo
+; from L2+L3 only), low strength, HDR threshold 1.0 so only emission-hot
+; pixels bloom, Soft Light blend + normalized energy so material boundaries
+; don't wash. Runtime flag via scripts/cave_bloom_toggle.gd (KEY_B).
+[sub_resource type="Environment" id="Environment_bloom"]
+glow_enabled = true
+glow_normalized = true
+glow_intensity = 0.25
+glow_strength = 0.9
+glow_mix = 0.05
+glow_bloom = 0.05
+glow_blend_mode = 2
+glow_hdr_threshold = 1.0
+glow_hdr_scale = 2.0
+glow_levels/1 = 0.0
+glow_levels/2 = 0.6
+glow_levels/3 = 0.25
+glow_levels/4 = 0.0
+glow_levels/5 = 0.0
+glow_levels/6 = 0.0
+glow_levels/7 = 0.0
+
 [node name="CaveBenchmark" type="Control"]
 layout_mode = 3
 anchors_preset = 15
@@ -69,6 +93,10 @@ color = Color(0.05, 0.04, 0.05, 1)
 
 [node name="CanvasModulate" type="CanvasModulate" parent="."]
 color = Color(0.75, 0.73, 0.8, 1)
+
+[node name="BloomToggle" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_bloom")
+script = ExtResource("3_bloom")
 
 [node name="MainLayout" type="HBoxContainer" parent="."]
 layout_mode = 1
