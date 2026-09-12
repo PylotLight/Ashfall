@@ -95,3 +95,11 @@ All layers reviewed. Execution order from the backlogs:
    KEEP, no candidates evaluated. Clamp asymmetry documented at
    `set_temperature` (`6e6cef0`). Test-file audit still needs the external
    reviewer; MT/GPU/pressure/Option-B/parser-replacement explicitly deferred.
+8. **P3A presentation foundation (+ Stage-B spike, verdict NO-GO):** DONE
+   (R1 cave scene + camera/HUD + visuals schema → R2 shader profile path +
+   Stage-A lights budget 6 → R3 texture content + emission + bloom/KEY_B →
+   R4 tick animation + clocks/toggle-hash verify + spike → R5 separation
+   rules H1–H6 + split timers/E1 baselines → R6 fixtures + exit gate).
+   Cave boots by default (163432 cells, tick 60); sim median 2.74 ms;
+   P1=51840 throughout; zero sim-rule changes. Spike: field correct but
+   ~45 ms GDScript rebuild — needs native/shader implementation to revisit.
