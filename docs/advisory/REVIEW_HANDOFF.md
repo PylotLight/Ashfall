@@ -103,3 +103,11 @@ All layers reviewed. Execution order from the backlogs:
    Cave boots by default (163432 cells, tick 60); sim median 2.74 ms;
    P1=51840 throughout; zero sim-rule changes. Spike: field correct but
    ~45 ms GDScript rebuild — needs native/shader implementation to revisit.
+   R7 visual payoff (`8290e47`): profile shader ATTACHED in both scenes
+   (it was built but never on screen — screenshots showed raw CPU paint);
+   bridge R8 depth texture + shader depth shading; edge darkening via
+   full-texture sim-space neighbor reads (plus a seed-UV crop bug fix);
+   3-scale detail retune; sawtooth artifact diagnosed (row-hash periodicity)
+   and fixed with an avalanche hash (cave occupied 163432→163348, engine
+   untouched). Note: Godot strips window/stretch/aspect on every editor
+   save — restore `keep` if the letterbox drifts again.
