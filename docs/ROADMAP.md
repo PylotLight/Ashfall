@@ -30,9 +30,9 @@ The default scene now boots to an authored surface entrance and asymmetric cave 
 - One wand with one reliable projectile/tool; clear collision, cooldown, and material feedback.
 - One authored route with a recoverable environmental chain: reveal/redirect water, quench burning wood, and open a blocked passage.
 - A small health/hazard rule only if it is needed to make the route meaningful; no sprawling combat system.
-- Input and world changes are testable and repeatable. Decide the authoritative ownership of player/projectile state before persistence expands.
+- Input and world changes are testable and repeatable through the fixed 60 Hz command stream; version-3 host saves own player and transient tool state alongside native-world bytes.
 
-**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, timber-grille breach, eastern exit/route-cleared state, and byte-identical fixed-tick playback from the authored seed. **Still open:** persistence of transient player/projectile state and rendered human sign-off at 1280×720.
+**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, timber-grille breach, eastern exit/route-cleared state, byte-identical fixed-tick playback, and save/load of transient player/projectile state (including v2 migration). **Still open:** rendered human sign-off at 1280×720.
 
 Detailed acceptance and non-goals: [P4 Noita-like playable slice](tasks/P4_NOITA_LIKE_SLICE.md).
 
@@ -55,6 +55,6 @@ Build inspectors, scenario/replay tooling, and content authoring only to remove 
 ## Near-term order
 
 1. Review the new surface-to-cave route and interaction in a rendered 1280×720 pass; keep the target-Mac GPU measurement explicitly open.
-2. Add transient player/projectile state to save/load and verify continuation after reload.
-3. Close the rendered playability sign-off at 1280×720; keep target-Mac GPU profiling separately open.
+2. Close the rendered playability sign-off at 1280×720; keep target-Mac GPU profiling separately open.
+3. Tune the route or hazard only if the interaction pass exposes a soft lock.
 4. Close the remaining P3 visual evidence that can be captured here.

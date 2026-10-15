@@ -1,6 +1,6 @@
 # P4A — Noita-like Playable Cave Slice
 
-**Status:** playable prototype, explicit route-cleared exit, and fixed-tick replay implemented; transient save state and rendered sign-off remain open.
+**Status:** playable prototype, explicit route-cleared exit, fixed-tick replay, and transient save/load implemented; rendered sign-off remains open.
 
 ## First-prototype implementation (2026-10-15)
 
@@ -15,7 +15,9 @@
 
 **Replay phase (2026-10-15):** gameplay runs on a fixed 60 Hz controller tick with one contiguous, one-based command record per tick. Commands include horizontal input, jump, aim/fire, pause toggles, and single-step events. Recording starts on boot/rebuild; F6 stops recording and F7 rebuilds the authored seed then replays the in-memory stream. The playback test compares serialized native-world bytes and player/transient state exactly. Debug brush edits are intentionally outside the player replay contract; recordings are capped at ten minutes.
 
-**Still open:** save/reload does not yet own transient player velocity/projectile state, and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
+**Persistence phase (2026-10-15):** save-envelope v3 stores player position/velocity/grounding, aim, wand cooldown, awake/pause/finish flags, gameplay tick, pending tick inputs, active projectiles, impact FX, selected material, and native simulation bytes. Loads validate lengths, bounds, counts, and finite values before applying state; v2 position/material/world saves remain supported with safe defaults for new fields. Loading intentionally clears the in-memory seed replay because its original command history is not part of the save format. `tests/godot_p4a_save_verify.gd` covers exact native-world restoration, transient round-trip, v2 migration, and truncated-file rejection.
+
+**Still open:** rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
 
 **Purpose:** prove that Ashfall is a game about readable movement and causal material interaction, not only a simulation benchmark.
 

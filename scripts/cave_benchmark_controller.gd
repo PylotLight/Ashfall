@@ -101,12 +101,13 @@ const CAMERA_LOOK_AHEAD_CELLS: float = -20.0
 const FIRE_ANCHOR: Vector2 = Vector2(378.0, 293.0)
 const SAVE_PATH: String = "user://ashfall_save.bin"
 const SAVE_TMP_PATH: String = "user://ashfall_save.bin.tmp"
-# Host save envelope v2 (same contract as the demo controller): version
-# u8=2 | px float | py float | material NAME (pascal string) | sim_len u32
-# | sim bytes. Minimum 18 bytes; atomic write via tmp + rename.
-const HOST_SAVE_VERSION: int = 2
+## Host save envelope v3 adds movement, aim, run, command-pending, and transient FX state.
+## Version 2 remains readable with deterministic defaults for fields it did not own.
+const HOST_SAVE_VERSION: int = 3
 const HOST_SAVE_MIN_BYTES: int = 18
 const HOST_SAVE_SIM_MAX: int = 64 * 1024 * 1024
+const HOST_SAVE_MAX_PROJECTILES: int = 8
+const HOST_SAVE_MAX_IMPACTS: int = 256
 var _transient_msg: String = ""
 var _transient_ttl: float = 0.0
 const TRANSIENT_SECS: float = 3.0
@@ -944,6 +945,9 @@ func _on_palette_btn_pressed(id: int) -> void:
 	_update_hud()
 
 func _save_game() -> void:
+	if _projectiles.size() > HOST_SAVE_MAX_PROJECTILES or _impact_effects.size() > HOST_SAVE_MAX_IMPACTS:
+		_set_transient("SAVE FAILED · TOO MANY TRANSIENT EFFECTS")
+		return
 	var sim := world.save_to_bytes()
 	var mat_name: String = world.get_material_name(current_material)
 	var f := FileAccess.open(SAVE_TMP_PATH, FileAccess.WRITE)
@@ -953,10 +957,47 @@ func _save_game() -> void:
 	f.store_8(HOST_SAVE_VERSION)
 	f.store_float(player_pos.x)
 	f.store_float(player_pos.y)
+	f.store_float(player_velocity.x)
+	f.store_float(player_velocity.y)
+	f.store_8(1 if player_on_ground else 0)
+	f.store_float(_aim_direction.x)
+	f.store_float(_aim_direction.y)
+	f.store_float(_aim_target.x)
+	f.store_float(_aim_target.y)
+	f.store_float(_wand_cooldown)
+	f.store_8(1 if _gameplay_awake else 0)
+	f.store_8(1 if _simulation_manually_paused else 0)
+	f.store_8(1 if _run_finished else 0)
+	f.store_64(_gameplay_tick)
+	f.store_8(1 if jump_requested else 0)
+	f.store_8(1 if _pause_toggle_requested else 0)
+	f.store_8(1 if _single_step_requested else 0)
+	f.store_8(1 if _wand_fire_requested else 0)
+	f.store_float(_wand_fire_target.x)
+	f.store_float(_wand_fire_target.y)
 	f.store_pascal_string(mat_name)
+	f.store_8(_projectiles.size())
+	for bolt in _projectiles:
+		var pos: Vector2 = bolt["pos"]
+		var velocity: Vector2 = bolt["velocity"]
+		f.store_float(pos.x)
+		f.store_float(pos.y)
+		f.store_float(velocity.x)
+		f.store_float(velocity.y)
+		f.store_float(float(bolt["age"]))
+	f.store_16(_impact_effects.size())
+	for effect in _impact_effects:
+		var pos: Vector2 = effect["pos"]
+		f.store_float(pos.x)
+		f.store_float(pos.y)
+		f.store_float(float(effect["age"]))
 	f.store_32(sim.size())
 	f.store_buffer(sim)
+	var write_error: Error = f.get_error()
 	f.close()
+	if write_error != OK:
+		_set_transient("SAVE FAILED")
+		return
 	if DirAccess.rename_absolute(SAVE_TMP_PATH, SAVE_PATH) != OK:
 		_set_transient("SAVE FAILED")
 		return
@@ -971,26 +1012,112 @@ func _load_game() -> void:
 	if f == null or f.get_length() < HOST_SAVE_MIN_BYTES:
 		_set_transient("SAVE CORRUPT")
 		return
-	if f.get_8() != HOST_SAVE_VERSION:
+	var version: int = f.get_8()
+	if version != 2 and version != HOST_SAVE_VERSION:
+		f.close()
 		_set_transient("SAVE VERSION?")
 		return
 	var px: float = f.get_float()
 	var py: float = f.get_float()
+	var vx: float = 0.0
+	var vy: float = 0.0
+	var grounded_raw: int = 1
+	var aim_x: float = 1.0
+	var aim_y: float = 0.0
+	var target_x: float = px + 56.0
+	var target_y: float = py
+	var cooldown: float = 0.0
+	var awake_raw: int = 1 if px >= 340.0 else 0
+	var paused_raw: int = 0
+	var finished_raw: int = 0
+	var gameplay_tick: int = 0
+	var jump_raw: int = 0
+	var pause_raw: int = 0
+	var step_raw: int = 0
+	var fire_raw: int = 0
+	var fire_target_x: float = target_x
+	var fire_target_y: float = target_y
+	var saved_projectiles: Array[Dictionary] = []
+	var saved_impacts: Array[Dictionary] = []
+	if version == HOST_SAVE_VERSION:
+		vx = f.get_float()
+		vy = f.get_float()
+		grounded_raw = int(f.get_8())
+		aim_x = f.get_float()
+		aim_y = f.get_float()
+		target_x = f.get_float()
+		target_y = f.get_float()
+		cooldown = f.get_float()
+		awake_raw = int(f.get_8())
+		paused_raw = int(f.get_8())
+		finished_raw = int(f.get_8())
+		gameplay_tick = int(f.get_64())
+		jump_raw = int(f.get_8())
+		pause_raw = int(f.get_8())
+		step_raw = int(f.get_8())
+		fire_raw = int(f.get_8())
+		fire_target_x = f.get_float()
+		fire_target_y = f.get_float()
 	var mat_name: String = f.get_pascal_string()
+	if version == HOST_SAVE_VERSION:
+		var projectile_count: int = int(f.get_8())
+		if projectile_count > HOST_SAVE_MAX_PROJECTILES or projectile_count * 20 > int(f.get_length() - f.get_position()):
+			f.close()
+			_set_transient("SAVE CORRUPT")
+			return
+		for i in projectile_count:
+			var bolt_pos := Vector2(f.get_float(), f.get_float())
+			var bolt_velocity := Vector2(f.get_float(), f.get_float())
+			var bolt_age: float = f.get_float()
+			saved_projectiles.append({"pos": bolt_pos, "velocity": bolt_velocity, "age": bolt_age})
+		var impact_count: int = int(f.get_16())
+		if impact_count > HOST_SAVE_MAX_IMPACTS or impact_count * 12 > int(f.get_length() - f.get_position()):
+			f.close()
+			_set_transient("SAVE CORRUPT")
+			return
+		for i in impact_count:
+			var impact_pos := Vector2(f.get_float(), f.get_float())
+			var impact_age: float = f.get_float()
+			saved_impacts.append({"pos": impact_pos, "age": impact_age})
 	var sim_len: int = int(f.get_32())
 	var world_w: int = world.get_world_width()
 	var world_h: int = world.get_world_height()
-	var meta_ok: bool = is_finite(px) and is_finite(py)
+	var meta_ok: bool = f.get_error() == OK
+	meta_ok = meta_ok and is_finite(px) and is_finite(py)
 	meta_ok = meta_ok and px >= 0.0 and px <= float(world_w)
 	meta_ok = meta_ok and py >= 0.0 and py <= float(world_h)
 	meta_ok = meta_ok and not mat_name.is_empty()
 	meta_ok = meta_ok and sim_len >= 0 and sim_len <= HOST_SAVE_SIM_MAX
 	meta_ok = meta_ok and sim_len <= int(f.get_length() - f.get_position())
+	if version == HOST_SAVE_VERSION:
+		meta_ok = meta_ok and is_finite(vx) and is_finite(vy) and absf(vx) <= PLAYER_SPEED + 0.01 and absf(vy) <= PLAYER_TERMINAL_SPEED + 0.01
+		meta_ok = meta_ok and grounded_raw >= 0 and grounded_raw <= 1
+		meta_ok = meta_ok and is_finite(aim_x) and is_finite(aim_y) and Vector2(aim_x, aim_y).length_squared() > 0.001 and Vector2(aim_x, aim_y).length_squared() <= 1.2
+		meta_ok = meta_ok and is_finite(target_x) and is_finite(target_y) and target_x >= 0.0 and target_x < float(world_w) and target_y >= 0.0 and target_y < float(world_h)
+		meta_ok = meta_ok and is_finite(cooldown) and cooldown >= 0.0 and cooldown <= WAND_COOLDOWN
+		meta_ok = meta_ok and awake_raw >= 0 and awake_raw <= 1 and paused_raw >= 0 and paused_raw <= 1 and finished_raw >= 0 and finished_raw <= 1
+		meta_ok = meta_ok and gameplay_tick >= 0
+		meta_ok = meta_ok and jump_raw >= 0 and jump_raw <= 1 and pause_raw >= 0 and pause_raw <= 1 and step_raw >= 0 and step_raw <= 1 and fire_raw >= 0 and fire_raw <= 1
+		meta_ok = meta_ok and is_finite(fire_target_x) and is_finite(fire_target_y) and fire_target_x >= 0.0 and fire_target_x < float(world_w) and fire_target_y >= 0.0 and fire_target_y < float(world_h)
+		for bolt in saved_projectiles:
+			var bolt_pos: Vector2 = bolt["pos"]
+			var bolt_velocity: Vector2 = bolt["velocity"]
+			var bolt_age: float = float(bolt["age"])
+			meta_ok = meta_ok and is_finite(bolt_pos.x) and is_finite(bolt_pos.y) and bolt_pos.x >= -1.0 and bolt_pos.x <= float(world_w) + 1.0 and bolt_pos.y >= -1.0 and bolt_pos.y <= float(world_h) + 1.0
+			meta_ok = meta_ok and is_finite(bolt_velocity.x) and is_finite(bolt_velocity.y) and bolt_velocity.length() <= WAND_SPEED + 0.01
+			meta_ok = meta_ok and is_finite(bolt_age) and bolt_age >= 0.0 and bolt_age <= WAND_MAX_AGE
+		for effect in saved_impacts:
+			var impact_pos: Vector2 = effect["pos"]
+			var impact_age: float = float(effect["age"])
+			meta_ok = meta_ok and is_finite(impact_pos.x) and is_finite(impact_pos.y) and impact_pos.x >= 0.0 and impact_pos.x < float(world_w) and impact_pos.y >= 0.0 and impact_pos.y < float(world_h)
+			meta_ok = meta_ok and is_finite(impact_age) and impact_age >= 0.0 and impact_age < 0.34
 	if not meta_ok:
+		f.close()
 		_set_transient("SAVE CORRUPT")
 		return
 	var sim := f.get_buffer(sim_len)
 	if sim.size() != sim_len or f.get_position() != f.get_length():
+		f.close()
 		_set_transient("SAVE CORRUPT")
 		return
 	f.close()
@@ -998,7 +1125,47 @@ func _load_game() -> void:
 		_set_transient("LOAD FAILED")
 		return
 	player_pos = Vector2(px, py)
+	if version == HOST_SAVE_VERSION:
+		player_velocity = Vector2(vx, vy)
+		player_on_ground = grounded_raw != 0
+		_aim_direction = Vector2(aim_x, aim_y).normalized()
+		_aim_target = Vector2(target_x, target_y)
+		_wand_cooldown = cooldown
+		_gameplay_awake = awake_raw != 0
+		_simulation_manually_paused = paused_raw != 0
+		_run_finished = finished_raw != 0
+		_gameplay_tick = gameplay_tick
+		jump_requested = jump_raw != 0
+		_pause_toggle_requested = pause_raw != 0
+		_single_step_requested = step_raw != 0
+		_wand_fire_requested = fire_raw != 0
+		_wand_fire_target = Vector2(fire_target_x, fire_target_y)
+		_projectiles = saved_projectiles
+		_impact_effects = saved_impacts
+	else:
+		player_velocity = Vector2.ZERO
+		player_on_ground = true
+		_aim_direction = Vector2.RIGHT
+		_aim_target = Vector2(px + 56.0, py)
+		_wand_cooldown = 0.0
+		_gameplay_awake = px >= 340.0
+		_simulation_manually_paused = false
+		_run_finished = false
+		_gameplay_tick = 0
+		jump_requested = false
+		_pause_toggle_requested = false
+		_single_step_requested = false
+		_wand_fire_requested = false
+		_projectiles.clear()
+		_impact_effects.clear()
+	world.auto_step = false
 	current_material = _material_id_for_name(mat_name)
+	_replay_mode = ReplayMode.IDLE
+	_recorded_commands.clear()
+	_replay_commands.clear()
+	_replay_index = 0
+	if _finish_overlay != null:
+		_finish_overlay.visible = _run_finished
 	_snap_camera()
 	_update_marker()
 	_update_hud()
