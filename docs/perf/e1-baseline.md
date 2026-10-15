@@ -36,7 +36,7 @@ GPU splits (base world / liquid pass / lighting / bloom / particles /
 composite) are **not measurable from any engine/bridge/GDScript surface**
 in this build (no per-pass GPU timestamps; headless runs the dummy driver).
 Passes present in the cave: base TextureRect (nearest), water overlay
-(linear + shader), 6× PointLight2D rig + glow decal, WorldEnvironment
+(nearest + shader), 6× PointLight2D rig + glow decal, WorldEnvironment
 glow-bloom, letterbox composite; **no particle pass exists in P3A**.
 Per-pass GPU cost needs an on-screen Xcode GPU frame capture.
 

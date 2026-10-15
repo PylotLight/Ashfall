@@ -50,7 +50,9 @@ duplicates; authors must not rely on them.
 There is deliberately NO `depth_rate` entry field: the overburden curve
 (`exp(-depth*rate)` in `shaders/material_profile.gdshader` §9) rides LUT
 `tex3.g` (tex3.r stays the palette count), filled by
-`scripts/material_profile_glue.gd` with `DEFAULT_DEPTH_RATE` (0.06) for every
-row. Per-material depth tuning therefore means touching the glue constant or
-extending `build_params_image` — never this schema — so LUT shapes/bytes
-pinned by the E2 suite stay green.
+`scripts/material_profile_glue.gd` with `DEFAULT_DEPTH_RATE` (0.04) for every
+row. The shader also applies a 0.30 global minimum attenuation so deep cave
+walls stay distinct from the atmospheric void. Per-material depth tuning
+therefore means touching the glue/shader defaults or extending
+`build_params_image` — never this schema — so LUT shapes/bytes pinned by the E2
+suite stay green.

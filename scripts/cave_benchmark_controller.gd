@@ -21,7 +21,8 @@ extends Control
 #   display       1280x720 viewport, KEEP_ASPECT_CENTERED letterbox upscale
 #   UI            same-canvas vector controls, resolution-independent, crisp
 # World instruments read near pixel-art scale; the final world upscale is
-# nearest so base pixels stay crisp (water overlay alone stays linear).
+# nearest for both the solid base and liquid overlay, preserving a unified
+# crisp pixel grid at the camera crop.
 # Follow-camera-ready (A2): the world_to_display/display_to_world mapping
 # below is the anchor a Camera2D follow will reuse; marker, light, and glow
 # already track cell space every frame.
@@ -34,6 +35,7 @@ extends Control
 @onready var world: AshfallWorld = $AshfallWorld
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
 @onready var water_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WaterOverlay
+@onready var cave_backdrop: ColorRect = $MainLayout/ViewportContainer/WorldStack/CaveBackdrop
 @onready var cave_light: PointLight2D = $MainLayout/ViewportContainer/WorldStack/CaveLight
 @onready var cluster_light_1: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight1
 @onready var cluster_light_2: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight2
@@ -177,9 +179,10 @@ func _build_cave() -> void:
 	world.init_world(512, 512)
 	world.fill_rect(0, 0, 511, 511, ROCK)
 	_build_topsoil(SAND, STONE, WOOD, ROCK)
-	# Chambers (cx, cy, rx, ry, salt): spawn hall first (must contain the
-	# compact bridge x194..286 @ y330..334 and the avatar box y328..329).
-	_carve_chamber(240.0, 298.0, 82.0, 58.0, 11, 0.35)
+	# Chambers (cx, cy, rx, ry, salt): compact the spawn hall vertically so
+	# its roof reads in the player-scale crop; preserve the bridge and avatar
+	# box at y330..334 / y328..329 and the lower shaft connection at y356.
+	_carve_chamber(240.0, 306.0, 82.0, 50.0, 11, 0.35)
 	_carve_chamber(105.0, 250.0, 55.0, 38.0, 21, 0.30)
 	_carve_chamber(390.0, 255.0, 68.0, 44.0, 31, 0.30)
 	_carve_chamber(335.0, 118.0, 48.0, 24.0, 41, 0.30)
@@ -211,6 +214,7 @@ func _build_cave() -> void:
 	_build_teeth(STONE, AIR)
 	_build_veins(SAND, LAVA, ROCK)
 	_build_structures(STONE, WOOD, OIL, SAND, AIR)
+	_build_opening_rockwork(ROCK)
 	# Water: walled reservoir + sealed lake + lipped east-hall pool.
 	world.fill_rect(324, 370, 329, 447, STONE)
 	world.fill_rect(406, 370, 411, 447, STONE)
@@ -233,6 +237,23 @@ func _build_cave() -> void:
 	world.fill_rect(269, 444, 274, 447, STONE)
 	world.fill_rect(244, 442, 268, 447, FIRE)
 	world.flush_present()
+
+
+## Player-scale rockwork frames the spawn lane with ceiling ribs and buttresses.
+func _build_opening_rockwork(rock_mat: int) -> void:
+	_stamp_tapered_rock(219.0, 258, 35, 6.0, 2.0, 181, rock_mat)
+	_stamp_tapered_rock(261.0, 258, 28, 5.0, 2.0, 191, rock_mat)
+	_stamp_tapered_rock(188.0, 315, 32, 2.0, 5.0, 201, rock_mat)
+	_stamp_tapered_rock(292.0, 315, 32, 2.0, 5.0, 211, rock_mat)
+
+
+## One-row tapered rock stamp; world-anchored noise keeps authored ribs organic.
+func _stamp_tapered_rock(cx: float, y0: int, length: int, half_top: float, half_bottom: float, salt: int, rock_mat: int) -> void:
+	for i in range(length):
+		var t: float = float(i) / float(maxi(length - 1, 1))
+		var half_width: float = maxf(1.0, lerpf(half_top, half_bottom, t) + (_noise1d(float(i) / 5.0, salt) - 0.5) * 1.2)
+		var center: float = cx + (_noise1d(float(i) / 11.0, salt + 1) - 0.5) * 2.0
+		world.fill_rect(int(floor(center - half_width)), y0 + i, int(ceil(center + half_width)), y0 + i, rock_mat)
 
 
 ## Topsoil: ragged sand (dirt) band with stone speckle + wood root flecks.
@@ -267,11 +288,13 @@ func _carve_chamber(cx: float, cy: float, rx: float, ry: float, salt: int, edge:
 		if s <= 0.0:
 			continue
 		var half: float = rx * sqrt(s)
-		var broad: float = minf(10.0, rx * edge * 0.12)
-		var left_wander: float = (_noise1d(float(y) / 11.0, salt) - 0.5) * 2.0 * broad
-		var right_wander: float = (_noise1d(float(y) / 13.0, salt + 1) - 0.5) * 2.0 * broad
-		var left_chip: float = (_hash2(int(cx), y, salt + 2) - 0.5) * 3.0
-		var right_chip: float = (_hash2(int(cx), y, salt + 3) - 0.5) * 3.0
+		var broad: float = minf(16.0, rx * edge * 0.24)
+		var left_wander: float = (_noise1d(float(y) / 29.0, salt + 4) - 0.5) * 2.0 * broad * 0.7
+		left_wander += (_noise1d(float(y) / 9.0, salt) - 0.5) * 2.0 * broad * 0.3
+		var right_wander: float = (_noise1d(float(y) / 31.0, salt + 5) - 0.5) * 2.0 * broad * 0.7
+		right_wander += (_noise1d(float(y) / 11.0, salt + 1) - 0.5) * 2.0 * broad * 0.3
+		var left_chip: float = (_hash2(int(cx), y, salt + 2) - 0.5) * 2.0
+		var right_chip: float = (_hash2(int(cx), y, salt + 3) - 0.5) * 2.0
 		var x0: int = clampi(int(cx - half + left_wander + left_chip), 1, 510)
 		var x1: int = clampi(int(cx + half + right_wander + right_chip), 1, 510)
 		if x1 >= x0:
@@ -293,10 +316,12 @@ func _carve_tunnel(ax: int, ay: int, bx: int, by: int, rad: int, salt: int) -> v
 		py /= pl
 	for i in range(n + 1):
 		var t: float = float(i) / float(n)
-		var wob: float = (_hash2(i, salt, 77) - 0.5) * 10.0 * sin(t * 3.14159)
+		var slow_wobble: float = (_noise1d(float(i) / 18.0, salt + 77) - 0.5) * 2.0
+		var fine_wobble: float = (_noise1d(float(i) / 5.0, salt + 78) - 0.5) * 2.0
+		var wob: float = (slow_wobble * 0.72 + fine_wobble * 0.28) * 11.0 * sin(t * 3.14159)
 		var cx: int = clampi(int(lerpf(float(ax), float(bx), t) + px * wob), 2, 509)
 		var cy: int = clampi(int(lerpf(float(ay), float(by), t) + py * wob), 2, 509)
-		var stamp_r: float = maxf(2.5, float(rad) + (_hash2(i, salt, 78) - 0.5) * 1.0)
+		var stamp_r: float = maxf(2.5, float(rad) + (_noise1d(float(i) / 9.0, salt + 79) - 0.5) * 1.2)
 		for oy in range(-ceili(stamp_r), ceili(stamp_r) + 1):
 			var ny: float = float(oy) / stamp_r
 			if absf(ny) > 1.0:
@@ -689,6 +714,10 @@ func _toggle_follow_camera() -> void:
 func _apply_view_region() -> void:
 	_base_atlas.region = Rect2(_view_region)
 	_water_atlas.region = Rect2(_view_region)
+	var backdrop_material := cave_backdrop.material as ShaderMaterial
+	if backdrop_material != null:
+		backdrop_material.set_shader_parameter("view_origin", Vector2(_view_region.position))
+		backdrop_material.set_shader_parameter("view_size", Vector2(_view_region.size))
 
 # P3A R7: the DISPLAYED base layer is the identity texture under the profile
 # ShaderMaterial (see _init_profile_material). The CPU RGBA layer keeps

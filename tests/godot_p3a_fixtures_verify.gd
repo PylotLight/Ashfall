@@ -147,6 +147,8 @@ func _run_profile_fixtures() -> void:
 	var stone_eval: Color = Glue.eval_cell_cpu(profiles, "stone", 20, 10, 77)
 	check(_q8(stone_eval) != _q8(Glue.BG_COLOR), "E2 §F/solid stone renders (not background)")
 	check(absf(stone_eval.a - 1.0) < 0.001, "E2 §F/solid stone alpha is 1")
+	check(absf(Glue.eval_depth_factor(10) - 0.670320) < 0.001, "E2 overburden shading preserves shallow material color")
+	check(absf(Glue.eval_depth_factor(255) - Glue.DEFAULT_DEPTH_FLOOR) < 0.001, "E2 deep cave walls retain the atmospheric visibility floor")
 	# Two-liquid-colors analog: water vs oil palette rows are distinct.
 	var wrow: Array = Glue.row_palette(profiles, world, int(id_of["water"]))
 	var orow: Array = Glue.row_palette(profiles, world, int(id_of["oil"]))

@@ -66,6 +66,7 @@ uniform sampler2D depth_tex : filter_nearest, repeat_disable;
 // Global tuning knobs (human-check dials; profile strengths stay in the LUT).
 uniform float edge_darkness = 0.35;
 uniform float depth_boost = 1.0;
+uniform float depth_floor = 0.30;
 // Profile LUTs from the glue: 4 wide x 256 tall (row = material id).
 uniform sampler2D profile_palette : filter_nearest, repeat_disable; // RGBA8: 4 palette colors (unused slots repeat last)
 uniform sampler2D profile_params : filter_nearest, repeat_disable; // RGBAF: tex0=(pattern_mode,pattern_scale,detail,edge) tex1=(opacity,opacity_mode,emission_strength,anim) tex2=(emission rgb,-) tex3=(palette_count,depth_rate,-,-)
@@ -88,6 +89,19 @@ float hash12(vec2 p) {
 	vec3 p3 = fract(vec3(p.xyx) * 0.1031);
 	p3 += dot(p3, p3.yzx + 33.33);
 	return fract((p3.x + p3.y) * p3.z);
+}
+
+// Smooth, continuous value noise for broad mineral structure. Coordinates are
+// world-cell anchored, so moving the camera never swims the geology.
+float value_noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = hash12(i);
+	float b = hash12(i + vec2(1.0, 0.0));
+	float c = hash12(i + vec2(0.0, 1.0));
+	float d = hash12(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 void fragment() {
@@ -164,10 +178,18 @@ void fragment() {
 	// stays quiet): per-cell seed variation + 2x2 block structure + 4x4
 	// low-frequency mottling. Reads at 1px/cell; the block/mottle octaves
 	// keep large masses from flattening to noise.
-	vec3 col = base * (1.0 + (seed01 - 0.5) * 2.0 * detail);
-	float blk = hash12(floor(cell / 2.0));
-	float mot = hash12(floor(cell / 4.0) + 3.1);
-	col *= 1.0 + (blk - 0.5) * detail * 1.2 + (mot - 0.5) * detail * 0.8;
+		vec3 col = base * (1.0 + (seed01 - 0.5) * 2.0 * detail);
+		float blk = hash12(floor(cell / 2.0));
+		float mot = hash12(floor(cell / 4.0) + 3.1);
+		col *= 1.0 + (blk - 0.5) * detail * 1.2 + (mot - 0.5) * detail * 0.8;
+		// A pair of warped, interpolated octaves adds coherent strata/mineral
+		// masses without replacing the exact material identity or pixel grid.
+		vec2 warp = vec2(value_noise(cell / 48.0),
+			value_noise((cell + vec2(23.7, 11.3)) / 48.0)) - vec2(0.5);
+		float geology_large = value_noise(cell / 30.0 + warp * 0.8);
+		float geology_small = value_noise(cell / 11.0 + warp * 1.6);
+		float geology = geology_large * 0.68 + geology_small * 0.32;
+		col *= 1.0 + (geology - 0.5) * detail * 0.75;
 
 	// 5. Coverage partition from profile opacity (never from identity):
 	// air (opacity ~0) and translucent liquids render background on the base
@@ -212,11 +234,11 @@ void fragment() {
 	outc *= mix(1.0, edge_f, rendered);
 
 	// 9. Overburden depth shading (R7): exponential falloff with the rate
-	// from LUT tex3.g (loader default; no JSON field by design). Deep masses
-	// sink toward black while surfaces stay bright; gated on rendered
+	// from LUT tex3.g (loader default; no JSON field by design), plus an ambient
+	// floor so deep cave surfaces remain distinct from air; gated on rendered
 	// coverage so air/translucent base cells stay bg.
 	float depth_cells = texture(depth_tex, cuv).r * 255.0;
-	float dshade = exp(-depth_cells * P3.y * depth_boost);
+	float dshade = max(depth_floor, exp(-depth_cells * P3.y * depth_boost));
 	outc *= mix(1.0, dshade, rendered);
 
 	// 6. Intrinsic emission (Slice C1 enabled via emission_mix = 1).
@@ -297,5 +319,7 @@ void fragment() {
 	}
 	outc *= 1.0 + amod * acover * anim_mix;
 
-	COLOR = vec4(outc, 1.0);
+		// Air and translucent base cells are transparent so the cave's separate
+		// world-anchored atmospheric layer can show through; solids stay opaque.
+		COLOR = vec4(outc, rendered);
 }

@@ -80,6 +80,7 @@ func _run_scene_checks() -> void:
 	var base_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WorldTexture")
 	var water_tex: TextureRect = main.get_node("MainLayout/ViewportContainer/WorldStack/WaterOverlay")
 	assert(water_tex.get_rect() == base_tex.get_rect(), "water overlay aligned with base layer")
+	assert(water_tex.texture_filter == CanvasItem.TEXTURE_FILTER_NEAREST, "water overlay keeps liquid pixels crisp")
 
 	main.player_pos = Vector2(60.0, 440.0)
 	var before: int = main.world.get_occupied_cell_count()

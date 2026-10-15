@@ -15,7 +15,7 @@
     },
     {
       "material": "stone",
-      "palette": ["#292b35", "#414450", "#666775"],
+      "palette": ["#252a38", "#454b5c", "#777b8b"],
       "pattern": "strata",
       "pattern_scale": 4,
       "detail_strength": 0.22,
@@ -99,7 +99,7 @@
     },
     {
       "material": "rock",
-      "palette": ["#4a4640", "#78736e", "#a39d94"],
+      "palette": ["#342d36", "#57505a", "#80777a", "#aa9b8b"],
       "pattern": "strata",
       "pattern_scale": 6,
       "detail_strength": 0.22,

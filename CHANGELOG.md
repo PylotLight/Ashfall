@@ -40,6 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Window letterbox glare: explicit `canvas_items`/`keep` stretch, dark clear color matching the world background, dark viewport panel stylebox.
 
 ### Improved
+- Added a separate world-anchored cave atmosphere behind transparent air cells, with low-contrast multiscale wall mottling; tightened the spawn-hall framing with tapered ceiling ribs and bridge-end buttresses, widened chamber-edge variation, smoothed tunnel paths, and introduced coherent warped mineral shading plus distinct cool stone/warm rock palettes. A shallow depth curve with an ambient floor keeps deep cave walls visible, and nearest sampling keeps liquids crisp. Simulation rules, identity bytes, and camera-independent pixel sampling remain unchanged.
 - Cave presentation now uses independently wandering chamber edges and rounded deterministic tunnel stamps instead of stacked row jitter and square ledges; the follow view is tighter around the player.
 - Replaced the red cell-sized marker with an original pixel-art wizard overlay, narrowed and restyled the play sidebar, and moved simulation telemetry and long controls behind F1.
 - Replaced stale phase status with explicit P0–P3 evidence state and a bounded P4A cave interaction slice; the target-Mac GPU capture remains an open sign-off item.

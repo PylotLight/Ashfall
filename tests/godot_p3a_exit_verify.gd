@@ -68,6 +68,8 @@ func _run_exit_checks() -> void:
 	check(main.world.get_world_width() == 512 and main.world.get_world_height() == 512, "E3/C1 cave sim is 512x512")
 	var occ: int = int(main.world.get_occupied_cell_count())
 	check(occ > 100000, "E3/C1 place-scale mass occupied=%d (>100k)" % occ)
+	check(main.world.get_cell(240, 246) != AshfallWorld.MATERIAL_AIR and main.world.get_cell(240, 280) == AshfallWorld.MATERIAL_AIR, "E3/C1 spawn hall frames the route with a nearby roof and open clearance")
+	check(main.world.get_cell(219, 270) != AshfallWorld.MATERIAL_AIR and main.world.get_cell(240, 300) == AshfallWorld.MATERIAL_AIR, "E3/C1 organic ceiling rib frames the hall without blocking the spawn lane")
 	check(int(main.world.get_tick()) == 60, "E3/C1 deterministic settle tick=60")
 	var want := ["fire", "water", "wood", "oil", "stone", "rock", "sand"]
 	var id_by_name := {}
@@ -94,6 +96,10 @@ func _run_exit_checks() -> void:
 		check(is_equal_approx(main._camera.view_h_cells, 120.0), "E3/C1 default camera uses player-scale framing")
 	check(main._view_region.size.y == 120 and main._view_region.size.x < 512, "E3/C1 actual view region is cropped to player scale")
 	check(main._camera.center_cells.y < main.player_pos.y, "E3/C1 opening camera leaves room above the avatar")
+	var backdrop_material: ShaderMaterial = main.cave_backdrop.material as ShaderMaterial
+	check(backdrop_material != null and backdrop_material.shader.resource_path.ends_with("cave_backdrop.gdshader"), "E3/C1 atmospheric cave backdrop shader is attached")
+	check(backdrop_material.get_shader_parameter("view_origin") == Vector2(main._view_region.position), "E3/C1 backdrop starts at the camera's world origin")
+	check(backdrop_material.get_shader_parameter("view_size") == Vector2(main._view_region.size), "E3/C1 backdrop spans the cropped camera view")
 	var cave_snapshot: PackedByteArray = main.world.save_to_bytes()
 	main._build_cave()
 	check(main.world.save_to_bytes() == cave_snapshot, "E3/C1 authored cave rebuild is deterministic")
@@ -176,6 +182,7 @@ func _run_exit_checks() -> void:
 	same.call("follow-on")
 	for i in 3:
 		main._zoom_camera(1)
+	check(backdrop_material.get_shader_parameter("view_origin") == Vector2(main._view_region.position) and backdrop_material.get_shader_parameter("view_size") == Vector2(main._view_region.size), "E3/C4 backdrop remains aligned through zoom")
 	same.call("zoom-in")
 	for i in 3:
 		main._zoom_camera(-1)

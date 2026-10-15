@@ -69,7 +69,8 @@ separate change set.
 
 ## 2026-10-15 rendered retest (Linux; partial C1 evidence)
 
-- Re-ran `tests/godot_p3a_exit_verify.gd` against the revised spawn room; all E3 exit-gate checks passed. The current deterministic settle remains tick 60; occupied cells are 206430. The test now also pins the 120-cell camera crop, the larger presentation-only wizard, and distinct F1/F2 controls.
-- Captured the live Godot scene at 1280×720: [`captures/2026-10-15-cave-review.png`](captures/2026-10-15-cave-review.png). It shows the opening chamber's arch, compact bridge, wizard, wick, seep, and sidebar in the revised player-scale view.
+- Re-ran the E2/E3 fixtures after the look pass; all checks pass. The deterministic settle remains tick 60 and the current occupied-cell count is 210121. New checks pin the spawn-room roof, clear central lane, tapered ceiling rib, camera-aligned backdrop across zoom, and deep-rock visibility floor; P1 also pins nearest-filtered water.
+- Captured the live Godot scene at 1280×720: [`captures/2026-10-15-cave-lookpass.png`](captures/2026-10-15-cave-lookpass.png). This iteration frame shows the tighter roof in the camera crop, tapered ceiling ribs, bridge-end rockwork, atmospheric void, wizard, wick/seep, and sidebar.
+- Evaluated the existing Stage-B light-field spike with `scripts/stage_b_spike_probe.gd`: all spike checks pass and Stage-A sim/base/water bytes remain identical, but a live 60×46-texel rebuild averages 10.811 ms. It remains prototype-only and unwired to avoid a large per-frame CPU spike.
 - This Linux/Xvfb render is an iteration check, not the target Apple Silicon GPU baseline. It does not replace the requested fire-lit/unlit or bloom on/off A/B pairs, pause/resume camera sweep, full-cavern/close-follow pair, or target-Mac GPU pass. Those P3 human sign-off items remain open.
 - The original 2026-09-12 Apple Silicon benchmark table above is historical and unchanged; do not compare its occupancy/content samples directly with this deterministic cave revision.

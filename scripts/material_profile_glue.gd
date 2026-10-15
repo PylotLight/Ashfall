@@ -67,10 +67,11 @@ const ANIM_INDEX := {"static": 0.0, "flame": 1.0, "ember": 2.0, "flow": 3.0, "wi
 
 const BG_COLOR := Color(18.0 / 255.0, 20.0 / 255.0, 24.0 / 255.0)
 
-# R7 depth-curve default (LUT tex3.g for every row — no JSON field by design,
-# see header). exp(-depth*rate): 0.06 gives 0.55x at 10 cells, 0.30x at 20,
-# 0.09x at 40 — surfaces read, deep masses sink without crushing mid-tones.
-const DEFAULT_DEPTH_RATE := 0.06
+# R7 depth-curve defaults (LUT tex3.g for every row — no JSON field by design,
+# see header). 0.04 gives 0.67x at 10 cells, 0.45x at 20, then an ambient
+# floor of 0.30 keeps deep cave roofs/walls distinct from the atmospheric void.
+const DEFAULT_DEPTH_RATE := 0.04
+const DEFAULT_DEPTH_FLOOR := 0.30
 const DEFAULT_EDGE_DARKNESS := 0.35
 const DEFAULT_DEPTH_BOOST := 1.0
 
@@ -128,6 +129,7 @@ static func make_material(world: AshfallWorld, profiles: Dictionary,
 	sm.set_shader_parameter("depth_tex", world.get_depth_texture())
 	sm.set_shader_parameter("edge_darkness", DEFAULT_EDGE_DARKNESS)
 	sm.set_shader_parameter("depth_boost", DEFAULT_DEPTH_BOOST)
+	sm.set_shader_parameter("depth_floor", DEFAULT_DEPTH_FLOOR)
 	sm.set_shader_parameter("profile_palette",
 		ImageTexture.create_from_image(build_palette_image(profiles, world)))
 	sm.set_shader_parameter("profile_params",
@@ -221,9 +223,9 @@ static func eval_edge_factor(edge_response: float, diff_count: int, darkness := 
 	return 1.0 - clampf(edge_response, 0.0, 1.0) * darkness * clampf(float(diff_count) * 0.75, 0.0, 1.0)
 
 
-## R7 section 9 mirror: exponential overburden falloff.
-static func eval_depth_factor(depth_cells: int, rate := DEFAULT_DEPTH_RATE, boost := DEFAULT_DEPTH_BOOST) -> float:
-	return exp(-float(maxi(depth_cells, 0)) * rate * boost)
+## R7 section 9 mirror: exponential overburden falloff with an ambient floor.
+static func eval_depth_factor(depth_cells: int, rate := DEFAULT_DEPTH_RATE, boost := DEFAULT_DEPTH_BOOST, floor_factor := DEFAULT_DEPTH_FLOOR) -> float:
+	return maxf(floor_factor, exp(-float(maxi(depth_cells, 0)) * rate * boost))
 
 
 ## Shared pattern pick (shader section 3): palette entry pre-detail. The
@@ -257,8 +259,8 @@ static func _eval_pattern(prof: Dictionary, x: int, y: int, seed_byte: int) -> C
 	return base
 
 
-## Shared three-scale detail (shader section 4): per-cell seed + 2x2 block +
-## 4x4 mottle, all x detail_strength. Modulates albedo only.
+## Shared detail (shader section 4): per-cell seed + 2x2/4x4 mottle and two
+## smoothly warped geological scales, all x detail_strength. Modulates albedo only.
 static func _eval_detail(prof: Dictionary, base: Color, x: int, y: int, seed_byte: int) -> Color:
 	var detail: float = clampf(float(prof["detail_strength"]), 0.0, 1.0)
 	var seed01 := float(seed_byte) / 255.0
@@ -267,6 +269,14 @@ static func _eval_detail(prof: Dictionary, base: Color, x: int, y: int, seed_byt
 	var blk := _hash12(floor(cell.x / 2.0), floor(cell.y / 2.0))
 	var mot := _hash12(floor(cell.x / 4.0) + 3.1, floor(cell.y / 4.0) + 3.1)
 	col *= 1.0 + (blk - 0.5) * detail * 1.2 + (mot - 0.5) * detail * 0.8
+	var warp := Vector2(
+		_value_noise(cell.x / 48.0, cell.y / 48.0),
+		_value_noise((cell.x + 23.7) / 48.0, (cell.y + 11.3) / 48.0)
+	) - Vector2(0.5, 0.5)
+	var geology_large := _value_noise(cell.x / 30.0 + warp.x * 0.8, cell.y / 30.0 + warp.y * 0.8)
+	var geology_small := _value_noise(cell.x / 11.0 + warp.x * 1.6, cell.y / 11.0 + warp.y * 1.6)
+	var geology := geology_large * 0.68 + geology_small * 0.32
+	col *= 1.0 + (geology - 0.5) * detail * 0.75
 	return col
 
 
@@ -405,3 +415,17 @@ static func _hash12(px: float, py: float) -> float:
 	p3y += d
 	p3z += d
 	return _fract((p3x + p3y) * p3z)
+
+
+static func _value_noise(px: float, py: float) -> float:
+	var ix: float = floor(px)
+	var iy: float = floor(py)
+	var fx := _fract(px)
+	var fy := _fract(py)
+	fx = fx * fx * (3.0 - 2.0 * fx)
+	fy = fy * fy * (3.0 - 2.0 * fy)
+	var a := _hash12(ix, iy)
+	var b := _hash12(ix + 1.0, iy)
+	var c := _hash12(ix, iy + 1.0)
+	var d := _hash12(ix + 1.0, iy + 1.0)
+	return lerpf(lerpf(a, b, fx), lerpf(c, d, fx), fy)

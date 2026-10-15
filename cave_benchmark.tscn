@@ -4,6 +4,7 @@
 [ext_resource type="Shader" uid="uid://cuf1l7nt57pbs" path="res://shaders/water_fx.gdshader" id="2_waterfx"]
 [ext_resource type="Script" path="res://scripts/cave_bloom_toggle.gd" id="3_bloom"]
 [ext_resource type="Script" path="res://scripts/player_wizard.gd" id="4_wizard"]
+[ext_resource type="Shader" path="res://shaders/cave_backdrop.gdshader" id="5_backdrop"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_water"]
 shader = ExtResource("2_waterfx")
@@ -12,6 +13,10 @@ shader_parameter/edge_high = 0.65
 shader_parameter/final_alpha = 0.88
 shader_parameter/foam_tint = Color(0.09, 0.11, 0.12, 1)
 shader_parameter/shimmer_strength = 0.02
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_cave_backdrop"]
+shader = ExtResource("5_backdrop")
+shader_parameter/view_size = Vector2(192, 120)
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_viewport"]
 bg_color = Color(0.07, 0.078, 0.094, 1)
@@ -138,6 +143,17 @@ theme_override_styles/panel = SubResource("StyleBoxFlat_viewport")
 layout_mode = 2
 mouse_filter = 2
 
+[node name="CaveBackdrop" type="ColorRect" parent="MainLayout/ViewportContainer/WorldStack"]
+material = SubResource("ShaderMaterial_cave_backdrop")
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 1, 1, 1)
+
 [node name="WorldTexture" type="TextureRect" parent="MainLayout/ViewportContainer/WorldStack"]
 texture_filter = 1
 layout_mode = 1
@@ -151,7 +167,7 @@ expand_mode = 1
 stretch_mode = 5
 
 [node name="WaterOverlay" type="TextureRect" parent="MainLayout/ViewportContainer/WorldStack"]
-texture_filter = 2
+texture_filter = 1
 material = SubResource("ShaderMaterial_water")
 layout_mode = 1
 anchors_preset = 15
