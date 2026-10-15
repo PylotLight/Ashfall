@@ -1,0 +1,1 @@
+{"version": 1, "reactions": [{"name": "warmup", "probability": 100, "reactants": [{"tag": "burnable"}], "products": [{"material": "fire"}], "temperature": {}}]}

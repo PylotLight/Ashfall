@@ -1,0 +1,964 @@
+#include "ashfall_world.hpp"
+
+#include "ashfall/material_data.hpp"
+#include "ashfall/reaction_data.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <set>
+#include <span>
+#include <string>
+#include <vector>
+
+#include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+
+namespace godot {
+
+namespace {
+inline double present_ms_between(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+} // namespace
+
+void AshfallWorld::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("init_world", "width", "height"), &AshfallWorld::init_world);
+    ClassDB::bind_method(D_METHOD("step"), &AshfallWorld::step);
+    ClassDB::bind_method(D_METHOD("set_cell", "x", "y", "material_id"), &AshfallWorld::set_cell);
+    ClassDB::bind_method(D_METHOD("get_cell", "x", "y"), &AshfallWorld::get_cell);
+    ClassDB::bind_method(D_METHOD("fill_rect", "x1", "y1", "x2", "y2", "material_id"), &AshfallWorld::fill_rect);
+    ClassDB::bind_method(D_METHOD("get_tick"), &AshfallWorld::get_tick);
+    ClassDB::bind_method(D_METHOD("get_occupied_cell_count"), &AshfallWorld::get_occupied_cell_count);
+    ClassDB::bind_method(D_METHOD("get_dirty_chunks"), &AshfallWorld::get_dirty_chunks);
+    ClassDB::bind_method(D_METHOD("clear_dirty_chunks"), &AshfallWorld::clear_dirty_chunks);
+    ClassDB::bind_method(D_METHOD("setup_reference_world"), &AshfallWorld::setup_reference_world);
+    ClassDB::bind_method(D_METHOD("setup_play_level"), &AshfallWorld::setup_play_level);
+    ClassDB::bind_method(D_METHOD("get_player_spawn"), &AshfallWorld::get_player_spawn);
+    ClassDB::bind_method(D_METHOD("is_solid_cell", "x", "y"), &AshfallWorld::is_solid_cell);
+    ClassDB::bind_method(D_METHOD("can_move_to_box", "x1", "y1", "x2", "y2"), &AshfallWorld::can_move_to_box);
+    ClassDB::bind_method(D_METHOD("save_to_bytes"), &AshfallWorld::save_to_bytes);
+    ClassDB::bind_method(D_METHOD("load_from_bytes", "bytes"), &AshfallWorld::load_from_bytes);
+    ClassDB::bind_method(D_METHOD("load_materials", "json_text"), &AshfallWorld::load_materials);
+    ClassDB::bind_method(D_METHOD("load_reactions", "json_text"), &AshfallWorld::load_reactions);
+    ClassDB::bind_method(D_METHOD("get_material_count"), &AshfallWorld::get_material_count);
+    ClassDB::bind_method(D_METHOD("get_material_ids"), &AshfallWorld::get_material_ids);
+    ClassDB::bind_method(D_METHOD("get_material_name", "material_id"), &AshfallWorld::get_material_name);
+    ClassDB::bind_method(D_METHOD("get_material_color", "material_id"), &AshfallWorld::get_material_color);
+    ClassDB::bind_method(D_METHOD("get_material_movement", "material_id"), &AshfallWorld::get_material_movement);
+
+    ClassDB::bind_method(D_METHOD("set_auto_step", "auto_step"), &AshfallWorld::set_auto_step);
+    ClassDB::bind_method(D_METHOD("is_auto_step"), &AshfallWorld::is_auto_step);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "auto_step"), "set_auto_step", "is_auto_step");
+    ClassDB::bind_method(D_METHOD("set_sim_rate_hz", "hz"), &AshfallWorld::set_sim_rate_hz);
+    ClassDB::bind_method(D_METHOD("get_sim_rate_hz"), &AshfallWorld::get_sim_rate_hz);
+    ClassDB::bind_method(D_METHOD("set_max_steps_per_physics_frame", "max_steps"), &AshfallWorld::set_max_steps_per_physics_frame);
+    ClassDB::bind_method(D_METHOD("get_max_steps_per_physics_frame"), &AshfallWorld::get_max_steps_per_physics_frame);
+
+    ClassDB::bind_method(D_METHOD("update_world_texture"), &AshfallWorld::update_world_texture);
+    ClassDB::bind_method(D_METHOD("flush_present"), &AshfallWorld::flush_present);
+    ClassDB::bind_method(D_METHOD("debug_force_full_repaint"), &AshfallWorld::debug_force_full_repaint);
+    ClassDB::bind_method(D_METHOD("debug_drop_presentation"), &AshfallWorld::debug_drop_presentation);
+    ClassDB::bind_method(D_METHOD("get_present_sim_ms"), &AshfallWorld::get_present_sim_ms);
+    ClassDB::bind_method(D_METHOD("get_present_dirty_collect_ms"), &AshfallWorld::get_present_dirty_collect_ms);
+    ClassDB::bind_method(D_METHOD("get_present_material_read_ms"), &AshfallWorld::get_present_material_read_ms);
+    ClassDB::bind_method(D_METHOD("get_present_paint_ms"), &AshfallWorld::get_present_paint_ms);
+    ClassDB::bind_method(D_METHOD("get_present_set_data_ms"), &AshfallWorld::get_present_set_data_ms);
+    ClassDB::bind_method(D_METHOD("get_present_submit_ms"), &AshfallWorld::get_present_submit_ms);
+    ClassDB::bind_method(D_METHOD("get_present_texture_submits"), &AshfallWorld::get_present_texture_submits);
+    ClassDB::bind_method(D_METHOD("get_present_flushes"), &AshfallWorld::get_present_flushes);
+    ClassDB::bind_method(D_METHOD("get_present_dirty_pixels"), &AshfallWorld::get_present_dirty_pixels);
+    ClassDB::bind_method(D_METHOD("get_present_logical_bytes"), &AshfallWorld::get_present_logical_bytes);
+    ClassDB::bind_method(D_METHOD("get_sim_phases"), &AshfallWorld::get_sim_phases);
+    ClassDB::bind_method(D_METHOD("get_sim_counters"), &AshfallWorld::get_sim_counters);
+    ClassDB::bind_method(D_METHOD("get_world_texture"), &AshfallWorld::get_world_texture);
+    ClassDB::bind_method(D_METHOD("get_world_image"), &AshfallWorld::get_world_image);
+    ClassDB::bind_method(D_METHOD("get_water_texture"), &AshfallWorld::get_water_texture);
+    ClassDB::bind_method(D_METHOD("get_water_image"), &AshfallWorld::get_water_image);
+    ClassDB::bind_method(D_METHOD("get_identity_texture"), &AshfallWorld::get_identity_texture);
+    ClassDB::bind_method(D_METHOD("get_identity_image"), &AshfallWorld::get_identity_image);
+    ClassDB::bind_method(D_METHOD("get_seed_texture"), &AshfallWorld::get_seed_texture);
+    ClassDB::bind_method(D_METHOD("get_seed_image"), &AshfallWorld::get_seed_image);
+    ClassDB::bind_method(D_METHOD("get_depth_texture"), &AshfallWorld::get_depth_texture);
+    ClassDB::bind_method(D_METHOD("get_depth_image"), &AshfallWorld::get_depth_image);
+    ClassDB::bind_method(D_METHOD("get_last_step_ms"), &AshfallWorld::get_last_step_ms);
+    ClassDB::bind_method(D_METHOD("get_world_width"), &AshfallWorld::get_world_width);
+    ClassDB::bind_method(D_METHOD("get_world_height"), &AshfallWorld::get_world_height);
+
+    BIND_ENUM_CONSTANT(MATERIAL_AIR);
+    BIND_ENUM_CONSTANT(MATERIAL_STONE);
+    BIND_ENUM_CONSTANT(MATERIAL_SAND);
+    BIND_ENUM_CONSTANT(MATERIAL_WATER);
+    BIND_ENUM_CONSTANT(MATERIAL_STEAM);
+    BIND_ENUM_CONSTANT(MATERIAL_FIRE);
+    BIND_ENUM_CONSTANT(MATERIAL_WOOD);
+    BIND_ENUM_CONSTANT(MATERIAL_LAVA);
+    BIND_ENUM_CONSTANT(MATERIAL_ROCK);
+}
+
+AshfallWorld::AshfallWorld() {
+    init_world(512, 512);
+    set_physics_process(true);
+}
+
+void AshfallWorld::_physics_process(double delta) {
+    if (!auto_step_) {
+        step_accumulator_ = 0.0;
+        return;
+    }
+    if (sim_rate_hz_ <= 0.0) {
+        step();
+        return;
+    }
+    step_accumulator_ += delta;
+    const double interval = 1.0 / sim_rate_hz_;
+    // Drop backlog beyond one frame's worth of steps: never spiral.
+    const double max_accum = interval * static_cast<double>(max_steps_per_physics_frame_ > 0 ? max_steps_per_physics_frame_ : 1);
+    if (step_accumulator_ > max_accum) step_accumulator_ = max_accum;
+    int steps = 0;
+    while (step_accumulator_ >= interval && steps < max_steps_per_physics_frame_) {
+        step();
+        step_accumulator_ -= interval;
+        ++steps;
+    }
+}
+
+void AshfallWorld::init_world(int p_width, int p_height) {
+    // Group 3, Task B5: checked dims + resource limits BEFORE any world
+    // reset or allocation. Signed arithmetic in int64 so large inputs cannot
+    // overflow; rejection leaves the current world untouched.
+    if (p_width < 1 || p_height < 1 || p_width > kMaxWorldDim || p_height > kMaxWorldDim) {
+        UtilityFunctions::push_error("init_world: dimensions out of range (1..4096 each)");
+        return;
+    }
+    const std::uint64_t cells64 =
+        static_cast<std::uint64_t>(p_width) * static_cast<std::uint64_t>(p_height);
+    if (cells64 > kMaxWorldCells) {
+        UtilityFunctions::push_error("init_world: world too large (cells exceed 1<<22)");
+        return;
+    }
+    world_width_ = p_width;
+    world_height_ = p_height;
+
+    // Authoritative state reset: presentation window resize must not preserve
+    // stale cells from a previous world. reset() dirties removed chunks, but
+    // since we repaint the full background below, clear immediately to keep
+    // presentation and dirty set in sync.
+    world_.reset();
+    refresh_material_cache();
+
+    const std::size_t total_cells = static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    cell_buffer_.assign(total_cells, ashfall::kAir);
+
+    fill_background_pixels();
+    fill_identity_seed_background();
+
+    world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
+    world_texture_ = ImageTexture::create_from_image(world_image_);
+    water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    water_texture_ = ImageTexture::create_from_image(water_image_);
+    identity_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    identity_texture_ = ImageTexture::create_from_image(identity_image_);
+    seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
+    seed_texture_ = ImageTexture::create_from_image(seed_image_);
+    fill_depth_background();
+    depth_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
+    depth_texture_ = ImageTexture::create_from_image(depth_image_);
+    force_full_repaint_ = false;
+    world_.clear_dirty_chunks();
+    step_accumulator_ = 0.0;
+}
+
+void AshfallWorld::step() {
+    // Group 3, Task B4 (cadence): step() advances the sim and accumulates
+    // dirtiness ONLY. Presentation happens in flush_present(), called once
+    // per rendered frame by the host (main_controller._process) — never once
+    // per sim step, edit, or mouse-motion event. Tests needing a synchronous
+    // step-and-present use flush_present() (or update_world_texture())
+    // directly after stepping.
+    // HUD number span: world_.step() ONLY — the same span bench_step.cpp
+    // times (sim, no present), so the HUD ms/step is directly comparable to
+    // sim-bench numbers. Present cost lives in last_present_ (see
+    // flush_present()).
+    const auto sim_t0 = std::chrono::steady_clock::now();
+    world_.step();
+    const auto sim_t1 = std::chrono::steady_clock::now();
+    last_present_.sim_ms = present_ms_between(sim_t0, sim_t1);
+    last_step_ms_ = last_present_.sim_ms;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    // E1 snapshot: the engine stored write-only splits/counters during
+    // step(); copy them next to sim_ms (sim code never reads them back).
+    last_present_.sim_phases = world_.last_step_timings();
+    last_present_.sim_counters = world_.last_step_counters();
+    last_present_.sim_splits_valid = true;
+#endif
+}
+
+bool AshfallWorld::validate_material_id(int p_material_id) const {
+    // Group 3, Task B5: range + known-id reject BEFORE the u8 narrow, so 256
+    // can never alias to air (and 257 to stone) ahead of engine validation.
+    if (p_material_id < 0 || p_material_id > 255) {
+        UtilityFunctions::push_error("AshfallWorld: material id out of range 0..255");
+        return false;
+    }
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) {
+        UtilityFunctions::push_error("AshfallWorld: unknown material id");
+        return false;
+    }
+    return true;
+}
+
+void AshfallWorld::set_cell(int p_x, int p_y, int p_material_id) {
+    if (!validate_material_id(p_material_id)) return;
+    world_.set_cell({p_x, p_y}, static_cast<ashfall::MaterialId>(p_material_id));
+}
+
+int AshfallWorld::get_cell(int p_x, int p_y) const {
+    return static_cast<int>(world_.cell({p_x, p_y}));
+}
+
+void AshfallWorld::fill_rect(int p_x1, int p_y1, int p_x2, int p_y2, int p_material_id) {
+    if (!validate_material_id(p_material_id)) return;
+    world_.fill_rect({p_x1, p_y1}, {p_x2, p_y2}, static_cast<ashfall::MaterialId>(p_material_id));
+}
+
+int64_t AshfallWorld::get_tick() const {
+    return static_cast<int64_t>(world_.tick());
+}
+
+int64_t AshfallWorld::get_occupied_cell_count() const {
+    return static_cast<int64_t>(world_.occupied_cell_count());
+}
+
+PackedVector2Array AshfallWorld::get_dirty_chunks() const {
+    PackedVector2Array result;
+    for (const ashfall::CellPosition chunk_position : world_.dirty_chunks()) {
+        result.push_back(Vector2(chunk_position.x, chunk_position.y));
+    }
+    return result;
+}
+
+void AshfallWorld::clear_dirty_chunks() {
+    world_.clear_dirty_chunks();
+}
+
+void AshfallWorld::set_auto_step(bool p_auto) {
+    auto_step_ = p_auto;
+    if (!auto_step_) step_accumulator_ = 0.0;
+}
+
+bool AshfallWorld::is_auto_step() const {
+    return auto_step_;
+}
+
+void AshfallWorld::set_sim_rate_hz(double p_hz) {
+    // Group 3, Task B5: non-finite rates are rejected (old rate kept);
+    // finite rates clamp to the supported range.
+    if (!std::isfinite(p_hz)) {
+        UtilityFunctions::push_error("AshfallWorld: sim rate must be finite");
+        return;
+    }
+    sim_rate_hz_ = std::clamp(p_hz, kMinSimRateHz, kMaxSimRateHz);
+    step_accumulator_ = 0.0;
+}
+
+void AshfallWorld::set_max_steps_per_physics_frame(int p_max) {
+    max_steps_per_physics_frame_ = p_max < 1 ? 1 : (p_max > 4 ? 4 : p_max);
+}
+
+void AshfallWorld::setup_reference_world() {
+    world_.reset();
+    // 512 by 512 world layout
+    // Solid floor
+    world_.fill_rect({0, 480}, {511, 511}, ashfall::kStone);
+
+    // Lateral boundary walls
+    world_.fill_rect({0, 80}, {16, 479}, ashfall::kStone);
+    world_.fill_rect({494, 80}, {511, 479}, ashfall::kStone);
+
+    // Funnel guiding down towards center
+    world_.fill_rect({40, 260}, {210, 272}, ashfall::kStone);
+    world_.fill_rect({300, 260}, {470, 272}, ashfall::kStone);
+    world_.fill_rect({120, 340}, {240, 350}, ashfall::kStone);
+    world_.fill_rect({270, 340}, {390, 350}, ashfall::kStone);
+
+    // Initial powder and liquid deposits
+    world_.fill_rect({80, 100}, {180, 200}, ashfall::kSand);
+    world_.fill_rect({330, 100}, {430, 200}, ashfall::kWater);
+
+    update_world_texture();
+}
+
+void AshfallWorld::setup_play_level() {
+    world_.reset();
+    world_.build_play_level();
+    // Settle the authored rects so the first paint shows a lived-in world
+    // (dunes at repose, pools flat) instead of raw rectangles. Fixed count
+    // keeps setup deterministic; ~1s at 512 on M2 Max.
+    for (int i = 0; i < 200; ++i) world_.step();
+    update_world_texture();
+}
+
+bool AshfallWorld::load_materials(const String &p_json_text) {
+    ashfall::MaterialTable table;
+    std::string error;
+    if (!ashfall::parse_material_data(p_json_text.utf8().get_data(), table, error)) {
+        UtilityFunctions::push_error("load_materials: ", error.c_str());
+        return false;
+    }
+    if (!world_.load_material_table(table)) {
+        UtilityFunctions::push_error("load_materials: table failed validation");
+        return false;
+    }
+    refresh_material_cache();
+    update_world_texture();
+    return true;
+}
+
+bool AshfallWorld::load_reactions(const String &p_json_text) {
+    ashfall::ReactionTable table;
+    std::string error;
+    if (!ashfall::parse_reaction_data(p_json_text.utf8().get_data(), table, error)) {
+        UtilityFunctions::push_error("load_reactions: ", error.c_str());
+        return false;
+    }
+    if (!world_.load_reactions(table)) {
+        UtilityFunctions::push_error("load_reactions: rules failed validation");
+        return false;
+    }
+    return true;
+}
+
+void AshfallWorld::refresh_material_cache() {
+    for (int i = 0; i < 256; ++i) {
+        base_colors_[i] = {18, 20, 24};
+        deep_colors_[i] = {18, 20, 24};
+        movements_[i] = static_cast<std::uint8_t>(ashfall::Movement::Static);
+        known_ids_[i] = false;
+    }
+    for (const ashfall::MaterialId id : world_.material_ids()) {
+        ashfall::MaterialSpec spec;
+        if (!world_.material_info(id, spec)) continue;
+        base_colors_[id] = spec.color;
+        // Deep shade reproduces the legacy water ramp exactly for water
+        // (lround(86*.30)=26, lround(178*(88/178))=88, lround(214*.55)=118)
+        // and gives every future liquid a matching gradient for free.
+        deep_colors_[id] = {
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[0]) * 0.30f)),
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[1]) * (88.0f / 178.0f))),
+            static_cast<std::uint8_t>(std::lround(static_cast<float>(spec.color[2]) * 0.55f)),
+        };
+        movements_[id] = static_cast<std::uint8_t>(spec.movement);
+        known_ids_[id] = true;
+    }
+}
+
+int AshfallWorld::get_material_count() const {
+    return static_cast<int>(world_.material_ids().size());
+}
+
+PackedInt32Array AshfallWorld::get_material_ids() const {
+    PackedInt32Array ids;
+    for (const ashfall::MaterialId id : world_.material_ids()) {
+        ids.push_back(static_cast<int>(id));
+    }
+    return ids;
+}
+
+String AshfallWorld::get_material_name(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return String();
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) return String();
+    return String(spec.name.c_str());
+}
+
+Color AshfallWorld::get_material_color(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return Color(0, 0, 0, 1);
+    const auto& c = base_colors_[static_cast<std::size_t>(p_material_id)];
+    return Color(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1.0f);
+}
+
+int AshfallWorld::get_material_movement(int p_material_id) const {
+    if (p_material_id < 0 || p_material_id > 255) return -1;
+    ashfall::MaterialSpec spec;
+    if (!world_.material_info(static_cast<ashfall::MaterialId>(p_material_id), spec)) return -1;
+    return static_cast<int>(spec.movement);
+}
+
+Vector2i AshfallWorld::get_player_spawn() const {
+    const ashfall::CellPosition spawn = ashfall::SimulationWorld::play_level_spawn();
+    return Vector2i(spawn.x, spawn.y);
+}
+
+bool AshfallWorld::is_solid_cell(int p_x, int p_y) const {
+    return world_.is_solid({p_x, p_y});
+}
+
+bool AshfallWorld::can_move_to_box(int p_x1, int p_y1, int p_x2, int p_y2) const {
+    return world_.can_move_to({p_x1, p_y1}, {p_x2, p_y2});
+}
+
+PackedByteArray AshfallWorld::save_to_bytes() const {
+    const std::vector<std::uint8_t> saved = world_.save();
+    PackedByteArray bytes;
+    bytes.resize(static_cast<int64_t>(saved.size()));
+    if (!saved.empty()) {
+        std::memcpy(bytes.ptrw(), saved.data(), saved.size());
+    }
+    return bytes;
+}
+
+bool AshfallWorld::load_from_bytes(const PackedByteArray &p_bytes) {
+    if (p_bytes.is_empty()) return false;
+    const std::span<const std::uint8_t> span(
+        reinterpret_cast<const std::uint8_t *>(p_bytes.ptr()), static_cast<std::size_t>(p_bytes.size()));
+    const bool ok = world_.load(span);
+    if (ok) update_world_texture();
+    return ok;
+}
+
+Ref<ImageTexture> AshfallWorld::update_world_texture() {
+    // Compatibility wrapper: synchronous present for tests/tools.
+    return flush_present();
+}
+
+void AshfallWorld::debug_force_full_repaint() {
+    force_full_repaint_ = true;
+}
+
+void AshfallWorld::debug_drop_presentation() {
+    // Test hook only: release presentation objects, sim state untouched.
+    world_image_.unref();
+    world_texture_.unref();
+    water_image_.unref();
+    water_texture_.unref();
+    identity_image_.unref();
+    identity_texture_.unref();
+    seed_image_.unref();
+    seed_texture_.unref();
+    depth_image_.unref();
+    depth_texture_.unref();
+}
+
+std::vector<ashfall::CellPosition> AshfallWorld::visible_repaint_set(
+    const std::vector<ashfall::CellPosition>& dirty) const {
+    // B1 halo: each dirty chunk plus its vertical neighbors (±1 cy), clipped
+    // to the presentation window. The window is the whole world here, so the
+    // clip drops chunks that cannot paint (offscreen dirt must neither
+    // repaint nor upload — B4 visible-set filtering).
+    std::set<ashfall::CellPosition> repaint;
+    for (const ashfall::CellPosition chunk : dirty) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            const ashfall::CellPosition candidate{chunk.x, chunk.y + dy};
+            const int base_x = candidate.x * ashfall::kChunkSize;
+            const int base_y = candidate.y * ashfall::kChunkSize;
+            if (base_x + ashfall::kChunkSize - 1 < 0 || base_x > world_width_ - 1) continue;
+            if (base_y + ashfall::kChunkSize - 1 < 0 || base_y > world_height_ - 1) continue;
+            repaint.insert(candidate);
+        }
+    }
+    return std::vector<ashfall::CellPosition>(repaint.begin(), repaint.end());
+}
+
+bool AshfallWorld::presentation_resources_valid() const {
+    // B2: the null/degraded check covers ALL layers (base + water + identity
+    // + seed + R7 depth). Seed bytes never change with sim, but the objects
+    // still need the same lifetime/validity discipline.
+    if (world_image_.is_null() || world_texture_.is_null()) return false;
+    if (water_image_.is_null() || water_texture_.is_null()) return false;
+    if (identity_image_.is_null() || identity_texture_.is_null()) return false;
+    if (seed_image_.is_null() || seed_texture_.is_null()) return false;
+    if (world_image_->get_width() != world_width_ || world_image_->get_height() != world_height_) return false;
+    if (water_image_->get_width() != world_width_ || water_image_->get_height() != world_height_) return false;
+    if (identity_image_->get_width() != world_width_ || identity_image_->get_height() != world_height_) return false;
+    if (seed_image_->get_width() != world_width_ || seed_image_->get_height() != world_height_) return false;
+    if (depth_image_.is_null() || depth_texture_.is_null()) return false;
+    if (depth_image_->get_width() != world_width_ || depth_image_->get_height() != world_height_) return false;
+    const int64_t expect = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_) * 4;
+    if (pixel_bytes_.size() != expect || water_pixel_bytes_.size() != expect) return false;
+    const int64_t expect_ids = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    if (identity_bytes_.size() != expect_ids || seed_bytes_.size() != expect_ids) return false;
+    if (depth_bytes_.size() != expect_ids) return false;
+    return true;
+}
+
+void AshfallWorld::fill_background_pixels() {
+    const std::size_t total_cells =
+        static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
+    uint8_t *w = pixel_bytes_.ptrw();
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        w[i * 4 + 0] = 18;
+        w[i * 4 + 1] = 20;
+        w[i * 4 + 2] = 24;
+        w[i * 4 + 3] = 255;
+    }
+    water_pixel_bytes_.resize(static_cast<int64_t>(total_cells * 4));
+    uint8_t *ww = water_pixel_bytes_.ptrw();
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        ww[i * 4 + 0] = 0;
+        ww[i * 4 + 1] = 0;
+        ww[i * 4 + 2] = 0;
+        ww[i * 4 + 3] = 0;
+    }
+}
+
+void AshfallWorld::fill_identity_seed_background() {
+    // P3A B2: identity starts as air everywhere; seed is a pure function of
+    // coords (stable across frames, ticks, and boots by construction).
+    const int64_t total_cells = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    identity_bytes_.resize(total_cells);
+    seed_bytes_.resize(total_cells);
+    uint8_t *id = identity_bytes_.ptrw();
+    uint8_t *sd = seed_bytes_.ptrw();
+    for (int y = 0; y < world_height_; ++y) {
+        for (int x = 0; x < world_width_; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+            id[i] = ashfall::kAir;
+            sd[i] = stable_seed(x, y);
+        }
+    }
+}
+
+void AshfallWorld::fill_depth_background() {
+    // P3A R7: depth starts at zero overburden everywhere; the next flush
+    // rewrites every byte (init runs before any present; recover forces a
+    // full repaint), so zeros here are only a validity placeholder.
+    const int64_t total_cells = static_cast<int64_t>(world_width_) * static_cast<int64_t>(world_height_);
+    depth_bytes_.resize(total_cells);
+    uint8_t *d = depth_bytes_.ptrw();
+    for (int64_t i = 0; i < total_cells; ++i) {
+        d[i] = 0;
+    }
+}
+
+std::uint8_t AshfallWorld::stable_seed(int x, int y) {
+    // Same hash family as the painter grain (deterministic, no RNG state),
+    // full-byte output instead of the grain's -6..+6 range.
+    std::uint32_t h = static_cast<std::uint32_t>(x) * 0x9E3779B1u;
+    h ^= static_cast<std::uint32_t>(y) * 0x85EBCA77u + 0x9E3779B9u + (h << 6) + (h >> 2);
+    h ^= h >> 13;
+    h ^= h >> 7;
+    return static_cast<std::uint8_t>(h & 0xFFu);
+}
+
+void AshfallWorld::recover_presentation_resources() {
+    // B2: recreate presentation objects + full repaint from the CURRENT
+    // world. Zero sim mutation: world_, its tick, cells, temps, and table are
+    // never touched here (the old path called init_world(), erasing the sim).
+    // The host rebinds its texture refs after every flush (see
+    // main_controller._process), so replaced texture objects stay bound.
+    const std::size_t total_cells =
+        static_cast<std::size_t>(world_width_) * static_cast<std::size_t>(world_height_);
+    cell_buffer_.assign(total_cells, ashfall::kAir);
+    fill_background_pixels();
+    fill_identity_seed_background();
+    world_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
+    world_texture_ = ImageTexture::create_from_image(world_image_);
+    water_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    water_texture_ = ImageTexture::create_from_image(water_image_);
+    identity_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    identity_texture_ = ImageTexture::create_from_image(identity_image_);
+    seed_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, seed_bytes_);
+    seed_texture_ = ImageTexture::create_from_image(seed_image_);
+    fill_depth_background();
+    depth_image_ = Image::create_from_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
+    depth_texture_ = ImageTexture::create_from_image(depth_image_);
+    force_full_repaint_ = true;
+}
+
+Ref<ImageTexture> AshfallWorld::flush_present() {
+    if (!presentation_resources_valid()) {
+        recover_presentation_resources();
+    }
+
+    const auto dirty_t0 = std::chrono::steady_clock::now();
+    const std::vector<ashfall::CellPosition> dirty = world_.dirty_chunks();
+    last_present_.dirty_collect_ms = present_ms_between(dirty_t0, std::chrono::steady_clock::now());
+
+    // B1 halo + B4 visible-set filtering: the repaint set (dirty ∪ vertical
+    // neighbors, window-clipped) is built BEFORE the partial/full decision,
+    // so offscreen dirt neither repaints nor uploads.
+    const std::vector<ashfall::CellPosition> repaint = visible_repaint_set(dirty);
+
+    // No-work fast path BEFORE any ptrw(): PackedByteArray::ptrw() triggers
+    // copy-on-write duplication even when the bytes are only read, so
+    // acquiring the write pointer on a clean frame would copy ~1MB per layer
+    // for nothing (CoW trap). Skipping here mutates nothing the old path did
+    // not: the old code returned the same texture untouched when clean.
+    // Invisible-only dirt is consumed the same way (fixed window: nothing
+    // newly exposed can need it later) but submits nothing.
+    if (repaint.empty()) {
+        force_full_repaint_ = false;
+        last_present_.material_read_ms = 0.0;
+        last_present_.paint_ms = 0.0;
+        last_present_.set_data_ms = 0.0;
+        last_present_.submit_ms = 0.0;
+        last_present_.dirty_pixels = 0;
+        last_present_.logical_bytes = 0;
+        world_.clear_dirty_chunks();
+        return world_texture_;
+    }
+
+    // Deterministic per-pixel grain, stable across frames (no shimmer).
+    auto grain = [](int x, int y) -> int {
+        std::uint32_t h = static_cast<std::uint32_t>(x) * 0x9E3779B1u;
+        h ^= static_cast<std::uint32_t>(y) * 0x85EBCA77u + 0x9E3779B9u + (h << 6) + (h >> 2);
+        h ^= h >> 13;
+        return static_cast<int>(h % 13u) - 6; // -6..+6
+    };
+    auto clamp_channel = [](int v) -> uint8_t {
+        return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    };
+
+    // Colors come from the loaded table (refresh_material_cache); liquid
+    // depth shading keys off the movement class, never the id. Powder gets
+    // stronger grain than static. Paints BOTH layers: base gets opaque
+    // known materials over background (air/unknown leave background), water
+    // layer gets shaded RGB + coverage alpha for liquids, transparent else.
+    static constexpr std::uint8_t kLiquidClass = static_cast<std::uint8_t>(ashfall::Movement::Liquid);
+    static constexpr std::uint8_t kPowderClass = static_cast<std::uint8_t>(ashfall::Movement::Powder);
+    auto paint_cell = [&](int x, int y, ashfall::MaterialId mat, int depth_below, bool surface,
+                          uint8_t *dst, uint8_t *water_dst) {
+        const int gr = grain(x, y);
+        const std::size_t idx = static_cast<std::size_t>(mat);
+        const bool is_liquid = movements_[idx] == kLiquidClass;
+        int r = 18, g = 20, b = 24, a = 255;
+        int wr = 0, wg = 0, wb = 0, wa = 0;
+        if (is_liquid) {
+            const float t = depth_below >= 5 ? 1.0f : static_cast<float>(depth_below) / 5.0f;
+            const auto& base = base_colors_[idx];
+            const auto& deep = deep_colors_[idx];
+            wr = static_cast<int>(static_cast<float>(base[0]) +
+                    (static_cast<float>(deep[0]) - static_cast<float>(base[0])) * t) +
+                gr;
+            wg = static_cast<int>(static_cast<float>(base[1]) +
+                    (static_cast<float>(deep[1]) - static_cast<float>(base[1])) * t) +
+                gr;
+            wb = static_cast<int>(static_cast<float>(base[2]) +
+                    (static_cast<float>(deep[2]) - static_cast<float>(base[2])) * t) +
+                gr;
+            if (surface) { // surface skin highlight
+                wr += 22;
+                wg += 22;
+                wb += 22;
+            }
+            wa = 205;
+        } else if (mat != ashfall::kAir && known_ids_[idx]) {
+            const auto& base = base_colors_[idx];
+            const int j = movements_[idx] == kPowderClass ? gr * 2 : gr;
+            r = static_cast<int>(base[0]) + j;
+            g = static_cast<int>(base[1]) + j;
+            b = static_cast<int>(base[2]) + j;
+        }
+        dst[0] = clamp_channel(r);
+        dst[1] = clamp_channel(g);
+        dst[2] = clamp_channel(b);
+        dst[3] = clamp_channel(a);
+        water_dst[0] = clamp_channel(wr);
+        water_dst[1] = clamp_channel(wg);
+        water_dst[2] = clamp_channel(wb);
+        water_dst[3] = clamp_channel(wa);
+    };
+
+    const auto paint_t0 = std::chrono::steady_clock::now();
+    uint8_t *w = pixel_bytes_.ptrw();
+    uint8_t *water_w = water_pixel_bytes_.ptrw();
+    // P3A B2: identity upload rides the same repaint set as the CPU paint
+    // (no extra world queries — mat is already in hand per cell). Seed bytes
+    // are coordinate-pure and never rewritten here.
+    uint8_t *id_w = identity_bytes_.ptrw();
+    std::uint64_t painted_pixels = 0;
+    std::uint64_t logical_cells = 0;
+
+    // Partial CPU-side path: repaint only the visible repaint set (dirty
+    // chunks + vertical halo, window-clipped). The single ImageTexture still
+    // requires a full GPU upload via update(), so GPU-side remains monolithic
+    // by design (see P1.2). The partial/full choice is made on the VISIBLE
+    // set: offscreen dirt already returned early above.
+    const std::size_t kFullRepaintThreshold = 8;
+    bool use_partial = !force_full_repaint_ && repaint.size() <= kFullRepaintThreshold;
+
+    if (!use_partial) {
+        const auto read_t0 = std::chrono::steady_clock::now();
+        world_.copy_rect({0, 0}, {world_width_ - 1, world_height_ - 1}, cell_buffer_);
+        last_present_.material_read_ms = present_ms_between(read_t0, std::chrono::steady_clock::now());
+        logical_cells = static_cast<std::uint64_t>(world_width_) * static_cast<std::uint64_t>(world_height_);
+        // P3A R7 depth (full path): column overburden runs over the full
+        // copy — O(cells), exact. depth(x,y) counts consecutive piled-matter
+        // cells directly above (Static/Powder/Liquid; air and gas stop the
+        // run), clamped to 255. Flames/steam must not cast depth (gas
+        // excluded); sand piles do (powder included).
+        {
+            static constexpr std::uint8_t kGasClass =
+                static_cast<std::uint8_t>(ashfall::Movement::Gas);
+            uint8_t *d = depth_bytes_.ptrw();
+            for (int x = 0; x < world_width_; ++x) {
+                int run = 0;
+                for (int y = 0; y < world_height_; ++y) {
+                    const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+                    d[i] = static_cast<uint8_t>(run > 255 ? 255 : run);
+                    const ashfall::MaterialId mat = cell_buffer_[i];
+                    const bool piled = mat != ashfall::kAir &&
+                        movements_[static_cast<std::size_t>(mat)] != kGasClass;
+                    run = piled ? run + 1 : 0;
+                }
+            }
+        }
+        for (int y = 0; y < world_height_; ++y) {
+            for (int x = 0; x < world_width_; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y * world_width_ + x);
+                const ashfall::MaterialId mat = cell_buffer_[i];
+                const bool is_liquid =
+                    movements_[static_cast<std::size_t>(mat)] == kLiquidClass;
+                int depth = 0;
+                bool surface = true;
+                if (y > 0) {
+                    const ashfall::MaterialId above_mat =
+                        cell_buffer_[i - static_cast<std::size_t>(world_width_)];
+                    surface = movements_[static_cast<std::size_t>(above_mat)] != kLiquidClass;
+                }
+                if (is_liquid) {
+                    while (depth < 5 && y + 1 + depth < world_height_ &&
+                           movements_[cell_buffer_[i + static_cast<std::size_t>((1 + depth) * world_width_)]] ==
+                               kLiquidClass) {
+                        ++depth;
+                    }
+                    int height = 0;
+                    while (height < depth && y - 1 - height >= 0 &&
+                           movements_[cell_buffer_[i - static_cast<std::size_t>((1 + height) * world_width_)]] ==
+                               kLiquidClass) {
+                        ++height;
+                    }
+                    depth = height;
+                }
+                paint_cell(x, y, mat, depth, surface, w + i * 4, water_w + i * 4);
+                id_w[i] = static_cast<std::uint8_t>(mat);
+                ++painted_pixels;
+            }
+        }
+        last_present_.paint_ms = present_ms_between(paint_t0, std::chrono::steady_clock::now());
+    } else {
+        // Partial path: contiguous-scratch-tile+halo (Group 4, Task B7).
+        // Each repaint chunk is copied once via copy_rect into a small
+        // scratch tile (chunk width x chunk height + 5-row vertical halo,
+        // world-clipped); all paint + shading reads then index the tile
+        // instead of issuing per-cell world_.cell() hash lookups. The old
+        // query path re-read the same cells many times (surface reads y-1,
+        // depth scans y+1..y+5, height scans above — up to ~12 lookups per
+        // liquid cell). Halo 5 covers the deepest legal read. Measured
+        // ~8.4x faster than per-cell-query on a dirty-heavy 256x128
+        // rain-basin workload (8 repaint chunks, 60 frames: combined
+        // material_read+paint ~8.7ms vs ~72.7ms), byte-identical output
+        // (F1 partial==full). Copy time is reported in material_read_ms;
+        // paint_ms excludes it so the phase split stays meaningful.
+        double read_ms = 0.0;
+        // P3A R7 depth (partial path): full-height strip over the repaint
+        // bounding box, then column runs — bit-identical to the full path.
+        // Depth propagates DOWNWARD (a dig at the top reshades the whole
+        // column until the next air gap), so repainting only repaint rows
+        // would seam at 64-cell chunk borders; rewriting the full affected
+        // columns keeps every byte exact. Copy time joins material_read_ms.
+        {
+            static constexpr std::uint8_t kGasClass =
+                static_cast<std::uint8_t>(ashfall::Movement::Gas);
+            int min_x = world_width_, max_x = -1;
+            for (const ashfall::CellPosition chunk : repaint) {
+                const int base_x = chunk.x * ashfall::kChunkSize;
+                const int start_x = std::max(base_x, 0);
+                const int end_x = std::min(base_x + ashfall::kChunkSize - 1, world_width_ - 1);
+                if (end_x < start_x) continue;
+                min_x = std::min(min_x, start_x);
+                max_x = std::max(max_x, end_x);
+            }
+            if (max_x >= min_x) {
+                const int strip_w = max_x - min_x + 1;
+                tile_scratch_.resize(
+                    static_cast<std::size_t>(strip_w) * static_cast<std::size_t>(world_height_));
+                const auto strip_t0 = std::chrono::steady_clock::now();
+                world_.copy_rect({min_x, 0}, {max_x, world_height_ - 1},
+                    std::span<ashfall::MaterialId>(tile_scratch_));
+                read_ms += present_ms_between(strip_t0, std::chrono::steady_clock::now());
+                uint8_t *d = depth_bytes_.ptrw();
+                for (int sx = 0; sx < strip_w; ++sx) {
+                    int run = 0;
+                    for (int y = 0; y < world_height_; ++y) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(y * world_width_ + min_x + sx);
+                        d[i] = static_cast<uint8_t>(run > 255 ? 255 : run);
+                        const ashfall::MaterialId mat =
+                            tile_scratch_[static_cast<std::size_t>(y * strip_w + sx)];
+                        const bool piled = mat != ashfall::kAir &&
+                            movements_[static_cast<std::size_t>(mat)] != kGasClass;
+                        run = piled ? run + 1 : 0;
+                    }
+                }
+            }
+        }
+        for (const ashfall::CellPosition chunk : repaint) {
+            const int base_x = chunk.x * ashfall::kChunkSize;
+            const int base_y = chunk.y * ashfall::kChunkSize;
+            const int start_x = std::max(base_x, 0);
+            const int start_y = std::max(base_y, 0);
+            const int end_x = std::min(base_x + ashfall::kChunkSize - 1, world_width_ - 1);
+            const int end_y = std::min(base_y + ashfall::kChunkSize - 1, world_height_ - 1);
+            if (end_x < start_x || end_y < start_y) continue;
+            constexpr int kPaintHalo = 5;
+            const int tile_y0 = std::max(start_y - kPaintHalo, 0);
+            const int tile_y1 = std::min(end_y + kPaintHalo, world_height_ - 1);
+            const int tile_w = end_x - start_x + 1;
+            tile_scratch_.resize(
+                static_cast<std::size_t>((tile_y1 - tile_y0 + 1) * tile_w));
+            const auto copy_t0 = std::chrono::steady_clock::now();
+            world_.copy_rect({start_x, tile_y0}, {end_x, tile_y1},
+                std::span<ashfall::MaterialId>(tile_scratch_));
+            read_ms += present_ms_between(copy_t0, std::chrono::steady_clock::now());
+            auto at = [&](int x, int y) -> ashfall::MaterialId {
+                return tile_scratch_[static_cast<std::size_t>((y - tile_y0) * tile_w + (x - start_x))];
+            };
+            for (int y = start_y; y <= end_y; ++y) {
+                for (int x = start_x; x <= end_x; ++x) {
+                    const ashfall::MaterialId mat = at(x, y);
+                    const bool is_liquid =
+                        movements_[static_cast<std::size_t>(mat)] == kLiquidClass;
+                    int depth = 0;
+                    bool surface = true;
+                    if (y > 0) {
+                        surface = movements_[at(x, y - 1)] != kLiquidClass;
+                    }
+                    if (is_liquid) {
+                        while (depth < 5 && y + 1 + depth < world_height_ &&
+                               movements_[at(x, y + 1 + depth)] == kLiquidClass) {
+                            ++depth;
+                        }
+                        int height = 0;
+                        while (height < depth && y - 1 - height >= 0 &&
+                               movements_[at(x, y - 1 - height)] == kLiquidClass) {
+                            ++height;
+                        }
+                        depth = height;
+                    }
+                    const std::size_t offset = static_cast<std::size_t>(y * world_width_ + x) * 4;
+                    paint_cell(x, y, mat, depth, surface, w + offset, water_w + offset);
+                    id_w[static_cast<std::size_t>(y * world_width_ + x)] =
+                        static_cast<std::uint8_t>(mat);
+                    ++painted_pixels;
+                    ++logical_cells;
+                }
+            }
+        }
+        last_present_.material_read_ms = read_ms;
+        last_present_.paint_ms =
+            present_ms_between(paint_t0, std::chrono::steady_clock::now()) - read_ms;
+    }
+    last_present_.dirty_pixels = painted_pixels;
+    last_present_.logical_bytes = logical_cells; // u8 ids: 1 byte per logical cell
+
+    const auto set_data_t0 = std::chrono::steady_clock::now();
+    world_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, pixel_bytes_);
+    water_image_->set_data(world_width_, world_height_, false, Image::FORMAT_RGBA8, water_pixel_bytes_);
+    identity_image_->set_data(world_width_, world_height_, false, Image::FORMAT_R8, identity_bytes_);
+    depth_image_->set_data(world_width_, world_height_, false, Image::FORMAT_R8, depth_bytes_);
+    last_present_.set_data_ms = present_ms_between(set_data_t0, std::chrono::steady_clock::now());
+    const auto submit_t0 = std::chrono::steady_clock::now();
+    world_texture_->update(world_image_);
+    water_texture_->update(water_image_);
+    identity_texture_->update(identity_image_);
+    depth_texture_->update(depth_image_);
+    // Seed is coordinate-pure (init/recover only): no per-flush upload.
+    last_present_.submit_ms = present_ms_between(submit_t0, std::chrono::steady_clock::now());
+    last_present_.texture_submits += 4; // base + water + identity + depth update() calls
+    ++last_present_.present_flushes;
+    force_full_repaint_ = false;
+    // Presentation consumed the dirty set.
+    world_.clear_dirty_chunks();
+
+    return world_texture_;
+}
+
+Dictionary AshfallWorld::get_sim_phases() const {
+    Dictionary phases;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    if (!last_present_.sim_splits_valid) return phases;
+    const ashfall::StepTimings& t = last_present_.sim_phases;
+    phases["reactions_ms"] = t.reactions_ms;
+    phases["clear_reserve_ms"] = t.clear_reserve_ms;
+    phases["classify_ms"] = t.classify_ms;
+    phases["ordering_ms"] = t.ordering_ms;
+    phases["powder_ms"] = t.powder_ms;
+    phases["liquid_ms"] = t.liquid_ms;
+    phases["gas_ms"] = t.gas_ms;
+    phases["reconcile_ms"] = t.reconcile_ms;
+    phases["heat_carry_ms"] = t.heat_carry_ms;
+    phases["conduct_ms"] = t.conduct_ms;
+    phases["total_ms"] = t.total_ms;
+#endif
+    return phases;
+}
+
+Dictionary AshfallWorld::get_sim_counters() const {
+    Dictionary counters;
+#ifdef ASHFALL_STEP_INSTRUMENT
+    if (!last_present_.sim_splits_valid) return counters;
+    const ashfall::StepCounters& c = last_present_.sim_counters;
+    counters["occupied"] = static_cast<std::uint64_t>(c.occupied);
+    counters["static_cells"] = static_cast<std::uint64_t>(c.static_cells);
+    counters["dynamic_cells"] = static_cast<std::uint64_t>(c.dynamic_cells);
+    counters["powder_moves"] = static_cast<std::uint64_t>(c.powder_moves);
+    counters["liquid_moves"] = static_cast<std::uint64_t>(c.liquid_moves);
+    counters["gas_moves"] = static_cast<std::uint64_t>(c.gas_moves);
+    counters["swaps"] = static_cast<std::uint64_t>(c.swaps);
+    counters["reaction_cells"] = static_cast<std::uint64_t>(c.reaction_cells);
+    counters["reaction_hits"] = static_cast<std::uint64_t>(c.reaction_hits);
+    counters["nonzero_temps"] = static_cast<std::uint64_t>(c.nonzero_temps);
+    counters["carried_heat"] = static_cast<std::uint64_t>(c.carried_heat);
+    counters["changed_positions"] = static_cast<std::uint64_t>(c.changed_positions);
+    counters["dirty_chunk_marks"] = static_cast<std::uint64_t>(c.dirty_chunk_marks);
+#endif
+    return counters;
+}
+
+Ref<ImageTexture> AshfallWorld::get_world_texture() const {
+    return world_texture_;
+}
+Ref<Image> AshfallWorld::get_world_image() const {
+    return world_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_water_texture() const {
+    return water_texture_;
+}
+
+Ref<Image> AshfallWorld::get_water_image() const {
+    return water_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_identity_texture() const {
+    return identity_texture_;
+}
+
+Ref<Image> AshfallWorld::get_identity_image() const {
+    return identity_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_seed_texture() const {
+    return seed_texture_;
+}
+
+Ref<Image> AshfallWorld::get_seed_image() const {
+    return seed_image_;
+}
+
+Ref<ImageTexture> AshfallWorld::get_depth_texture() const {
+    return depth_texture_;
+}
+
+Ref<Image> AshfallWorld::get_depth_image() const {
+    return depth_image_;
+}
+
+} // namespace godot

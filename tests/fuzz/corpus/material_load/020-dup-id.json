@@ -1,0 +1,1 @@
+{"version": 1, "materials": [{"id": 0, "name": "air", "movement": "static", "solid": false, "density": 0, "color": [0, 0, 0]}, {"id": 1, "name": "stone", "movement": "static", "solid": true, "density": 2000, "color": [1, 2, 3]}, {"id": 1, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [4, 5, 6]}]}

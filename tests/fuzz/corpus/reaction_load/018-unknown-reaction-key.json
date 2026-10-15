@@ -1,0 +1,1 @@
+{"version": 1, "reactions": [{"name": "burnout", "probability": 8, "reactants": [{"material": "fire"}], "products": [{"material": "air"}], "product_temperatur": 150}]}
