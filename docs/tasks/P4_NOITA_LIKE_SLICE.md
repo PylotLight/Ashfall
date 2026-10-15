@@ -1,6 +1,6 @@
 # P4A — Noita-like Playable Cave Slice
 
-**Status:** playable prototype and explicit route-cleared exit implemented; replay, transient save state, and rendered sign-off remain open.
+**Status:** playable prototype, explicit route-cleared exit, and fixed-tick replay implemented; transient save state and rendered sign-off remain open.
 
 ## First-prototype implementation (2026-10-15)
 
@@ -8,11 +8,14 @@
 - Added a 3×5-cell-feet side-view controller with horizontal collision against the native world, gravity, grounded jump, a two-cell step-up allowance, and a character-scale camera crop.
 - Added the Spring Wand: mouse-facing, bounded-rate water bolts with screen-space travel/impact feedback. Impacts can cut soft sand/timber, write water into the same authoritative cells, release the authored spring, and rely on native reactions for fire/steam.
 - Moved the material palette, telemetry, and material-demo button into the F1 debug panel; normal play shows the entry note and tool controls.
-- Added `tests/godot_p4a_playable_verify.gd` for the surface-to-grille walk, jump/fall, wall collision, spring release, steam reaction, and grille breach.
+- Added `tests/godot_p4a_playable_verify.gd` for the surface-to-grille walk, jump/fall, wall collision, spring release, steam reaction, grille breach, and finish trigger.
+- Added `tests/godot_p4a_replay_verify.gd` for contiguous command ticks and byte-identical playback from the authored seed.
 
 **Exit phase (2026-10-15):** added a visible eastern portal, an exit trigger, a route-cleared overlay, and a restart prompt. The exit is presentation-only and does not alter the native cell world.
 
-**Still open:** player/projectile input is not yet a tick-indexed replay stream; save/reload does not yet own transient velocity/projectile state; and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
+**Replay phase (2026-10-15):** gameplay runs on a fixed 60 Hz controller tick with one contiguous, one-based command record per tick. Commands include horizontal input, jump, aim/fire, pause toggles, and single-step events. Recording starts on boot/rebuild; F6 stops recording and F7 rebuilds the authored seed then replays the in-memory stream. The playback test compares serialized native-world bytes and player/transient state exactly. Debug brush edits are intentionally outside the player replay contract; recordings are capped at ten minutes.
+
+**Still open:** save/reload does not yet own transient player velocity/projectile state, and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
 
 **Purpose:** prove that Ashfall is a game about readable movement and causal material interaction, not only a simulation benchmark.
 
@@ -27,7 +30,7 @@ In one short cave run, the player can explore, aim a simple tool, alter the mate
 3. **One wand/tool:** mouse aim, one projectile or short-range tool, bounded rate of fire, obvious impact feedback, and predictable interaction with the native world. No configurable wand deck yet.
 4. **One environmental chain:** expose or redirect water, quench burning wood/fire, then clear or pass the resulting barrier to reach the exit. Reactions must use the existing native simulation rules where applicable.
 5. **A compact play HUD:** selected tool, minimal health or hazard cue if required, and controls. Simulation telemetry stays in the debug panel.
-6. **Repeatability:** a fixed seed/layout and scripted input test for the chain. Decide how player/projectile state and edits become tick-indexed commands before claiming deterministic gameplay or adding persistent run state.
+6. **Repeatability:** a fixed seed/layout and scripted input test for the chain. Player movement, jump, aim/fire, pause toggles, and simulation single-steps are captured as one-based 60 Hz commands and reproduced from the same seed. Developer brush edits and camera-only controls are outside this gameplay replay contract.
 
 ## Acceptance checks
 

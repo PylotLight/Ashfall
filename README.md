@@ -6,7 +6,7 @@ Ashfall is a **Noita-inspired, systemic falling-sand action prototype**: a Godot
 
 - **P0–P2 foundations are implemented:** portable C++20 simulation, Godot GDExtension bridge, data-driven materials/reactions, heat, fire, save/load, deterministic tests, and benchmarks.
 - **P3 presentation is implemented but not fully signed off:** the default `cave_benchmark.tscn` has procedural cave generation, material profiles, local fire lighting, camera framing, animation, and a debug panel. Rendered visual approval and target-Mac GPU capture remain separate gates.
-- **P4A playable prototype is implemented; final gates remain open:** the default cave has an original surface entrance, asymmetric rooms, grounded side-view movement/jump, a Spring Wand water/fire/wood interaction, and an eastern route-cleared finish state. Tick-indexed replay, transient entity save state, and rendered 1280×720 sign-off remain to do.
+- **P4A playable loop is implemented; final gates remain open:** the default cave has an original surface entrance, asymmetric rooms, grounded side-view movement/jump, a Spring Wand water/fire/wood interaction, an eastern route-cleared finish state, and fixed-60-Hz tick-indexed input recording/replay. Transient entity save state and rendered 1280×720 sign-off remain to do.
 - `main.tscn` remains the small material-demo/reference scene; the cave is the default boot scene.
 
 See [the roadmap](docs/ROADMAP.md), [architecture](ARCHITECTURE.md), and [the scoped playable-slice task](docs/tasks/P4_NOITA_LIKE_SLICE.md) for current priorities and exit criteria.
@@ -22,9 +22,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 godot --headless --path . --script tests/godot_headless_verify.gd
+godot --headless --path . --script tests/godot_p4a_playable_verify.gd
+godot --headless --path . --script tests/godot_p4a_replay_verify.gd
 ```
 
-Run the project with `godot --path .`. **A/D** or arrows move, **Space/W/Up** jump, mouse aims, and left-click casts the Spring Wand. **F1** opens the developer panel (material painting/telemetry); **F2** opens the material demo from that panel. **P** pauses/resumes world simulation; **R** rebuilds the cave.
+Run the project with `godot --path .`. **A/D** or arrows move, **Space/W/Up** jump, mouse aims, and left-click casts the Spring Wand. A run records one command per 60 Hz gameplay tick; **F6** stops the in-memory recording and **F7** rebuilds the fixed seed and replays it. **F1** opens the developer panel (material painting/telemetry); **F2** opens the material demo from that panel. **P** pauses/resumes world simulation; **R** rebuilds the cave and starts a fresh recording.
 
 ## Project boundaries
 

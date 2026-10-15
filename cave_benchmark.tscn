@@ -439,7 +439,8 @@ text = "Controls:
 • R: Rebuild the cave
 • F1: debug tools
 • F2: material demo
-• F5 / F9: Save / Load"
+• F5 / F9: Save / Load
+• F6: end recording · F7: replay ticks"
 autowrap_mode = 2
 
 [connection signal="gui_input" from="MainLayout/ViewportContainer/WorldStack/WorldTexture" to="." method="_on_world_texture_gui_input"]

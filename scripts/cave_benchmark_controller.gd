@@ -3,8 +3,8 @@ extends Control
 # Ashfall first-room controller: procedural world authoring, host-side
 # platform movement and wand input, plus the existing presentation pipeline.
 # Native simulation rules remain in the portable C++ engine. The original
-# fixed-seed room is built through AshfallWorld's public API; the player and
-# projectile layer are a prototype boundary, not yet tick-indexed entities.
+# fixed-seed room is built through AshfallWorld's public API; player, projectile,
+# and tool commands advance on a fixed 60 Hz tick-indexed host-side boundary.
 #
 # Resolution ladder (P3A task A3, review 12.2) for this scene:
 #   sim           512x512 cells (1 cell = 1 sim unit, authoritative)
@@ -20,7 +20,7 @@ extends Control
 #
 # Controls: A/D or arrows = move; SPACE/W/UP = jump; mouse = aim;
 # left-click = water wand; wheel = camera zoom; R = rebuild; F1 = debug;
-# F2 = material demo; F5/F9 = save/load; P = pause simulation.
+# F2 = material demo; F5/F9 = save/load; F6/F7 = stop/replay; P = pause.
 
 @onready var world: AshfallWorld = $AshfallWorld
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
@@ -68,6 +68,16 @@ var _impact_effects: Array[Dictionary] = []
 var _wand_cooldown: float = 0.0
 var _gameplay_awake: bool = false
 var _simulation_manually_paused: bool = false
+enum ReplayMode { RECORDING, IDLE, PLAYBACK, PLAYBACK_FINISHED }
+var _replay_mode: ReplayMode = ReplayMode.RECORDING
+var _gameplay_tick: int = 0
+var _recorded_commands: Array[Dictionary] = []
+var _replay_commands: Array[Dictionary] = []
+var _replay_index: int = 0
+var _pause_toggle_requested: bool = false
+var _single_step_requested: bool = false
+var _wand_fire_requested: bool = false
+var _wand_fire_target: Vector2 = Vector2(100.0, 80.0)
 const PLAYER_HALF_W: float = 1.45
 const PLAYER_H: float = 5.2
 const PLAYER_SPEED: float = 64.0
@@ -75,6 +85,9 @@ const PLAYER_GRAVITY: float = 210.0
 const PLAYER_JUMP_SPEED: float = 94.0
 const PLAYER_TERMINAL_SPEED: float = 150.0
 const PLAYER_STEP_HEIGHT: int = 2
+const GAMEPLAY_TICK_RATE: int = 60
+const GAMEPLAY_DT: float = 1.0 / float(GAMEPLAY_TICK_RATE)
+const REPLAY_MAX_TICKS: int = GAMEPLAY_TICK_RATE * 60 * 10
 const CAVE_SPAWN: Vector2 = Vector2(44.0, 80.0)
 const SURFACE_LEVEL: float = 80.0
 const EXIT_TRIGGER: Rect2 = Rect2(477.0, 332.0, 23.0, 30.0)
@@ -438,17 +451,143 @@ func _build_structures(stone_mat: int, wood_mat: int, oil_mat: int, sand_mat: in
 	world.fill_rect(120, 435, 140, 440, wood_mat)
 	world.fill_rect(60, 442, 95, 447, sand_mat)
 
+func _physics_process(_delta: float) -> void:
+	if _run_finished or _replay_mode == ReplayMode.PLAYBACK_FINISHED:
+		return
+	_gameplay_tick += 1
+	var command: Dictionary
+	if _replay_mode == ReplayMode.PLAYBACK:
+		if _replay_index >= _replay_commands.size():
+			_finish_replay()
+			return
+		command = _replay_commands[_replay_index]
+		if int(command.get("tick", -1)) != _gameplay_tick:
+			push_error("Replay tick mismatch: expected %d, got %d" % [_gameplay_tick, int(command.get("tick", -1))])
+			_finish_replay()
+			return
+		_replay_index += 1
+	else:
+		_aim_from_cursor()
+		command = _capture_live_command()
+		if _replay_mode == ReplayMode.RECORDING:
+				if _recorded_commands.size() >= REPLAY_MAX_TICKS:
+					_replay_mode = ReplayMode.IDLE
+					_set_transient("REPLAY LIMIT · 10 MINUTES")
+				else:
+					_recorded_commands.append(command.duplicate(true))
+	_apply_gameplay_command(command)
+	if _replay_mode == ReplayMode.PLAYBACK and (_replay_index >= _replay_commands.size() or _run_finished):
+		_finish_replay()
+
+
+func _capture_live_command() -> Dictionary:
+	var axis_x := 0.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT):
+		axis_x -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT):
+		axis_x += 1.0
+	var aim_to_record: Vector2 = _wand_fire_target if _wand_fire_requested else _aim_target
+	var command := {
+		"tick": _gameplay_tick,
+		"move_x": axis_x,
+		"jump": jump_requested,
+		"aim": Vector2i(roundi(aim_to_record.x), roundi(aim_to_record.y)),
+		"fire": _wand_fire_requested,
+		"pause": _pause_toggle_requested,
+		"step": _single_step_requested,
+	}
+	jump_requested = false
+	_wand_fire_requested = false
+	_pause_toggle_requested = false
+	_single_step_requested = false
+	return command
+
+
+func _apply_gameplay_command(command: Dictionary) -> void:
+	if bool(command.get("pause", false)):
+		_simulation_manually_paused = not _simulation_manually_paused
+	var target: Vector2 = Vector2(command.get("aim", _aim_target))
+	_aim_target = target
+	var origin := Vector2(player_pos.x, player_pos.y - PLAYER_H * 0.58)
+	var aim_delta := target - origin
+	if aim_delta.length_squared() > 0.01:
+		_aim_direction = aim_delta.normalized()
+	_integrate_player(GAMEPLAY_DT, float(command.get("move_x", 0.0)), bool(command.get("jump", false)))
+	if not _gameplay_awake and not _simulation_manually_paused and player_pos.x >= 340.0:
+		_wake_gameplay_world()
+	if bool(command.get("fire", false)):
+		_fire_wand_at(target)
+	_advance_projectiles(GAMEPLAY_DT)
+	_check_finish_trigger()
+	if bool(command.get("step", false)):
+		world.step()
+	elif not _run_finished and _gameplay_awake and not _simulation_manually_paused:
+		world.step()
+
+
+func _stop_recording() -> void:
+	if _replay_mode != ReplayMode.RECORDING:
+		return
+	_replay_mode = ReplayMode.IDLE
+	_set_transient("RECORDED %d TICKS · F7 TO REPLAY" % _recorded_commands.size())
+	_update_hud()
+
+
+func _start_replay() -> void:
+	if _recorded_commands.is_empty():
+		_set_transient("NO RECORDED RUN · PRESS R FIRST")
+		return
+	var commands: Array[Dictionary] = _recorded_commands.duplicate(true)
+	for i in commands.size():
+		if int(commands[i].get("tick", -1)) != i + 1:
+			_set_transient("REPLAY LOG INVALID")
+			return
+	_replay_commands = commands
+	_build_cave()
+	_respawn_player()
+	_gameplay_tick = 0
+	_replay_index = 0
+	_recorded_commands.clear()
+	_replay_mode = ReplayMode.PLAYBACK
+	jump_requested = false
+	_pause_toggle_requested = false
+	_single_step_requested = false
+	_wand_fire_requested = false
+	_update_marker()
+	_update_hud()
+	_set_transient("REPLAYING %d TICKS" % _replay_commands.size())
+
+
+func _finish_replay() -> void:
+	if _replay_mode != ReplayMode.PLAYBACK:
+		return
+	_replay_mode = ReplayMode.PLAYBACK_FINISHED
+	if not _run_finished:
+		_set_transient("REPLAY COMPLETE · %d TICKS" % _replay_index)
+	_update_hud()
+
+
+func _reset_cave_run() -> void:
+	_build_cave()
+	_respawn_player()
+	_gameplay_tick = 0
+	_recorded_commands.clear()
+	_replay_commands.clear()
+	_replay_index = 0
+	_replay_mode = ReplayMode.RECORDING
+	jump_requested = false
+	_pause_toggle_requested = false
+	_single_step_requested = false
+	_wand_fire_requested = false
+	_update_marker()
+	_update_hud()
+
+
 func _process(delta: float) -> void:
 	if delta > 0.0:
 		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
-	if not _run_finished:
-		_move_player(delta)
-		if not _gameplay_awake and not _simulation_manually_paused and player_pos.x >= 340.0:
-			_wake_gameplay_world()
-		_check_finish_trigger()
-	_aim_from_cursor()
-	if not _run_finished:
-		_advance_projectiles(delta)
+	if _replay_mode != ReplayMode.PLAYBACK:
+		_aim_from_cursor()
 	_update_camera(delta)
 	_update_marker()
 	_update_light(delta)
@@ -482,15 +621,18 @@ func _update_tool_readout() -> void:
 	if _transient_ttl > 0.0 and not _transient_msg.is_empty():
 		tool_readout.text = _transient_msg
 	else:
-		tool_readout.text = "SPRING WAND  ·  WATER BOLT\nAim with mouse  ·  Left-click to cast"
+		tool_readout.text = "SPRING WAND  ·  WATER BOLT\nAim with mouse  ·  Left-click to cast\nF6 ends recording  ·  F7 replays"
 
 func _respawn_player() -> void:
 	player_pos = CAVE_SPAWN
 	player_velocity = Vector2.ZERO
 	player_on_ground = true
 	jump_requested = false
+	_aim_direction = Vector2.RIGHT
+	_aim_target = Vector2(CAVE_SPAWN.x + 56.0, CAVE_SPAWN.y)
 	_projectiles.clear()
 	_impact_effects.clear()
+	_wand_cooldown = 0.0
 	_gameplay_awake = false
 	_simulation_manually_paused = false
 	_run_finished = false
@@ -626,7 +768,7 @@ func _wake_gameplay_world() -> void:
 	if _simulation_manually_paused:
 		return
 	_gameplay_awake = true
-	world.auto_step = true
+	world.auto_step = false
 	_set_transient("THE SPRING ROOM STIRS")
 
 
@@ -888,7 +1030,7 @@ func _update_hud() -> void:
 	tick_label.text = str(world.get_tick())
 	cells_label.text = str(world.get_occupied_cell_count())
 	if _transient_msg.is_empty():
-		status_label.text = "RUNNING" if world.is_auto_step() else "PAUSED"
+		status_label.text = "RUNNING" if _gameplay_awake and not _simulation_manually_paused else "PAUSED"
 	else:
 		status_label.text = _transient_msg
 	fps_label.text = "%d fps%s" % [Engine.get_frames_per_second(),
@@ -899,9 +1041,8 @@ func _update_hud() -> void:
 	player_label.text = "(%d, %d)" % [roundi(player_pos.x), roundi(player_pos.y)]
 
 # E1 split-timer display (§10 CPU split; display only, no sim here).
-# Stepping model: fixed 60Hz physics accumulator (max 2 steps per physics
-# frame, backlog dropped — never spiral); exactly one flush_present() per
-# rendered frame. sim ms = last step() span ONLY, directly comparable to
+# Stepping model: one native step per active 60Hz gameplay command tick;
+# exactly one flush_present() per rendered frame. sim ms = last step() span ONLY, directly comparable to
 # bench_step/bench_e1 ms/step; present cost is separate (see tooltip).
 func _sim_split_text() -> String:
 	var ms: float = world.get_last_step_ms()
@@ -915,7 +1056,7 @@ func _sim_split_text() -> String:
 	return "%.2f ms (R %.2f M %.2f T %.2f A %.2f)" % [ms, react, move, temp, maint]
 
 func _sim_split_tooltip() -> String:
-	var tip: String = "stepping: fixed 60Hz physics accumulator, max 2 steps/physics frame, backlog dropped; 1 present flush per rendered frame; sim = last step() span (bench-comparable)"
+	var tip: String = "stepping: fixed 60Hz gameplay command tick; native world steps explicitly once per active/unpaused command; 1 present flush per rendered frame; sim = last step() span (bench-comparable)"
 	var ph: Dictionary = world.get_sim_phases()
 	if not ph.is_empty():
 		tip += "\nsim splits ms: react %.3f clear %.3f classify %.3f order %.3f powder %.3f liquid %.3f gas %.3f reconcile %.3f heatcarry %.3f conduct %.3f" % [float(ph.get("reactions_ms", 0.0)), float(ph.get("clear_reserve_ms", 0.0)), float(ph.get("classify_ms", 0.0)), float(ph.get("ordering_ms", 0.0)), float(ph.get("powder_ms", 0.0)), float(ph.get("liquid_ms", 0.0)), float(ph.get("gas_ms", 0.0)), float(ph.get("reconcile_ms", 0.0)), float(ph.get("heat_carry_ms", 0.0)), float(ph.get("conduct_ms", 0.0))]
@@ -1114,24 +1255,26 @@ func _on_focus_lost() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
+		if event.keycode == KEY_R:
+			_reset_cave_run()
+			return
+		if event.keycode == KEY_F6:
+			_stop_recording()
+			return
+		if event.keycode == KEY_F7:
+			_start_replay()
+			return
+		if _replay_mode == ReplayMode.PLAYBACK or _replay_mode == ReplayMode.PLAYBACK_FINISHED or _run_finished:
+			return
 		match event.keycode:
 			KEY_SPACE:
 				jump_requested = true
 			KEY_W, KEY_UP:
 				jump_requested = true
 			KEY_P:
-				world.auto_step = not world.is_auto_step()
-				_gameplay_awake = world.is_auto_step()
-				_simulation_manually_paused = not world.is_auto_step()
-				_update_hud()
+				_pause_toggle_requested = true
 			KEY_N:
-				world.step()
-				_update_hud()
-			KEY_R:
-				_build_cave()
-				_respawn_player()
-				_update_marker()
-				_update_hud()
+				_single_step_requested = true
 			KEY_E:
 				_dig_at_player()
 			KEY_F:
@@ -1176,20 +1319,23 @@ func _unhandled_input(event: InputEvent) -> void:
 				_select_palette(9)
 
 func _on_world_texture_gui_input(event: InputEvent) -> void:
+	if _replay_mode == ReplayMode.PLAYBACK or _replay_mode == ReplayMode.PLAYBACK_FINISHED or _run_finished:
+		return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-				if event.is_pressed():
-					if Input.is_key_pressed(KEY_SHIFT):
-						is_drawing = true
-						draw_material = current_material
-						_draw_at(event.position)
-					else:
-						is_drawing = false
-						var target := _display_to_world(event.position)
-						if target.x >= 0:
-							_fire_wand_at(Vector2(target))
+			if event.is_pressed():
+				if Input.is_key_pressed(KEY_SHIFT):
+					is_drawing = true
+					draw_material = current_material
+					_draw_at(event.position)
 				else:
 					is_drawing = false
+					var target := _display_to_world(event.position)
+					if target.x >= 0:
+						_wand_fire_requested = true
+						_wand_fire_target = Vector2(target)
+			else:
+				is_drawing = false
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if Input.is_key_pressed(KEY_SHIFT):
 				is_drawing = event.is_pressed()
@@ -1219,20 +1365,15 @@ func _draw_at(local_pos: Vector2) -> void:
 	_update_hud()
 
 func _on_step_btn_pressed() -> void:
-	world.step()
-	_update_hud()
+	if _replay_mode != ReplayMode.PLAYBACK and not _run_finished:
+		_single_step_requested = true
 
 func _on_play_btn_pressed() -> void:
-	world.auto_step = not world.is_auto_step()
-	_gameplay_awake = world.is_auto_step()
-	_simulation_manually_paused = not world.is_auto_step()
-	_update_hud()
+	if _replay_mode != ReplayMode.PLAYBACK and not _run_finished:
+		_pause_toggle_requested = true
 
 func _on_reset_btn_pressed() -> void:
-	_build_cave()
-	_respawn_player()
-	_update_marker()
-	_update_hud()
+	_reset_cave_run()
 
 func _on_save_btn_pressed() -> void:
 	_save_game()
