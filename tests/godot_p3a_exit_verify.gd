@@ -68,8 +68,9 @@ func _run_exit_checks() -> void:
 	check(main.world.get_world_width() == 512 and main.world.get_world_height() == 512, "E3/C1 cave sim is 512x512")
 	var occ: int = int(main.world.get_occupied_cell_count())
 	check(occ > 100000, "E3/C1 place-scale mass occupied=%d (>100k)" % occ)
-	check(main.world.get_cell(240, 246) != AshfallWorld.MATERIAL_AIR and main.world.get_cell(240, 280) == AshfallWorld.MATERIAL_AIR, "E3/C1 spawn hall frames the route with a nearby roof and open clearance")
-	check(main.world.get_cell(219, 270) != AshfallWorld.MATERIAL_AIR and main.world.get_cell(240, 300) == AshfallWorld.MATERIAL_AIR, "E3/C1 organic ceiling rib frames the hall without blocking the spawn lane")
+	check(main.world.get_cell(44, 79) == AshfallWorld.MATERIAL_AIR and main.world.get_cell(44, 80) != AshfallWorld.MATERIAL_AIR, "E3/C1 character starts on a walkable surface ridge")
+	check(main.world.get_cell(101, 72) == AshfallWorld.MATERIAL_AIR and main.world.get_cell(218, 194) == AshfallWorld.MATERIAL_AIR, "E3/C1 broad cave mouth opens into the first chamber")
+	check(main.world.get_cell(218, 280) != AshfallWorld.MATERIAL_AIR, "E3/C1 first-room floor closes below the traversable chamber")
 	check(int(main.world.get_tick()) == 60, "E3/C1 deterministic settle tick=60")
 	var want := ["fire", "water", "wood", "oil", "stone", "rock", "sand"]
 	var id_by_name := {}
@@ -86,14 +87,14 @@ func _run_exit_checks() -> void:
 					counts[n] += 1
 	for n in want:
 		check(int(counts[n]) > 0, "E3/C1 content present: %s (samples %d)" % [n, int(counts[n])])
-		check(main.player_pos == main.CAVE_SPAWN, "E3/C1 character-scale placeholder at CAVE_SPAWN")
-		var avatar_script: Script = main.player_marker.get_script()
-		check(avatar_script != null and avatar_script.resource_path.ends_with("player_wizard.gd"), "E3/C1 readable wizard avatar overlay is attached")
-		check(main.player_marker.size.x >= 26.0 and main.player_marker.size.y >= 36.0, "E3/C1 wizard overlay is legible without changing the cell collision marker")
-		var debug_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DebugToggleBtn") as Button
-		var demo_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DemoBtn") as Button
-		check(debug_button != null and demo_button != null and debug_button.text.begins_with("[F1]") and demo_button.text.begins_with("[F2]"), "E3/C1 debug and material-demo shortcuts are distinct")
-		check(is_equal_approx(main._camera.view_h_cells, 120.0), "E3/C1 default camera uses player-scale framing")
+	check(main.player_pos == main.CAVE_SPAWN, "E3/C1 side-view player spawns on the surface at CAVE_SPAWN")
+	var avatar_script: Script = main.player_marker.get_script()
+	check(avatar_script != null and avatar_script.resource_path.ends_with("player_wizard.gd"), "E3/C1 readable wizard avatar overlay is attached")
+	check(main.player_marker.size.x >= 26.0 and main.player_marker.size.y >= 36.0, "E3/C1 wizard overlay is legible without changing the cell collision marker")
+	var debug_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DebugToggleBtn") as Button
+	var demo_button := main.get_node_or_null("DebugPanel/DebugBox/DemoBtn") as Button
+	check(debug_button != null and demo_button != null and debug_button.text.begins_with("[F1]") and demo_button.text.begins_with("[F2]"), "E3/C1 debug and material-demo shortcuts are distinct")
+	check(is_equal_approx(main._camera.view_h_cells, 120.0), "E3/C1 default camera uses player-scale framing")
 	check(main._view_region.size.y == 120 and main._view_region.size.x < 512, "E3/C1 actual view region is cropped to player scale")
 	check(main._camera.center_cells.y < main.player_pos.y, "E3/C1 opening camera leaves room above the avatar")
 	var backdrop_material: ShaderMaterial = main.cave_backdrop.material as ShaderMaterial

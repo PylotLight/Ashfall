@@ -17,12 +17,15 @@ extends RefCounted
 const DEBUG_WIDGET_NAMES: PackedStringArray = [
 	"Ladder",
 	"InfoBox",
+	"MaterialsHeader",
+	"PaletteBox",
 	"ActionsHeader",
 	"PlayBtn",
 	"StepBtn",
 	"ResetBtn",
 	"SaveBtn",
 	"LoadBtn",
+	"DemoBtn",
 	"HelpText",
 ]
 

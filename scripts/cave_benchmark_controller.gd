@@ -1,18 +1,10 @@
 extends Control
 
-# Ashfall Cave Benchmark Controller (P3A Slice A1, task A1+A3).
-# Presentation and input forwarding only. No simulation rules here.
-#
-# The cave is authored procedurally at boot through the public AshfallWorld
-# API (init_world/fill_rect/set_cell/step) — no engine, bridge, or data
-# changes. Content (R8 Noita-style): topsoil band, jittered chambers linked
-# by winding tunnels + vertical shafts, stone rind on rock/air borders,
-# stalactites/stalagmites, sand + lava veins sealed in rock, walled
-# reservoir + sealed lake + lipped pool, wood platform structure, oil + wood
-# combustible area with a fresh fire bed, warm light pool over the fire pit
-# (textured PointLight2D budget-6 cluster rig + additive glow decal),
-# character-sized player placeholder, stable pixel scaling (nearest world,
-# letterboxed).
+# Ashfall first-room controller: procedural world authoring, host-side
+# platform movement and wand input, plus the existing presentation pipeline.
+# Native simulation rules remain in the portable C++ engine. The original
+# fixed-seed room is built through AshfallWorld's public API; the player and
+# projectile layer are a prototype boundary, not yet tick-indexed entities.
 #
 # Resolution ladder (P3A task A3, review 12.2) for this scene:
 #   sim           512x512 cells (1 cell = 1 sim unit, authoritative)
@@ -23,14 +15,12 @@ extends Control
 # World instruments read near pixel-art scale; the final world upscale is
 # nearest for both the solid base and liquid overlay, preserving a unified
 # crisp pixel grid at the camera crop.
-# Follow-camera-ready (A2): the world_to_display/display_to_world mapping
-# below is the anchor a Camera2D follow will reuse; marker, light, and glow
-# already track cell space every frame.
+# The cropped follow-camera mapping keeps the wizard, light and projectile
+# effects aligned to authoritative cell coordinates.
 #
-# Controls: WASD/arrows = move avatar; N = single sim tick; SPACE =
-# play/pause; R = rebuild cave; E = dig at avatar; F = place held material;
-# F1 = debug panel; F2 = material demo; F5 = save; F9 = load;
-# 1..0 = palette shortcuts; mouse paint on the world view.
+# Controls: A/D or arrows = move; SPACE/W/UP = jump; mouse = aim;
+# left-click = water wand; wheel = camera zoom; R = rebuild; F1 = debug;
+# F2 = material demo; F5/F9 = save/load; P = pause simulation.
 
 @onready var world: AshfallWorld = $AshfallWorld
 @onready var texture_display: TextureRect = $MainLayout/ViewportContainer/WorldStack/WorldTexture
@@ -44,6 +34,8 @@ extends Control
 @onready var cluster_light_5: PointLight2D = $MainLayout/ViewportContainer/WorldStack/ClusterLight5
 @onready var fire_glow: TextureRect = $MainLayout/ViewportContainer/WorldStack/FireGlow
 @onready var player_marker: ColorRect = $MainLayout/ViewportContainer/WorldStack/PlayerMarker
+@onready var gameplay_fx: Control = $MainLayout/ViewportContainer/WorldStack/GameplayFX
+@onready var tool_readout: Label = $MainLayout/SidebarScroll/Sidebar/ToolReadout
 @onready var tick_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/TickValue
 @onready var cells_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/CellsValue
 @onready var status_label: Label = $MainLayout/SidebarScroll/Sidebar/InfoBox/StatusValue
@@ -63,19 +55,35 @@ var _hud_cooldown: float = 0.0
 var _frame_ms_ema: float = 16.0
 const HUD_REFRESH_INTERVAL: float = 0.25
 
-# Avatar state: cell units, feet center. Same play scale as the demo
-# (0.8 wide x 1.8 tall) so character/viewport ratios match across scenes.
-var player_pos: Vector2 = Vector2(240.0, 330.0)
-const PLAYER_HALF_W: float = 0.4
-const PLAYER_H: float = 1.8
-const PLAYER_SPEED: float = 90.0
-# Feet rest on the wood platform beam (top face y = 330).
-const CAVE_SPAWN: Vector2 = Vector2(240.0, 330.0)
-# Keep the avatar in the lower third so the spawn-room ceiling and route ahead
-# enter the first frame; this changes framing only, never simulation state.
-const CAMERA_LOOK_AHEAD_CELLS: float = -30.0
-# Warm-light anchor: just above the fire bed (fire cells y 442..447).
-const FIRE_ANCHOR: Vector2 = Vector2(256.0, 436.0)
+# Avatar state uses cell-space feet coordinates. The collider and the rendered
+# wizard now agree at roughly 3x5 cells instead of the old sub-cell placeholder.
+var player_pos: Vector2 = Vector2(44.0, 80.0)
+var player_velocity: Vector2 = Vector2.ZERO
+var player_on_ground: bool = false
+var jump_requested: bool = false
+var _aim_direction: Vector2 = Vector2.RIGHT
+var _aim_target: Vector2 = Vector2(100.0, 80.0)
+var _projectiles: Array[Dictionary] = []
+var _impact_effects: Array[Dictionary] = []
+var _wand_cooldown: float = 0.0
+var _gameplay_awake: bool = false
+var _simulation_manually_paused: bool = false
+const PLAYER_HALF_W: float = 1.45
+const PLAYER_H: float = 5.2
+const PLAYER_SPEED: float = 64.0
+const PLAYER_GRAVITY: float = 210.0
+const PLAYER_JUMP_SPEED: float = 94.0
+const PLAYER_TERMINAL_SPEED: float = 150.0
+const PLAYER_STEP_HEIGHT: int = 2
+const CAVE_SPAWN: Vector2 = Vector2(44.0, 80.0)
+const SURFACE_LEVEL: float = 80.0
+const WAND_SPEED: float = 150.0
+const WAND_COOLDOWN: float = 0.28
+const WAND_MAX_AGE: float = 1.6
+# Frame the sky, the first slope and the entrance together at spawn.
+const CAMERA_LOOK_AHEAD_CELLS: float = -20.0
+# Warm light sits over the spring-fed timber choke deeper in the room.
+const FIRE_ANCHOR: Vector2 = Vector2(378.0, 293.0)
 const SAVE_PATH: String = "user://ashfall_save.bin"
 const SAVE_TMP_PATH: String = "user://ashfall_save.bin.tmp"
 # Host save envelope v2 (same contract as the demo controller): version
@@ -135,6 +143,7 @@ func _ready() -> void:
 	_init_cluster_lights()
 	_update_marker()
 	_init_hud_separation()
+	_update_tool_readout()
 
 # Deterministic 2D hash in [0, 1): integer math only, no RNG state, so the
 # cave is identical every boot. Salt decorrelates independent features.
@@ -159,14 +168,10 @@ func _mat_id(mat_name: String, fallback: int) -> int:
 	return fallback
 
 func _build_cave() -> void:
-	# Noita-style authoring (R8): a mostly-solid rock mass holding topsoil,
-	# jittered chambers, winding connecting tunnels + vertical shafts, a
-	# stone rind pass, ceiling/floor teeth, ore-style veins sealed in rock
-	# (sand lenses read gold-ish, lava lenses glow), a walled reservoir plus
-	# a sealed lake and a lipped chamber pool, and the preserved play
-	# structures (spawn platform, fire pit, fuel, dune). Deterministic:
-	# _hash2 only, no randf. Spawn (CAVE_SPAWN, feet on the beam top y=330
-	# inside the spawn hall) and FIRE_ANCHOR are unchanged.
+	# Fixed-seed surface geology: a broken ridge of ochre soil over cool
+	# stratified rock, opening into a slanted mouth, one roomy landmark chamber,
+	# a small optional spring pocket, then a lower eastern route. The silhouette
+	# is original to Ashfall; all variation comes from the integer hash/noise.
 	var AIR: int = AshfallWorld.MATERIAL_AIR
 	var STONE: int = AshfallWorld.MATERIAL_STONE
 	var SAND: int = AshfallWorld.MATERIAL_SAND
@@ -174,69 +179,66 @@ func _build_cave() -> void:
 	var FIRE: int = AshfallWorld.MATERIAL_FIRE
 	var WOOD: int = AshfallWorld.MATERIAL_WOOD
 	var ROCK: int = AshfallWorld.MATERIAL_ROCK
-	var LAVA: int = AshfallWorld.MATERIAL_LAVA
 	var OIL: int = _mat_id("oil", 9)
 	world.init_world(512, 512)
 	world.fill_rect(0, 0, 511, 511, ROCK)
-	_build_topsoil(SAND, STONE, WOOD, ROCK)
-	# Chambers (cx, cy, rx, ry, salt): compact the spawn hall vertically so
-	# its roof reads in the player-scale crop; preserve the bridge and avatar
-	# box at y330..334 / y328..329 and the lower shaft connection at y356.
-	_carve_chamber(240.0, 306.0, 82.0, 50.0, 11, 0.35)
-	_carve_chamber(105.0, 250.0, 55.0, 38.0, 21, 0.30)
-	_carve_chamber(390.0, 255.0, 68.0, 44.0, 31, 0.30)
-	_carve_chamber(335.0, 118.0, 48.0, 24.0, 41, 0.30)
-	_carve_chamber(135.0, 398.0, 58.0, 34.0, 51, 0.30)
-	_carve_chamber(395.0, 395.0, 62.0, 38.0, 61, 0.30)
-	_carve_chamber(256.0, 415.0, 45.0, 25.0, 71, 0.30)
-	# Sealed lake pocket (no tunnels touch it): water stays put.
-	_carve_chamber(70.0, 175.0, 30.0, 18.0, 81, 0.25)
-	# Chimney vent to the surface (smoke/ember path), jittered walls.
-	for y in range(10, 131):
-		var j: float = (_hash2(256, y, 91) - 0.5) * 6.0
-		var x0: int = clampi(int(246.0 + j), 1, 510)
-		var x1: int = clampi(int(266.0 + j), 1, 510)
-		world.fill_rect(x0, y, x1, y, AIR)
-	world.fill_rect(240, 10, 245, 130, STONE)
-	world.fill_rect(267, 10, 272, 130, STONE)
-	# Tunnels/shafts (winding walks, overlapping discs => connected).
-	_carve_tunnel(256, 130, 300, 118, 3, 101) # chimney -> surface pocket
-	_carve_tunnel(360, 130, 390, 215, 3, 102) # surface pocket -> east hall
-	_carve_tunnel(100, 288, 120, 364, 3, 103) # west hall -> deep west shaft
-	_carve_tunnel(256, 356, 256, 392, 3, 104) # spawn hall -> deep central shaft
-	_carve_tunnel(300, 415, 335, 405, 3, 105) # deep central -> deep east
-	_carve_tunnel(330, 350, 350, 370, 3, 106) # crawl space -> deep east
-	# Explicit reservoir cut (merged with the deep-east chamber).
-	world.fill_rect(330, 370, 405, 447, AIR)
-	# Fire nook under the deep-central chamber (merges via overlap).
-	world.fill_rect(238, 438, 274, 447, AIR)
+	for x in range(512):
+		var surface: int = _surface_height(x)
+		world.fill_rect(x, 0, x, surface - 1, AIR)
+		world.fill_rect(x, surface, x, surface + 4, SAND)
+		world.fill_rect(x, surface + 5, x, surface + 10, STONE)
+		world.fill_rect(x, surface + 11, x, 511, ROCK)
+	# A thin exposed bedrock lip gives the spawn stable footing while the
+	# surrounding ridge keeps its loose soil and irregular silhouette.
+	world.fill_rect(36, int(SURFACE_LEVEL), 52, int(SURFACE_LEVEL), STONE)
+	# Main entry: the mouth is broad at the sky line and narrows as it bends
+	# below the ridge into the first chamber.
+	_carve_tunnel(101, 72, 164, 150, 15, 311)
+	_carve_chamber(218.0, 194.0, 84.0, 68.0, 321, 0.28)
+	# Optional high pocket: a spring tucked above the main route.
+	_carve_tunnel(255, 169, 272, 148, 5, 331)
+	_carve_chamber(291.0, 147.0, 29.0, 22.0, 341, 0.22)
+	# The lower passage kinks east around a rock shoulder into an asymmetric
+	# second room and a short, clearly lit eastern spur.
+	_carve_tunnel(276, 226, 345, 254, 13, 351)
+	_carve_chamber(385.0, 276.0, 59.0, 45.0, 361, 0.27)
+	_carve_tunnel(424, 296, 464, 323, 10, 371)
+	_carve_chamber(465.0, 334.0, 34.0, 27.0, 381, 0.20)
+	_carve_chamber(351.0, 226.0, 25.0, 18.0, 391, 0.18)
 	_build_stone_rind(STONE, ROCK, AIR)
-	_build_teeth(STONE, AIR)
-	_build_veins(SAND, LAVA, ROCK)
-	_build_structures(STONE, WOOD, OIL, SAND, AIR)
-	_build_opening_rockwork(ROCK)
-	# Water: walled reservoir + sealed lake + lipped east-hall pool.
-	world.fill_rect(324, 370, 329, 447, STONE)
-	world.fill_rect(406, 370, 411, 447, STONE)
-	world.fill_rect(330, 410, 405, 447, WATER)
-	world.fill_rect(42, 182, 98, 190, WATER)
-	world.fill_rect(368, 290, 370, 300, STONE)
-	world.fill_rect(400, 290, 402, 300, STONE)
-	world.fill_rect(371, 294, 399, 298, WATER)
-	# Settle liquids/powders (fixed count => deterministic) BEFORE placing
-	# fire, so boot shows fresh flames instead of pre-burned fuel.
+	_build_veins(SAND, AshfallWorld.MATERIAL_LAVA, ROCK)
+	# A narrow timber grille marks the route; a water pocket is held just above
+	# a weak timber sill. The Spring Wand can cut sand/wood and release it.
+	world.fill_rect(376, 273, 379, 322, WOOD)
+	# The basin stores water behind a closed one-cell spill sill. Opening it
+	# releases the water; the following fire/steam outcomes use native reactions.
+	world.fill_rect(326, 241, 376, 241, STONE)
+	world.fill_rect(347, 241, 354, 241, WOOD)
+	world.fill_rect(333, 222, 369, 239, WATER)
+	world.fill_rect(367, 311, 374, 315, OIL)
+	# A little eroded rubble, a submerged seep and warm fuel make the room feel
+	# inhabited, while leaving the player-sized route free of forced jumps.
+	world.fill_rect(235, 255, 250, 257, SAND)
+	world.fill_rect(298, 244, 308, 247, WATER)
+	world.fill_rect(401, 305, 417, 307, WOOD)
+	# Preserve the deterministic settle-tick contract for existing render and
+	# presentation checks. Stage fresh fire only after settling the liquid.
 	for i in 60:
 		world.step()
-	# Starting-room landmarks: a small wick and a shallow seep, visible in
-	# the opening camera crop and framed by the two broken stone shelves.
-	world.fill_rect(176, 294, 177, 297, WOOD)
-	world.fill_rect(176, 291, 177, 293, FIRE)
-	world.fill_rect(305, 284, 312, 287, WATER)
-	# Fire bed with stone curb; the warm light anchor sits just above it.
-	world.fill_rect(238, 444, 243, 447, STONE)
-	world.fill_rect(269, 444, 274, 447, STONE)
-	world.fill_rect(244, 442, 268, 447, FIRE)
+	world.fill_rect(373, 286, 374, 290, FIRE)
+	world.fill_rect(380, 289, 381, 293, FIRE)
+	world.fill_rect(375, 269, 377, 272, FIRE)
 	world.flush_present()
+
+
+func _surface_height(x: int) -> int:
+	# Anchor the spawn patch exactly level, then let the ridge wander on two
+	# deterministic scales so the skyline stays walkable rather than noisy.
+	if abs(x - int(CAVE_SPAWN.x)) <= 7:
+		return int(SURFACE_LEVEL)
+	var broad: float = _noise1d(float(x) / 55.0, 401) - _noise1d(CAVE_SPAWN.x / 55.0, 401)
+	var fine: float = _noise1d(float(x) / 17.0, 402) - _noise1d(CAVE_SPAWN.x / 17.0, 402)
+	return int(SURFACE_LEVEL) + roundi(broad * 7.0 + fine * 2.0)
 
 
 ## Player-scale rockwork frames the spawn lane with ceiling ribs and buttresses.
@@ -435,19 +437,25 @@ func _process(delta: float) -> void:
 	if delta > 0.0:
 		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
 	_move_player(delta)
+	if not _gameplay_awake and not _simulation_manually_paused and player_pos.x >= 340.0:
+		_wake_gameplay_world()
+	_aim_from_cursor()
+	_advance_projectiles(delta)
 	_update_camera(delta)
 	_update_marker()
 	_update_light(delta)
+	_update_gameplay_fx()
 	if is_drawing and not (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)):
 		is_drawing = false
 	world.flush_present()
 	_refresh_textures()
 	if _profile_mat != null:
 		ProfileGlue.update_present(_profile_mat, world, _view_region.position, _view_region.size)
-	if _transient_ttl > 0.0:
-		_transient_ttl -= delta
-		if _transient_ttl <= 0.0:
-			_transient_msg = ""
+		if _transient_ttl > 0.0:
+			_transient_ttl -= delta
+			if _transient_ttl <= 0.0:
+				_transient_msg = ""
+				_update_tool_readout()
 	_hud_cooldown -= delta
 	if _hud_cooldown <= 0.0:
 		_hud_cooldown = HUD_REFRESH_INTERVAL
@@ -459,9 +467,25 @@ func _set_transient(msg: String) -> void:
 	_transient_msg = msg
 	_transient_ttl = TRANSIENT_SECS
 	status_label.text = msg
+	tool_readout.text = msg
+
+
+func _update_tool_readout() -> void:
+	if _transient_ttl > 0.0 and not _transient_msg.is_empty():
+		tool_readout.text = _transient_msg
+	else:
+		tool_readout.text = "SPRING WAND  ·  WATER BOLT\nAim with mouse  ·  Left-click to cast"
 
 func _respawn_player() -> void:
 	player_pos = CAVE_SPAWN
+	player_velocity = Vector2.ZERO
+	player_on_ground = true
+	jump_requested = false
+	_projectiles.clear()
+	_impact_effects.clear()
+	_gameplay_awake = false
+	_simulation_manually_paused = false
+	world.auto_step = false
 	_snap_camera()
 
 func _box_passable(px: float, py: float) -> bool:
@@ -472,26 +496,200 @@ func _box_passable(px: float, py: float) -> bool:
 	return world.can_move_to_box(x1, y1, x2, y2)
 
 func _move_player(delta: float) -> void:
-	var dir := Vector2.ZERO
+	var axis_x: float = 0.0
 	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT):
-		dir.x -= 1.0
+		axis_x -= 1.0
 	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT):
-		dir.x += 1.0
-	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP):
-		dir.y -= 1.0
-	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN):
-		dir.y += 1.0
-	if dir == Vector2.ZERO:
+		axis_x += 1.0
+	_integrate_player(delta, axis_x, jump_requested)
+
+
+func _integrate_player(delta: float, axis_x: float, request_jump: bool) -> void:
+	# Fixed-size spatial substeps stop fast frames tunnelling through native
+	# cells. Gravity and horizontal motion remain host-side prototype state;
+	# all terrain collision still queries the authoritative C++ world.
+	if delta <= 0.0:
+		jump_requested = false
 		return
-	dir = dir.normalized()
-	var world_w: float = float(world.get_world_width())
-	var world_h: float = float(world.get_world_height())
-	var nx: float = clampf(player_pos.x + dir.x * PLAYER_SPEED * delta, 0.5, world_w - 0.5)
-	if _box_passable(nx, player_pos.y):
-		player_pos.x = nx
-	var ny: float = clampf(player_pos.y + dir.y * PLAYER_SPEED * delta, PLAYER_H, world_h - 0.5)
-	if _box_passable(player_pos.x, ny):
-		player_pos.y = ny
+	delta = minf(delta, 0.08)
+	axis_x = clampf(axis_x, -1.0, 1.0)
+	player_on_ground = not _box_passable(player_pos.x, player_pos.y + 0.12)
+	if player_on_ground and player_velocity.y >= 0.0:
+		player_pos.y = roundf(player_pos.y)
+		player_velocity.y = 0.0
+	if request_jump and player_on_ground:
+		player_velocity.y = -PLAYER_JUMP_SPEED
+		player_on_ground = false
+	player_velocity.x = axis_x * PLAYER_SPEED
+	var dx: float = player_velocity.x * delta
+	var x_steps: int = maxi(1, ceili(absf(dx) / 0.4))
+	for i in x_steps:
+		var nx: float = player_pos.x + dx / float(x_steps)
+		if _box_passable(nx, player_pos.y):
+			player_pos.x = nx
+			continue
+		var stepped := false
+		if player_on_ground and absf(dx) > 0.0:
+			for lift in range(1, PLAYER_STEP_HEIGHT + 1):
+				if _box_passable(nx, player_pos.y - float(lift)):
+					player_pos.x = nx
+					player_pos.y -= float(lift)
+					stepped = true
+					break
+		if not stepped:
+			player_velocity.x = 0.0
+			break
+	player_velocity.y = minf(player_velocity.y + PLAYER_GRAVITY * delta, PLAYER_TERMINAL_SPEED)
+	var dy: float = player_velocity.y * delta
+	var y_steps: int = maxi(1, ceili(absf(dy) / 0.4))
+	for i in y_steps:
+		var ny: float = clampf(player_pos.y + dy / float(y_steps), PLAYER_H, float(world.get_world_height()) - 0.5)
+		if _box_passable(player_pos.x, ny):
+			player_pos.y = ny
+		else:
+			if dy > 0.0:
+				player_on_ground = true
+			player_velocity.y = 0.0
+			break
+	player_on_ground = not _box_passable(player_pos.x, player_pos.y + 0.12)
+	if player_on_ground and player_velocity.y >= 0.0:
+		player_pos.y = roundf(player_pos.y)
+		player_velocity.y = 0.0
+	if player_pos.y >= float(world.get_world_height()) - 1.0:
+		_respawn_player()
+	jump_requested = false
+
+
+func _wake_gameplay_world() -> void:
+	if _simulation_manually_paused:
+		return
+	_gameplay_awake = true
+	world.auto_step = true
+	_set_transient("THE SPRING ROOM STIRS")
+
+
+func _aim_from_cursor() -> void:
+	if texture_display == null or _view_region.size == Vector2i.ZERO:
+		return
+	var cell: Vector2i = _display_to_world(texture_display.get_local_mouse_position())
+	if cell.x < 0:
+		return
+	_aim_target = Vector2(cell)
+	var origin := Vector2(player_pos.x, player_pos.y - PLAYER_H * 0.58)
+	var delta_to_target := _aim_target - origin
+	if delta_to_target.length_squared() > 0.01:
+		_aim_direction = delta_to_target.normalized()
+
+
+func _fire_wand_at(target: Vector2) -> bool:
+	if _wand_cooldown > 0.0 or _projectiles.size() >= 8:
+		return false
+	var origin := Vector2(player_pos.x, player_pos.y - PLAYER_H * 0.58)
+	var delta_to_target := target - origin
+	if delta_to_target.length_squared() < 0.01:
+		delta_to_target = _aim_direction
+	_aim_direction = delta_to_target.normalized()
+	player_marker.call("set_aim_direction", _aim_direction)
+	_projectiles.append({
+		"pos": origin + _aim_direction * 3.0,
+		"velocity": _aim_direction * WAND_SPEED,
+		"age": 0.0,
+	})
+	_wand_cooldown = WAND_COOLDOWN
+	if not _gameplay_awake:
+		_wake_gameplay_world()
+	return true
+
+
+func _advance_projectiles(delta: float) -> void:
+	_wand_cooldown = maxf(0.0, _wand_cooldown - delta)
+	for i in range(_impact_effects.size() - 1, -1, -1):
+		var effect: Dictionary = _impact_effects[i]
+		effect["age"] = float(effect["age"]) + delta
+		if float(effect["age"]) >= 0.34:
+			_impact_effects.remove_at(i)
+		else:
+			_impact_effects[i] = effect
+	for i in range(_projectiles.size() - 1, -1, -1):
+		var bolt: Dictionary = _projectiles[i]
+		var position: Vector2 = bolt["pos"]
+		var velocity: Vector2 = bolt["velocity"]
+		var age: float = float(bolt["age"]) + delta
+		var distance: float = velocity.length() * minf(delta, 0.08)
+		var steps: int = maxi(1, ceili(distance / 0.75))
+		var impacted := false
+		for step in steps:
+			var next_position: Vector2 = position + velocity * (minf(delta, 0.08) / float(steps))
+			var cell := Vector2i(floori(next_position.x), floori(next_position.y))
+			if cell.x < 1 or cell.y < 1 or cell.x >= world.get_world_width() - 1 or cell.y >= world.get_world_height() - 1:
+				position = next_position
+				impacted = true
+				break
+			var material: int = world.get_cell(cell.x, cell.y)
+			if material != AshfallWorld.MATERIAL_AIR and material != AshfallWorld.MATERIAL_STEAM:
+				position = next_position
+				_apply_wand_impact(cell)
+				impacted = true
+				break
+			position = next_position
+		if not impacted and age >= WAND_MAX_AGE:
+			var cell := Vector2i(floori(position.x), floori(position.y))
+			_apply_wand_impact(cell)
+			impacted = true
+		if impacted:
+			_projectiles.remove_at(i)
+		else:
+			bolt["pos"] = position
+			bolt["age"] = age
+			_projectiles[i] = bolt
+
+
+func _apply_wand_impact(center: Vector2i) -> void:
+	if center.x < 1 or center.y < 1 or center.x >= world.get_world_width() - 1 or center.y >= world.get_world_height() - 1:
+		return
+	var struck: int = world.get_cell(center.x, center.y)
+	var cut_terrain: bool = struck == AshfallWorld.MATERIAL_WOOD or struck == AshfallWorld.MATERIAL_SAND
+	var cut_count: int = 0
+	if cut_terrain:
+		for dy in range(-4, 5):
+			for dx in range(-4, 5):
+				if dx * dx + dy * dy > 16:
+					continue
+				var x: int = center.x + dx
+				var y: int = center.y + dy
+				var material: int = world.get_cell(x, y)
+				if material == AshfallWorld.MATERIAL_WOOD or material == AshfallWorld.MATERIAL_SAND:
+					world.set_cell(x, y, AshfallWorld.MATERIAL_AIR)
+					cut_count += 1
+	# A small, real water burst is written to the authoritative cell world. The
+	# following fixed native ticks handle falling, spreading, quench and steam.
+	var offsets: Array[Vector2i] = [Vector2i.ZERO, Vector2i(0, -1), Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, 1), Vector2i(0, -2)]
+	var placed: int = 0
+	for offset in offsets:
+		var x: int = center.x + offset.x
+		var y: int = center.y + offset.y
+		if world.get_cell(x, y) == AshfallWorld.MATERIAL_AIR:
+			world.set_cell(x, y, AshfallWorld.MATERIAL_WATER)
+			placed += 1
+	if placed > 0 or cut_count > 0:
+		_impact_effects.append({"pos": Vector2(center), "age": 0.0})
+		if cut_count > 0 and center.y < 250:
+			_set_transient("SPRING OPENED  ·  WATER RELEASED")
+		else:
+			_set_transient("WATER SPLASH  ·  WATCH FOR STEAM")
+
+
+func _update_gameplay_fx() -> void:
+	if gameplay_fx == null:
+		return
+	var shots: Array[Dictionary] = []
+	for bolt in _projectiles:
+		shots.append({"pos": _world_to_display(bolt["pos"] as Vector2), "dir": (bolt["velocity"] as Vector2).normalized()})
+	var impacts: Array[Dictionary] = []
+	for effect in _impact_effects:
+		impacts.append({"pos": _world_to_display(effect["pos"] as Vector2), "age": float(effect["age"])})
+	var cursor := _world_to_display(_aim_target)
+	gameplay_fx.call("set_frame", shots, impacts, cursor)
 
 func _player_center_cell() -> Vector2i:
 	return Vector2i(roundi(player_pos.x), roundi(player_pos.y - PLAYER_H * 0.5))
@@ -718,6 +916,7 @@ func _apply_view_region() -> void:
 	if backdrop_material != null:
 		backdrop_material.set_shader_parameter("view_origin", Vector2(_view_region.position))
 		backdrop_material.set_shader_parameter("view_size", Vector2(_view_region.size))
+		backdrop_material.set_shader_parameter("surface_level", SURFACE_LEVEL)
 
 # P3A R7: the DISPLAYED base layer is the identity texture under the profile
 # ShaderMaterial (see _init_profile_material). The CPU RGBA layer keeps
@@ -781,10 +980,7 @@ func _update_marker() -> void:
 	var sprite_size := Vector2(maxf(26.0, cell_px * 4.0), maxf(36.0, cell_px * 5.8))
 	player_marker.size = sprite_size
 	player_marker.position = feet - Vector2(sprite_size.x * 0.5, sprite_size.y * 0.94)
-	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT):
-		player_marker.call("set_facing_right", false)
-	elif Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT):
-		player_marker.call("set_facing_right", true)
+	player_marker.call("set_aim_direction", _aim_direction)
 	if current_material == _marker_mat:
 		return
 	_marker_mat = current_material
@@ -858,7 +1054,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
 		match event.keycode:
 			KEY_SPACE:
+				jump_requested = true
+			KEY_W, KEY_UP:
+				jump_requested = true
+			KEY_P:
 				world.auto_step = not world.is_auto_step()
+				_gameplay_awake = world.is_auto_step()
+				_simulation_manually_paused = not world.is_auto_step()
 				_update_hud()
 			KEY_N:
 				world.step()
@@ -914,15 +1116,26 @@ func _unhandled_input(event: InputEvent) -> void:
 func _on_world_texture_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			is_drawing = event.is_pressed()
-			draw_material = current_material
-			if is_drawing:
-				_draw_at(event.position)
+				if event.is_pressed():
+					if Input.is_key_pressed(KEY_SHIFT):
+						is_drawing = true
+						draw_material = current_material
+						_draw_at(event.position)
+					else:
+						is_drawing = false
+						var target := _display_to_world(event.position)
+						if target.x >= 0:
+							_fire_wand_at(Vector2(target))
+				else:
+					is_drawing = false
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			is_drawing = event.is_pressed()
-			draw_material = AshfallWorld.MATERIAL_AIR
-			if is_drawing:
-				_draw_at(event.position)
+			if Input.is_key_pressed(KEY_SHIFT):
+				is_drawing = event.is_pressed()
+				draw_material = AshfallWorld.MATERIAL_AIR
+				if is_drawing:
+					_draw_at(event.position)
+			else:
+				is_drawing = false
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.is_pressed():
 			_zoom_camera(1)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.is_pressed():
@@ -949,6 +1162,8 @@ func _on_step_btn_pressed() -> void:
 
 func _on_play_btn_pressed() -> void:
 	world.auto_step = not world.is_auto_step()
+	_gameplay_awake = world.is_auto_step()
+	_simulation_manually_paused = not world.is_auto_step()
 	_update_hud()
 
 func _on_reset_btn_pressed() -> void:

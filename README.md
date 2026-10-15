@@ -6,7 +6,7 @@ Ashfall is a **Noita-inspired, systemic falling-sand action prototype**: a Godot
 
 - **P0–P2 foundations are implemented:** portable C++20 simulation, Godot GDExtension bridge, data-driven materials/reactions, heat, fire, save/load, deterministic tests, and benchmarks.
 - **P3 presentation is implemented but not fully signed off:** the default `cave_benchmark.tscn` has procedural cave generation, material profiles, local fire lighting, camera framing, animation, and a debug panel. Rendered visual approval and target-Mac GPU capture remain separate gates.
-- **P4 is a prototype, not a finished game loop:** the host currently provides a controllable avatar, terrain queries, digging/placement, and save/load. Side-view traversal, a wand/projectile loop, and an authored environmental challenge are still needed.
+- **P4A first playable prototype is implemented; the full loop remains open:** the default cave now has an original surface entrance, asymmetric rooms, grounded side-view movement/jump, and a Spring Wand water/fire/wood interaction. An exit/finish state, tick-indexed replay ownership, transient entity save state, and rendered sign-off remain to do.
 - `main.tscn` remains the small material-demo/reference scene; the cave is the default boot scene.
 
 See [the roadmap](docs/ROADMAP.md), [architecture](ARCHITECTURE.md), and [the scoped playable-slice task](docs/tasks/P4_NOITA_LIKE_SLICE.md) for current priorities and exit criteria.
@@ -24,7 +24,7 @@ ctest --test-dir build --output-on-failure
 godot --headless --path . --script tests/godot_headless_verify.gd
 ```
 
-Run the project with `godot --path .`. **F1** toggles the debug panel; **F2** or the sidebar opens the material demo.
+Run the project with `godot --path .`. **A/D** or arrows move, **Space/W/Up** jump, mouse aims, and left-click casts the Spring Wand. **F1** opens the developer panel (material painting/telemetry); **F2** opens the material demo from that panel. **P** pauses/resumes world simulation; **R** rebuilds the cave.
 
 ## Project boundaries
 

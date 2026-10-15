@@ -20,9 +20,9 @@ The project now has the default cave scene, a cropped follow camera, material-pr
 
 **Current rendered evidence:** [2026-10-15 opening-room capture](perf/captures/2026-10-15-cave-review.png) at 1280×720 shows the cropped spawn room, arch, compact bridge, enlarged wizard, wick, seep, and in-game sidebar. This is a positive C1 iteration check, not complete P3 sign-off. **Remaining:** fire-lit/unlit and bloom on/off A/B captures, a pause/resume camera sweep, and a target-Mac GPU frame capture. Headless tests prove state and input contracts, not pixel quality.
 
-## P4 — Playable interaction slice — Prototype exists; next gameplay milestone
+## P4 — Playable interaction slice — First P4A prototype implemented; gate open
 
-The current host prototype supports avatar movement, native-cell collision queries, digging/placement, material selection, and save/load. It is not yet a side-view platformer or a complete interaction loop.
+The default scene now boots to an authored surface entrance and asymmetric cave route. Side-view movement, gravity, grounded jump, native-cell collision, and a mouse-aimed Spring Wand are in place. The HUD keeps developer paint/telemetry behind F1.
 
 ### P4A target: one playable cave room
 
@@ -32,7 +32,7 @@ The current host prototype supports avatar movement, native-cell collision queri
 - A small health/hazard rule only if it is needed to make the route meaningful; no sprawling combat system.
 - Input and world changes are testable and repeatable. Decide the authoritative ownership of player/projectile state before persistence expands.
 
-**Exit:** a new player can traverse and finish the room without debug controls; the chain visibly changes the same native world; no soft-lock; save/reload preserves the result; the main view reads clearly at 1280×720.
+**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, and timber-grille breach. **Still open:** explicit exit/finish state, recovery/persistence semantics for player/projectiles, tick-indexed replay, and rendered human sign-off at 1280×720.
 
 Detailed acceptance and non-goals: [P4 Noita-like playable slice](tasks/P4_NOITA_LIKE_SLICE.md).
 
@@ -54,7 +54,7 @@ Build inspectors, scenario/replay tooling, and content authoring only to remove 
 
 ## Near-term order
 
-1. Review the rendered opening-room capture; the first-pass silhouette, avatar scale, camera crop, and in-game UI are now visible. Continue the broader level-design/lighting pass based on visual review.
-2. Close the P3 visual evidence that can be captured here; keep the target-Mac GPU measurement explicitly open.
-3. Implement P4A traversal and the single-room water/fire/tool interaction.
-4. Define replay/state ownership before persistent gameplay or more complex entities.
+1. Review the new surface-to-cave route and interaction in a rendered 1280×720 pass; keep the target-Mac GPU measurement explicitly open.
+2. Add an explicit exit/finish state and recovery path; tune the route and hazard if playtesting exposes soft locks.
+3. Define tick-indexed command/entity ownership and extend tests before broadening persistence or adding more tools.
+4. Close the remaining P3 visual evidence that can be captured here.

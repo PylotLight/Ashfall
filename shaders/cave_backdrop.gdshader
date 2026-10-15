@@ -5,6 +5,7 @@ shader_type canvas_item;
 // the camera pans and zooms. No TIME-based animation or material-ID sampling.
 uniform vec2 view_origin = vec2(0.0, 0.0);
 uniform vec2 view_size = vec2(192.0, 120.0);
+uniform float surface_level = 80.0;
 uniform vec3 base_tint : source_color = vec3(0.095, 0.105, 0.145);
 
 float hash12(vec2 p) {
@@ -32,8 +33,12 @@ void fragment() {
 	float cloud_tint = mix(0.72, 1.28, smoothstep(0.15, 0.85, cloud));
 	float wall_tint = mix(0.88, 1.14, wall);
 	float grain_tint = mix(0.96, 1.04, grain);
-	vec3 color = base_tint * cloud_tint * wall_tint * grain_tint;
-	// The broad, soft cool/plum shifts make the negative space read as distant
-	// stone rather than a uniform black fill, while staying darker than rock.
+	vec3 cave_color = base_tint * cloud_tint * wall_tint * grain_tint;
+	// Above the authored soil line, the same world-locked field becomes a dim
+	// blue-violet evening sky. A soft horizon avoids a hard backdrop seam.
+	float sky_y = clamp(world_cell.y / max(surface_level, 1.0), 0.0, 1.0);
+	vec3 sky_color = mix(vec3(0.075, 0.105, 0.17), vec3(0.27, 0.17, 0.19), sky_y);
+	float sky_mask = 1.0 - smoothstep(surface_level - 4.0, surface_level + 3.0, world_cell.y);
+	vec3 color = mix(cave_color, sky_color, sky_mask);
 	COLOR = vec4(color, 1.0);
 }

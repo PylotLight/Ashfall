@@ -1,6 +1,16 @@
 # P4A — Noita-like Playable Cave Slice
 
-**Status:** scoped, not implemented as a complete loop.
+**Status:** first playable prototype implemented; the full P4A exit gate remains open.
+
+## First-prototype implementation (2026-10-15)
+
+- Replaced the benchmark arena with an original, fixed-seed surface ridge, sky-connected cave mouth, asymmetric first chamber, optional high pocket, and a lower eastern room.
+- Added a 3×5-cell-feet side-view controller with horizontal collision against the native world, gravity, grounded jump, a two-cell step-up allowance, and a character-scale camera crop.
+- Added the Spring Wand: mouse-facing, bounded-rate water bolts with screen-space travel/impact feedback. Impacts can cut soft sand/timber, write water into the same authoritative cells, release the authored spring, and rely on native reactions for fire/steam.
+- Moved the material palette, telemetry, and material-demo button into the F1 debug panel; normal play shows the entry note and tool controls.
+- Added `tests/godot_p4a_playable_verify.gd` for the surface-to-grille walk, jump/fall, wall collision, spring release, steam reaction, and grille breach.
+
+**Still open:** there is no explicit exit trigger/finish state yet; player and projectile input is not a tick-indexed replay stream; save/reload does not yet own transient velocity/projectile state; and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains a human check. This is a playable first-room foundation, not a claim that the complete P4A acceptance gate has closed.
 
 **Purpose:** prove that Ashfall is a game about readable movement and causal material interaction, not only a simulation benchmark.
 

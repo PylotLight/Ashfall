@@ -6,13 +6,13 @@ Ashfall is an original, Noita-inspired 2D systemic action game. Its intended
 differentiator is a readable pixel-scale cave where tools, terrain, liquids,
 heat, and hazards all act on one reactive cellular world.
 
-The engine foundation now includes a Godot host, C++ simulation bridge,
+The engine foundation includes a Godot host, C++ simulation bridge,
 data-driven materials/reactions, heat, fire, presentation profiles, local
-lighting, and a deterministic cave benchmark. The default cave still needs
-rendered sign-off, and the current host-side avatar is only a prototype—not yet
-the intended side-view platformer or complete gameplay loop. The next playable
-goal is one authored cave room in which movement and a simple wand/tool enable
-a visible water/fire/terrain interaction that opens a route. See
+lighting, and a deterministic cave benchmark. The default cave now boots into
+an original surface-to-cave prototype with side-view movement, grounded jump,
+and a Spring Wand that edits the authoritative cell world. It demonstrates a
+water/fire/wood route, but has no explicit exit/finish state, tick-indexed
+input replay, or completed rendered sign-off yet. See
 [`docs/tasks/P4_NOITA_LIKE_SLICE.md`](tasks/P4_NOITA_LIKE_SLICE.md) for its
 bounded scope and acceptance checks.
 

@@ -1,5 +1,7 @@
 # P3A exit gate — milestone record (Slice E, task E3)
 
+> Historical P3A evidence only. On 2026-10-15 the default cave layout and player loop were replaced by the first P4A surface-to-cave prototype; the old arena coordinates and capture list below no longer describe the current opening. See `docs/tasks/P4_NOITA_LIKE_SLICE.md` and `tests/godot_p4a_playable_verify.gd` for current layout/gameplay evidence.
+
 Date: 2026-09-12. Machine: Apple Silicon (arm64), native release, Godot 4.7.2
 (same baseline machine as Slice E task E1).
 Gate suites: `tests/godot_p3a_fixtures_verify.gd` (E2, 132 PASS) +
