@@ -84,7 +84,19 @@ func _run_exit_checks() -> void:
 					counts[n] += 1
 	for n in want:
 		check(int(counts[n]) > 0, "E3/C1 content present: %s (samples %d)" % [n, int(counts[n])])
-	check(main.player_pos == main.CAVE_SPAWN, "E3/C1 character-scale placeholder at CAVE_SPAWN")
+		check(main.player_pos == main.CAVE_SPAWN, "E3/C1 character-scale placeholder at CAVE_SPAWN")
+		var avatar_script: Script = main.player_marker.get_script()
+		check(avatar_script != null and avatar_script.resource_path.ends_with("player_wizard.gd"), "E3/C1 readable wizard avatar overlay is attached")
+		check(main.player_marker.size.x >= 26.0 and main.player_marker.size.y >= 36.0, "E3/C1 wizard overlay is legible without changing the cell collision marker")
+		var debug_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DebugToggleBtn") as Button
+		var demo_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DemoBtn") as Button
+		check(debug_button != null and demo_button != null and debug_button.text.begins_with("[F1]") and demo_button.text.begins_with("[F2]"), "E3/C1 debug and material-demo shortcuts are distinct")
+		check(is_equal_approx(main._camera.view_h_cells, 120.0), "E3/C1 default camera uses player-scale framing")
+	check(main._view_region.size.y == 120 and main._view_region.size.x < 512, "E3/C1 actual view region is cropped to player scale")
+	check(main._camera.center_cells.y < main.player_pos.y, "E3/C1 opening camera leaves room above the avatar")
+	var cave_snapshot: PackedByteArray = main.world.save_to_bytes()
+	main._build_cave()
+	check(main.world.save_to_bytes() == cave_snapshot, "E3/C1 authored cave rebuild is deterministic")
 	for key in ["sim", "world_render", "lighting", "display", "ui"]:
 		check(main.has_meta(key), "E3/C1 resolution-ladder metadata: %s" % key)
 	check(ProjectSettings.get_setting("application/run/main_scene") == "res://cave_benchmark.tscn", "E3/C1 boot default is the cave scene")

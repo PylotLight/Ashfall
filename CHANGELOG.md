@@ -40,6 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Window letterbox glare: explicit `canvas_items`/`keep` stretch, dark clear color matching the world background, dark viewport panel stylebox.
 
 ### Improved
+- Cave presentation now uses independently wandering chamber edges and rounded deterministic tunnel stamps instead of stacked row jitter and square ledges; the follow view is tighter around the player.
+- Replaced the red cell-sized marker with an original pixel-art wizard overlay, narrowed and restyled the play sidebar, and moved simulation telemetry and long controls behind F1.
+- Replaced stale phase status with explicit P0–P3 evidence state and a bounded P4A cave interaction slice; the target-Mac GPU capture remains an open sign-off item.
 - World scale 256 → 512 at full 60 Hz (no rate compromise — the flat-map
   optimization brought 512 ticks to ~5 ms on the play level, ~31% of a frame).
   Play level, reference world, avatar speed/brushes, and all coordinate-based
@@ -48,4 +51,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Water behavior: pressure-gated lateral dispersion (up to 4 cells over supporting water) levels pools quickly; mass-safe sand/water swaps via settled-home ownership tracking; surface tension — cells embedded in a complete surface row rest while bumps drain, so no permanent single-pixel dots and settled surfaces level within one cell.
 - Water rendering: dual-layer presentation — opaque base (background, stone, sand, nearest-crisp) plus a water-only layer (depth ramp, surface highlight, coverage alpha) sampled linearly under `shaders/water_fx.gdshader` (coverage closing + smoothstep, foam shoreline, animated shimmer, hash dither). No hard squares; isolated droplets read as soft beads. Dual paint keeps bridge tick at ~2.7 ms on the reference world.
 - Perf HUD: sidebar now shows live FPS, frame time (EMA), and last sim-step time (ms, measured in `AshfallWorld::step`).
-
+- Reframed the cave opening around a shorter broken bridge with a readable roof silhouette, a near-player wick and seep, and more visible ledge/support structure; enlarged only the presentation wizard, leaving native collision unchanged.
+- Removed the cave's F1 conflict: F1 toggles the debug panel and F2 opens the material demo; added P3A checks for sprite scale and distinct shortcut labels.
+- Unioned useful Godot/export ignores from the duplicate `master` snapshot with `main`'s native build and macOS rules; no shared source file was newer on `master`.

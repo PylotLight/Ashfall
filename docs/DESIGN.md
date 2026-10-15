@@ -2,14 +2,19 @@
 
 ## Purpose
 
-Ashfall is a 2D physics-sandbox RPG inspired by the systemic material play of
-Noita. Its differentiator is a large, reactive cellular world: materials,
-entities, quests, and NPC behaviour all observe the same world state.
+Ashfall is an original, Noita-inspired 2D systemic action game. Its intended
+differentiator is a readable pixel-scale cave where tools, terrain, liquids,
+heat, and hazards all act on one reactive cellular world.
 
-The project is an engine-first vertical slice, not a content-complete game.
-The first playable goal is a world where a player can alter sand and water,
-observe deterministic results, and save/reload exactly. Fire, AI, procedural
-generation, spells, and art follow only after that core is demonstrably sound.
+The engine foundation now includes a Godot host, C++ simulation bridge,
+data-driven materials/reactions, heat, fire, presentation profiles, local
+lighting, and a deterministic cave benchmark. The default cave still needs
+rendered sign-off, and the current host-side avatar is only a prototype—not yet
+the intended side-view platformer or complete gameplay loop. The next playable
+goal is one authored cave room in which movement and a simple wand/tool enable
+a visible water/fire/terrain interaction that opens a route. See
+[`docs/tasks/P4_NOITA_LIKE_SLICE.md`](tasks/P4_NOITA_LIKE_SLICE.md) for its
+bounded scope and acceptance checks.
 
 ## Technical direction
 

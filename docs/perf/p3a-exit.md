@@ -60,6 +60,16 @@ camera fixed (follow off) between the pair. Suggested N = 100.
    per-pass splits (world / lighting / bloom / composite; no particle pass in
    P3A) against the §17 budgets (world 1–2 ms, lighting+bloom 1–3 ms GPU).
 
-Region-lock note: E2+E3 added only `tests/godot_p3a_fixtures_verify.gd`,
-`tests/godot_p3a_exit_verify.gd`, and this record. Zero code/shader/scene/data
-edits. Uncommitted per task instructions.
+Historical region-lock note for the original E2+E3 pass (2026-09-12): that
+verification added only `tests/godot_p3a_fixtures_verify.gd`,
+`tests/godot_p3a_exit_verify.gd`, and this record; it made no
+code/shader/scene/data edits. The 2026-10-15 implementation retest below is a
+separate change set.
+
+
+## 2026-10-15 rendered retest (Linux; partial C1 evidence)
+
+- Re-ran `tests/godot_p3a_exit_verify.gd` against the revised spawn room; all E3 exit-gate checks passed. The current deterministic settle remains tick 60; occupied cells are 206430. The test now also pins the 120-cell camera crop, the larger presentation-only wizard, and distinct F1/F2 controls.
+- Captured the live Godot scene at 1280×720: [`captures/2026-10-15-cave-review.png`](captures/2026-10-15-cave-review.png). It shows the opening chamber's arch, compact bridge, wizard, wick, seep, and sidebar in the revised player-scale view.
+- This Linux/Xvfb render is an iteration check, not the target Apple Silicon GPU baseline. It does not replace the requested fire-lit/unlit or bloom on/off A/B pairs, pause/resume camera sweep, full-cavern/close-follow pair, or target-Mac GPU pass. Those P3 human sign-off items remain open.
+- The original 2026-09-12 Apple Silicon benchmark table above is historical and unchanged; do not compare its occupancy/content samples directly with this deterministic cave revision.

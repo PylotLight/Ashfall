@@ -131,6 +131,9 @@ endif()
 
 # GDExtension bridge using godot-cpp
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp/CMakeLists.txt")
+    # The portable static core is linked into a shared GDExtension. Linux
+    # requires its object files to be position-independent for that link.
+    set_target_properties(ashfall_sim PROPERTIES POSITION_INDEPENDENT_CODE ON)
     set(GODOTCPP_API_VERSION "4.7" CACHE STRING "Godot API version" FORCE)
     add_subdirectory(godot-cpp)
 

@@ -1,6 +1,31 @@
+# Godot project/editor cache and import outputs
 .godot/
+.import/
+.nomedia
+
+# Godot export and platform artifacts
+export.cfg
+export_credentials.cfg
+*.exe
+~*.dll
+*.translation
+
+# Godot Mono/runtime outputs
+.mono/
+mono_crash.*.json
+
+# Temporary and local data directories
+*.tmp
+data_*/
+
+# Native build outputs
 build/
 build-fuzz/
 build-san/
 bin/
+
+# macOS metadata
 .DS_Store
+
+# Uncomment if the project does not version PCK files as runtime dependencies.
+# *.pck

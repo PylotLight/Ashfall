@@ -1,87 +1,60 @@
 # Ashfall Roadmap
 
-Each phase has an exit criterion. Do not begin a dependent phase because a
-document says it is next; begin it only after its criterion is verified.
+Status reviewed 2026-10-15. A phase is complete only when its exit evidence exists; a design note or headless assertion is not a rendered visual sign-off.
 
-## P0 — Native bridge and visible reference world
+## P0 — Native bridge and visible reference world — Complete
 
-Build a `godot-cpp` GDExtension that owns one `SimulationWorld`, steps it at a
-fixed rate, and presents a chunk snapshot to Godot.
+A Godot GDExtension owns the native world and exposes stepping, edits, queries, and presentation. Deterministic bridge and scene tests cover the reference path.
 
-Exit criterion: launch Godot, instantiate a native 256 by 256 test world,
-modify cells through the bridge, step it, and visibly observe the native
-result. No simulation rule is implemented in GDScript.
+## P1 — Deterministic cellular world — Complete
 
-## P1 — Deterministic cellular world
+The portable C++ core owns material cells, fixed ticks, edits, and versioned world saves; regression tests cover movement, conservation, boundaries, and replay.
 
-Complete air, stone, sand, and water in the C++ core. Add chunk-boundary,
-mass-conservation, settling, command replay, and save/load tests. Replace the
-test snapshot with dirty-chunk presentation.
+## P2 — Data-driven materials and reactions — Complete
 
-Exit criterion: a player can alter sand and water in a hand-authored scene;
-stone blocks movement; quitting and loading restores the exact authoritative
-world and player state.
+Materials, heat, gases, and reaction definitions load through validated data tables. Material behavior and save compatibility are covered in the native tests.
 
-## P2 — Data-driven materials and reactions
+## P3 — Rendering and inspection — Implemented; rendered sign-off remains open
 
-Load material definitions and reaction definitions from versioned data. Add
-gases, compact per-cell state, temperature, fire, and reaction execution.
-Introduce activation/sleeping for chunks only when profiling demonstrates a
-need.
+The project now has the default cave scene, a cropped follow camera, material-profile shader, structured material palettes, fire/lava emission, a bounded clustered-light rig, restrained bloom, tick-driven presentation animation, performance instrumentation, and deterministic presentation tests.
 
-Exit criterion: a data-only material/reaction addition works through the
-native core, renderer, save format, and deterministic tests without adding a
-special material branch.
+**Current rendered evidence:** [2026-10-15 opening-room capture](perf/captures/2026-10-15-cave-review.png) at 1280×720 shows the cropped spawn room, arch, compact bridge, enlarged wizard, wick, seep, and in-game sidebar. This is a positive C1 iteration check, not complete P3 sign-off. **Remaining:** fire-lit/unlit and bloom on/off A/B captures, a pause/resume camera sweep, and a target-Mac GPU frame capture. Headless tests prove state and input contracts, not pixel quality.
 
-## P3 — Rendering and inspection
+## P4 — Playable interaction slice — Prototype exists; next gameplay milestone
 
-Render dirty chunk textures efficiently, add a camera, material readability,
-lighting as appropriate, and a native-world debug overlay. Keep rendering
-separate from simulation state.
+The current host prototype supports avatar movement, native-cell collision queries, digging/placement, material selection, and save/load. It is not yet a side-view platformer or a complete interaction loop.
 
-Exit criterion: visual updates are limited to dirty chunks and profiling data
-shows simulation, upload, and render costs separately.
+### P4A target: one playable cave room
 
-## P4 — Entities and terrain interaction
+- Side-view horizontal movement, gravity, grounded jump, and readable player/aim direction.
+- One wand with one reliable projectile/tool; clear collision, cooldown, and material feedback.
+- One authored route with a recoverable environmental chain: reveal/redirect water, quench burning wood, and open a blocked passage.
+- A small health/hazard rule only if it is needed to make the route meaningful; no sprawling combat system.
+- Input and world changes are testable and repeatable. Decide the authoritative ownership of player/projectile state before persistence expands.
 
-Add player collision/query APIs, digging and placement commands, projectiles,
-and a minimal entity system. Investigate rigid-body extraction only after
-cell/world interfaces are stable.
+**Exit:** a new player can traverse and finish the room without debug controls; the chain visibly changes the same native world; no soft-lock; save/reload preserves the result; the main view reads clearly at 1280×720.
 
-Exit criterion: a player can move through, dig, and alter the same world the
-simulation owns, with collision based on authoritative native state.
+Detailed acceptance and non-goals: [P4 Noita-like playable slice](tasks/P4_NOITA_LIKE_SLICE.md).
 
-## P5 — World structure
+## P5 — Persistent world structure — Not started
 
-Add seeded generation: caves, material deposits, biomes, and structures.
-Define the persistence split between an exact-state hub and seed-regenerated
-procedural areas.
+Add seeded regions, explicit active/sleeping policy, and persistent edits. Start with one hub and one generated cave; defer large-scale streaming until profiling justifies it.
 
-Exit criterion: travel between a persistent hand-authored hub and a seeded
-cave works, with the hub retaining changes and the cave recreating from seed.
+## P6 — Repeatable systemic run — Not started
 
-## P6 — Gameplay vertical slice
+Add a small selection of tools/material combinations, an encounter or hazard, and a legible run goal. Expand content only when the interaction chain remains robust.
 
-Add one environmental puzzle, a small spell/tool set, one NPC that responds
-to hazards, and one world-state-gated interaction or quest.
+## P7 — Scale and acceleration — Not started
 
-Exit criterion: a player solves a problem through material simulation and an
-NPC or dialogue response reflects the physical change.
+Profile representative active worlds first. Improve chunk scheduling, storage, SIMD, and worker execution against the CPU reference; any GPU backend must match defined CPU scenarios.
 
-## P7 — Scale and acceleration
+## P8 — Authoring and replay tools — Not started
 
-Measure before changing architecture. Improve chunk scheduling, storage,
-SIMD, worker execution, and memory use. Implement a GPU backend only for
-behaviour already covered by CPU comparison scenarios.
+Build inspectors, scenario/replay tooling, and content authoring only to remove friction from verified game systems.
 
-Exit criterion: target-frame-time benchmarks and CPU/GPU equivalence tests
-are automated for representative active worlds.
+## Near-term order
 
-## P8 — Tooling and content
-
-Create a material editor, world inspector, replay viewer, benchmarks, and
-authoring tools. Scale content only after the core loop remains measurable
-and deterministic.
-
-Exit criterion: a contributor can create a material, reaction, test scenario,
-and benchmark without editing unrelated engine code.
+1. Review the rendered opening-room capture; the first-pass silhouette, avatar scale, camera crop, and in-game UI are now visible. Continue the broader level-design/lighting pass based on visual review.
+2. Close the P3 visual evidence that can be captured here; keep the target-Mac GPU measurement explicitly open.
+3. Implement P4A traversal and the single-room water/fire/tool interaction.
+4. Define replay/state ownership before persistent gameplay or more complex entities.

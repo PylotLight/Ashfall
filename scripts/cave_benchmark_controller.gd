@@ -28,7 +28,7 @@ extends Control
 #
 # Controls: WASD/arrows = move avatar; N = single sim tick; SPACE =
 # play/pause; R = rebuild cave; E = dig at avatar; F = place held material;
-# F5 = save; F9 = load; F1 = open material demo (demo stays bootable);
+# F1 = debug panel; F2 = material demo; F5 = save; F9 = load;
 # 1..0 = palette shortcuts; mouse paint on the world view.
 
 @onready var world: AshfallWorld = $AshfallWorld
@@ -69,6 +69,9 @@ const PLAYER_H: float = 1.8
 const PLAYER_SPEED: float = 90.0
 # Feet rest on the wood platform beam (top face y = 330).
 const CAVE_SPAWN: Vector2 = Vector2(240.0, 330.0)
+# Keep the avatar in the lower third so the spawn-room ceiling and route ahead
+# enter the first frame; this changes framing only, never simulation state.
+const CAMERA_LOOK_AHEAD_CELLS: float = -30.0
 # Warm-light anchor: just above the fire bed (fire cells y 442..447).
 const FIRE_ANCHOR: Vector2 = Vector2(256.0, 436.0)
 const SAVE_PATH: String = "user://ashfall_save.bin"
@@ -139,6 +142,14 @@ func _hash2(x: int, y: int, salt: int) -> float:
 	h = (h ^ (h >> 7)) & 0xFFFFFFFF
 	return float(h % 1000) / 1000.0
 
+## Smooth value noise for the chamber silhouette; unlike a per-row offset,
+## adjacent rows stay coherent and the cave stops reading as horizontal bands.
+func _noise1d(value: float, salt: int) -> float:
+	var i := floori(value)
+	var t := value - float(i)
+	t = t * t * (3.0 - 2.0 * t)
+	return lerpf(_hash2(i, 0, salt), _hash2(i + 1, 0, salt), t)
+
 func _mat_id(mat_name: String, fallback: int) -> int:
 	for id in world.get_material_ids():
 		if world.get_material_name(id) == mat_name:
@@ -167,8 +178,8 @@ func _build_cave() -> void:
 	world.fill_rect(0, 0, 511, 511, ROCK)
 	_build_topsoil(SAND, STONE, WOOD, ROCK)
 	# Chambers (cx, cy, rx, ry, salt): spawn hall first (must contain the
-	# beam x150..330 @ y330..336 with air for the avatar box y328..329).
-	_carve_chamber(240.0, 298.0, 95.0, 58.0, 11, 0.35)
+	# compact bridge x194..286 @ y330..334 and the avatar box y328..329).
+	_carve_chamber(240.0, 298.0, 82.0, 58.0, 11, 0.35)
 	_carve_chamber(105.0, 250.0, 55.0, 38.0, 21, 0.30)
 	_carve_chamber(390.0, 255.0, 68.0, 44.0, 31, 0.30)
 	_carve_chamber(335.0, 118.0, 48.0, 24.0, 41, 0.30)
@@ -212,6 +223,11 @@ func _build_cave() -> void:
 	# fire, so boot shows fresh flames instead of pre-burned fuel.
 	for i in 60:
 		world.step()
+	# Starting-room landmarks: a small wick and a shallow seep, visible in
+	# the opening camera crop and framed by the two broken stone shelves.
+	world.fill_rect(176, 294, 177, 297, WOOD)
+	world.fill_rect(176, 291, 177, 293, FIRE)
+	world.fill_rect(305, 284, 312, 287, WATER)
 	# Fire bed with stone curb; the warm light anchor sits just above it.
 	world.fill_rect(238, 444, 243, 447, STONE)
 	world.fill_rect(269, 444, 274, 447, STONE)
@@ -239,7 +255,8 @@ func _build_topsoil(sand_mat: int, stone_mat: int, wood_mat: int, rock_mat: int)
 			world.fill_rect(x, y0, x, mini(68, y0 + ln), wood_mat)
 
 
-## Jittered ellipse carve (one fill_rect per row, like the R7 silhouette).
+## Organic chamber carve: left and right edges wander independently at two
+## scales, so the negative-space silhouette reads as eroded rock, not bands.
 func _carve_chamber(cx: float, cy: float, rx: float, ry: float, salt: int, edge: float) -> void:
 	var AIR: int = AshfallWorld.MATERIAL_AIR
 	var y_lo: int = maxi(1, int(cy - ry) - 4)
@@ -250,15 +267,19 @@ func _carve_chamber(cx: float, cy: float, rx: float, ry: float, salt: int, edge:
 		if s <= 0.0:
 			continue
 		var half: float = rx * sqrt(s)
-		var j: float = (_hash2(int(cx), y, salt) - 0.5) * 2.0 * rx * edge
-		var x0: int = clampi(int(cx - half + j), 1, 510)
-		var x1: int = clampi(int(cx + half + j), 1, 510)
+		var broad: float = minf(10.0, rx * edge * 0.12)
+		var left_wander: float = (_noise1d(float(y) / 11.0, salt) - 0.5) * 2.0 * broad
+		var right_wander: float = (_noise1d(float(y) / 13.0, salt + 1) - 0.5) * 2.0 * broad
+		var left_chip: float = (_hash2(int(cx), y, salt + 2) - 0.5) * 3.0
+		var right_chip: float = (_hash2(int(cx), y, salt + 3) - 0.5) * 3.0
+		var x0: int = clampi(int(cx - half + left_wander + left_chip), 1, 510)
+		var x1: int = clampi(int(cx + half + right_wander + right_chip), 1, 510)
 		if x1 >= x0:
 			world.fill_rect(x0, y, x1, y, AIR)
 
 
-## Winding tunnel: overlapping discs along an interpolation with hash wobble
-## (mid-weighted so endpoints land exactly on their chambers).
+## Winding tunnel: overlapping rounded stamps along a gently wandering path.
+## Rounded walls remove the square ledges left by the old rectangular stamps.
 func _carve_tunnel(ax: int, ay: int, bx: int, by: int, rad: int, salt: int) -> void:
 	var AIR: int = AshfallWorld.MATERIAL_AIR
 	var dx: int = bx - ax
@@ -275,7 +296,13 @@ func _carve_tunnel(ax: int, ay: int, bx: int, by: int, rad: int, salt: int) -> v
 		var wob: float = (_hash2(i, salt, 77) - 0.5) * 10.0 * sin(t * 3.14159)
 		var cx: int = clampi(int(lerpf(float(ax), float(bx), t) + px * wob), 2, 509)
 		var cy: int = clampi(int(lerpf(float(ay), float(by), t) + py * wob), 2, 509)
-		world.fill_rect(maxi(1, cx - rad), maxi(1, cy - rad), mini(510, cx + rad), mini(510, cy + rad), AIR)
+		var stamp_r: float = maxf(2.5, float(rad) + (_hash2(i, salt, 78) - 0.5) * 1.0)
+		for oy in range(-ceili(stamp_r), ceili(stamp_r) + 1):
+			var ny: float = float(oy) / stamp_r
+			if absf(ny) > 1.0:
+				continue
+			var span: int = int(floor(stamp_r * sqrt(1.0 - ny * ny)))
+			world.fill_rect(maxi(1, cx - span), maxi(1, cy + oy), mini(510, cx + span), mini(510, cy + oy), AIR)
 
 
 ## Stone rind: rock touching air reads as worked stone (Noita wall tone).
@@ -363,12 +390,17 @@ func _build_veins(sand_mat: int, lava_mat: int, rock_mat: int) -> void:
 				world.set_cell(x2, y2, lava_mat)
 
 
-## Preserved play structures: floor slab, spawn platform + posts, fuel, dune.
+## Preserved structures: lower floor/fuel, plus a compact broken spawn bridge.
 func _build_structures(stone_mat: int, wood_mat: int, oil_mat: int, sand_mat: int, _air: int) -> void:
 	world.fill_rect(56, 448, 456, 470, stone_mat)
-	world.fill_rect(150, 330, 330, 336, wood_mat)
-	world.fill_rect(150, 337, 156, 447, wood_mat)
-	world.fill_rect(324, 337, 330, 447, wood_mat)
+	world.fill_rect(194, 330, 222, 331, wood_mat)
+	world.fill_rect(223, 330, 257, 331, stone_mat)
+	world.fill_rect(258, 330, 286, 331, wood_mat)
+	world.fill_rect(194, 332, 286, 334, stone_mat)
+	world.fill_rect(202, 335, 205, 343, wood_mat)
+	world.fill_rect(275, 335, 278, 343, wood_mat)
+	world.fill_rect(169, 298, 189, 300, stone_mat)
+	world.fill_rect(292, 288, 313, 290, stone_mat)
 	world.fill_rect(120, 441, 185, 447, oil_mat)
 	world.fill_rect(96, 425, 114, 447, wood_mat)
 	world.fill_rect(120, 435, 140, 440, wood_mat)
@@ -613,18 +645,21 @@ func _init_camera() -> void:
 	# views over the live bridge textures; center-sample-only water shader
 	# is crop-safe.
 	_camera = FollowCamera.new()
+	# Tighter authored play framing: enough of the room to read its route, with
+	# the player no longer disappearing into full-world benchmark scale.
+	_camera.view_h_cells = 120.0
 	_base_atlas = AtlasTexture.new()
 	_water_atlas = AtlasTexture.new()
 	_refresh_textures()
 	texture_display.texture = _base_atlas
 	water_display.texture = _water_atlas
-	_view_region = _camera.snap_to(player_pos, _world_size(), texture_display.size)
+	_view_region = _camera.snap_to(_camera_target(), _world_size(), texture_display.size)
 	_apply_view_region()
 
 func _update_camera(delta: float) -> void:
 	if _camera == null:
 		return
-	var region: Rect2i = _camera.update(delta, player_pos, _world_size(), texture_display.size)
+	var region: Rect2i = _camera.update(delta, _camera_target(), _world_size(), texture_display.size)
 	if region != _view_region:
 		_view_region = region
 		_apply_view_region()
@@ -632,8 +667,11 @@ func _update_camera(delta: float) -> void:
 func _snap_camera() -> void:
 	if _camera == null:
 		return
-	_view_region = _camera.snap_to(player_pos, _world_size(), texture_display.size)
+	_view_region = _camera.snap_to(_camera_target(), _world_size(), texture_display.size)
 	_apply_view_region()
+
+func _camera_target() -> Vector2:
+	return player_pos + Vector2(0.0, CAMERA_LOOK_AHEAD_CELLS)
 
 func _zoom_camera(dir: int) -> void:
 	if _camera == null:
@@ -644,7 +682,7 @@ func _zoom_camera(dir: int) -> void:
 func _toggle_follow_camera() -> void:
 	if _camera == null:
 		return
-	_view_region = _camera.set_follow(not _camera.follow_enabled, player_pos, _world_size(), texture_display.size)
+	_view_region = _camera.set_follow(not _camera.follow_enabled, _camera_target(), _world_size(), texture_display.size)
 	_apply_view_region()
 	_set_transient("CAM: FOLLOW ON" if _camera.follow_enabled else "CAM: FOLLOW OFF")
 
@@ -707,10 +745,17 @@ func _display_to_world(local_pos: Vector2) -> Vector2i:
 	return FollowCamera.screen_to_world(local_pos, texture_display.size, _view_region, _world_size())
 
 func _update_marker() -> void:
-	var top_left := _world_to_display(Vector2(player_pos.x - PLAYER_HALF_W, player_pos.y - PLAYER_H))
-	var bottom_right := _world_to_display(Vector2(player_pos.x + PLAYER_HALF_W, player_pos.y))
-	player_marker.position = top_left
-	player_marker.size = bottom_right - top_left
+	# The collider is deliberately small, but a game character cannot be a
+	# sub-cell red sliver. Keep the crisp wizard glyph readable at play scale.
+	var feet := _world_to_display(Vector2(player_pos.x, player_pos.y))
+	var cell_px: float = maxf(_display_scale().x, 1.0)
+	var sprite_size := Vector2(maxf(26.0, cell_px * 4.0), maxf(36.0, cell_px * 5.8))
+	player_marker.size = sprite_size
+	player_marker.position = feet - Vector2(sprite_size.x * 0.5, sprite_size.y * 0.94)
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT):
+		player_marker.call("set_facing_right", false)
+	elif Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT):
+		player_marker.call("set_facing_right", true)
 	if current_material == _marker_mat:
 		return
 	_marker_mat = current_material
@@ -801,6 +846,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_C:
 				_toggle_follow_camera()
 			KEY_F1:
+				_toggle_debug_panel()
+			KEY_F2:
 				_open_demo()
 			KEY_F5:
 				_save_game()

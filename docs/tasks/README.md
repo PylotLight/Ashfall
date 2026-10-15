@@ -1,16 +1,17 @@
-# Ashfall Phased Tasks
+# Ashfall Milestone Tasks
 
-This directory breaks down roadmap milestones from [docs/ROADMAP.md](../ROADMAP.md) into concrete, actionable phase task specifications.
+This index reflects the implementation as of 2026-10-15. See the [roadmap](../ROADMAP.md) for phase dependencies and the evidence required to close each gate.
 
-## Milestone Tasks
+## Status
 
-- [x] [P0 — Native Bridge and Visible Reference World](P0_FOUNDATION.md) — **Complete** (Exit criterion verified)
-- [x] [P1 — Deterministic Cellular World](P1_CELLULAR_WORLD.md) — **Complete** (Exit criterion verified)
-- [x] [P2 — Data-Driven Materials and Reactions](P2_DATA_DRIVEN_MATERIALS.md) — **Complete** (Exit criterion verified)
-- *P3 — Rendering and Inspection (Ready for scoping — P2 exit criterion verified)*
-- *P4 — Entities and Terrain Interaction (Pending P3 exit criterion)*
-- *P5 — World Structure (Pending P4 exit criterion)*
-- *P6 — Gameplay Vertical Slice (Pending P5 exit criterion)*
-- *P7 — Scale and Acceleration (Pending P6 exit criterion)*
-- *P8 — Tooling and Content (Pending P7 exit criterion)*
+- [x] [P0 — Native Bridge and Visible Reference World](P0_FOUNDATION.md) — complete.
+- [x] [P1 — Deterministic Cellular World](P1_CELLULAR_WORLD.md) — complete.
+- [x] [P2 — Data-Driven Materials and Reactions](P2_DATA_DRIVEN_MATERIALS.md) — complete.
+- [~] **P3 — Rendering and Inspection** — implementation is present; human rendered play-scale and A/B captures plus target-Mac GPU measurement remain open. See [`docs/perf/p3a-exit.md`](../perf/p3a-exit.md).
+- [ ] [P4A — Noita-like Playable Cave Slice](P4_NOITA_LIKE_SLICE.md) — scoped; not implemented as a completed game loop.
+- [ ] **P5 — World Structure** — waits for the playable room and persistence boundary.
+- [ ] **P6 — Systemic Run** — waits for P4/P5 proof.
+- [ ] **P7 — Scale and Acceleration** — benchmark-driven.
+- [ ] **P8 — Authoring and Replay Tools** — deferred until core gameplay is verified.
 
+`[~]` means there is meaningful implementation, but the full milestone exit evidence is not complete.

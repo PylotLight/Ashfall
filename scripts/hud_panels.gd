@@ -2,11 +2,9 @@ extends RefCounted
 
 # Play HUD vs debug panel separation — P3A Slice A, Task A2.
 #
-# Play view (sidebar) keeps: title, the InfoBox play HUD (tick / cells /
-# status / material / player / fps-frame-sim), the material palette, and the
-# help text. Sim-control widgets (play-pause, single-step, reset, save,
-# load) move into a hidden PopupPanel = the debug panel. Key shortcuts keep
-# working while it is hidden.
+# Play view keeps the title, compact material palette, and a debug opener.
+# Telemetry, technical scale notes, long controls, and sim-control widgets
+# move into the hidden F1 PopupPanel. Key shortcuts keep working while hidden.
 #
 # Implemented by reparenting (A2 region lock: no scene-file edits — scenes
 # stay byte-identical). Signal connections survive the move, and the
@@ -17,12 +15,15 @@ extends RefCounted
 
 # Sidebar child names that count as debug controls, in panel order.
 const DEBUG_WIDGET_NAMES: PackedStringArray = [
+	"Ladder",
+	"InfoBox",
 	"ActionsHeader",
 	"PlayBtn",
 	"StepBtn",
 	"ResetBtn",
 	"SaveBtn",
 	"LoadBtn",
+	"HelpText",
 ]
 
 const OPENER_NAME: StringName = &"DebugToggleBtn"

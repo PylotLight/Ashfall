@@ -246,7 +246,7 @@ int main() {
         const auto s = vstrip(8192, 5, 0);
         measure<TempMap>("temps", "vstrip8192", s, s.size());
     }
-    for (const auto [ox, oy] : {std::tuple<int, int>{0, 0}, {1, 1}, {13, 37}, {63, 63}, {7, 31}}) {
+    for (const auto& [ox, oy] : {std::tuple<int, int>{0, 0}, {1, 1}, {13, 37}, {63, 63}, {7, 31}}) {
         char name[64];
         std::snprintf(name, sizeof(name), "sparse64(ox=%d,oy=%d)", ox, oy);
         const auto s = sparse64(48, 48, ox, oy);
