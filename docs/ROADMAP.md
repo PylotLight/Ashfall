@@ -32,7 +32,7 @@ The default scene now boots to an authored surface entrance and asymmetric cave 
 - A small health/hazard rule only if it is needed to make the route meaningful; no sprawling combat system.
 - Input and world changes are testable and repeatable through the fixed 60 Hz command stream; version-3 host saves own player and transient tool state alongside native-world bytes.
 
-**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, timber-grille breach, eastern exit/route-cleared state, byte-identical fixed-tick playback, and save/load of transient player/projectile state (including v2 migration). **Still open:** rendered human sign-off at 1280×720.
+**Verified in this pass:** scripted surface-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, timber-grille breach, continuous jump traversal through the east connector to the exit, byte-identical fixed-tick playback, transient player/projectile save/load (including v2 migration), and GUI-rendered 1280×720 bloom-off interaction/finish captures. The captures use Mesa llvmpipe; **target-Mac GPU profiling remains open.**
 
 Detailed acceptance and non-goals: [P4 Noita-like playable slice](tasks/P4_NOITA_LIKE_SLICE.md).
 
@@ -54,7 +54,6 @@ Build inspectors, scenario/replay tooling, and content authoring only to remove 
 
 ## Near-term order
 
-1. Review the new surface-to-cave route and interaction in a rendered 1280×720 pass; keep the target-Mac GPU measurement explicitly open.
-2. Close the rendered playability sign-off at 1280×720; keep target-Mac GPU profiling separately open.
-3. Tune the route or hazard only if the interaction pass exposes a soft lock.
-4. Close the remaining P3 visual evidence that can be captured here.
+1. Profile the rendered P4A route on the target Mac GPU; the local 1280×720 bloom-off capture is checked in.
+2. Gather hands-on playtest feedback and tune only where it identifies a concrete problem.
+3. Close the remaining P3 visual evidence that can be captured here.

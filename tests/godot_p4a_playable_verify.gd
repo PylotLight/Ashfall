@@ -107,8 +107,28 @@ func _run() -> void:
 	main.player_pos = Vector2(470.0, 360.0)
 	main._check_finish_trigger()
 	check(not main._run_finished, "P4A finish trigger does not fire before the exit threshold")
-	main.player_pos = Vector2(488.0, 361.0)
-	main._check_finish_trigger()
+	main.player_pos = Vector2(373.6, 321.0)
+	main.player_velocity = Vector2.ZERO
+	main.player_on_ground = true
+	var gate_jump_started := false
+	var shoulder_jump_started := false
+	for i in 420:
+		var axis_x := 1.0
+		var request_jump := false
+		if not gate_jump_started:
+			gate_jump_started = true
+			request_jump = true
+		elif not shoulder_jump_started and main.player_pos.x >= 407.0:
+			axis_x = 0.0
+			if main.player_on_ground:
+				shoulder_jump_started = true
+				axis_x = 1.0
+				request_jump = true
+		main._integrate_player(1.0 / 60.0, axis_x, request_jump)
+		main._check_finish_trigger()
+		if main._run_finished:
+			break
+	check(main.player_pos.x >= 477.0 and main._box_passable(main.player_pos.x, main.player_pos.y), "P4A traverses the breached grille and reaches the eastern exit (x=%.1f y=%.1f)" % [main.player_pos.x, main.player_pos.y])
 	check(main._run_finished and main._finish_overlay.visible, "P4A entering the exit shows the explicit route-cleared state")
 	var finished_tick: int = main.world.get_tick()
 	main._check_finish_trigger()

@@ -1,6 +1,6 @@
 # P4A — Noita-like Playable Cave Slice
 
-**Status:** playable prototype, explicit route-cleared exit, fixed-tick replay, and transient save/load implemented; rendered sign-off remains open.
+**Status:** playable prototype, traversable route-cleared exit, fixed-tick replay, transient save/load, and local bloom-off 1280×720 rendered sign-off implemented. Target-Mac GPU profiling remains open separately.
 
 ## First-prototype implementation (2026-10-15)
 
@@ -17,7 +17,9 @@
 
 **Persistence phase (2026-10-15):** save-envelope v3 stores player position/velocity/grounding, aim, wand cooldown, awake/pause/finish flags, gameplay tick, pending tick inputs, active projectiles, impact FX, selected material, and native simulation bytes. Loads validate lengths, bounds, counts, and finite values before applying state; v2 position/material/world saves remain supported with safe defaults for new fields. Loading intentionally clears the in-memory seed replay because its original command history is not part of the save format. `tests/godot_p4a_save_verify.gd` covers exact native-world restoration, transient round-trip, v2 migration, and truncated-file rejection.
 
-**Still open:** rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
+**Rendered sign-off phase (2026-10-15):** a GUI-mode 1280×720 bloom-off run verified the water release/native steam reaction, timber-grille breach, side-view movement/jumps through the east connector, and route-cleared portal state. The run exposed and fixed a soft-lock at the eastern chamber shoulder by carving a deterministic avatar-height connector and moving the decorative ledge out of its clearance; the completion overlay was also softened to preserve portal context. Capture runner: `xvfb-run -a godot --audio-driver Dummy --path . --resolution 1280x720 --windowed --script tests/godot_p4a_render_signoff.gd`. Evidence: [water/fire interaction](../perf/captures/2026-10-15-p4a-bloom-off-interaction.png) and [route-cleared finish](../perf/captures/2026-10-15-p4a-bloom-off-route-cleared.png). Captured on Mesa llvmpipe software rendering; this confirms viewport/layout/content, not target-Mac GPU performance.
+
+**Remaining:** profile the rendered scene on the target Mac GPU and gather player feedback. This remains a playable first-room slice, not a claim of complete Noita-like feature parity.
 
 **Purpose:** prove that Ashfall is a game about readable movement and causal material interaction, not only a simulation benchmark.
 
@@ -43,6 +45,8 @@ In one short cave run, the player can explore, aim a simple tool, alter the mate
 - A repeat run with the same seed and input sequence produces the same world result under the chosen determinism contract.
 - Save/reload is added only after the ownership of player/tool state is explicit; then it restores the interaction result exactly.
 
+Evidence for the rendered check is captured at 1280×720 with bloom off in the GUI-mode sign-off runner above. Visual composition/content were checked on Mesa llvmpipe; target-Mac GPU performance remains a separate gate.
+
 ## Explicit non-goals
 
 - Full Noita feature parity, copied assets/layouts, dozens of spells, shops, or a complete roguelite progression loop.
@@ -51,8 +55,6 @@ In one short cave run, the player can explore, aim a simple tool, alter the mate
 
 ## Suggested order
 
-1. Close the visual play-scale cave review and keep the debug UI out of the normal route.
-2. Replace the current top-down placeholder movement with tested side-view movement and jump.
-3. Add one wand/tool and impact feedback through the bridge's public cell APIs.
-4. Author the water/fire route and verify collision, recovery, and deterministic outcomes.
-5. Decide and test tick-indexed command/entity ownership before broadening the content.
+1. Profile the completed route on the target Mac GPU; local visual captures do not substitute for device performance.
+2. Gather hands-on playtest feedback and address concrete traversal/readability issues.
+3. Keep broader content and progression outside this first-room slice until those checks are complete.

@@ -222,6 +222,9 @@ func _build_cave() -> void:
 	_carve_tunnel(276, 226, 345, 254, 13, 351)
 	_carve_chamber(385.0, 276.0, 59.0, 45.0, 361, 0.27)
 	_carve_tunnel(424, 296, 464, 323, 10, 371)
+	# Preserve a walkable connector where the chamber floor rises into the east
+	# tunnel; without it the two authored voids nearly touch but leave a soft lock.
+	_carve_tunnel(410, 309, 430, 300, 9, 401)
 	_carve_chamber(465.0, 334.0, 34.0, 27.0, 381, 0.20)
 	_carve_chamber(351.0, 226.0, 25.0, 18.0, 391, 0.18)
 	_build_stone_rind(STONE, ROCK, AIR)
@@ -236,10 +239,10 @@ func _build_cave() -> void:
 	world.fill_rect(333, 222, 369, 239, WATER)
 	world.fill_rect(367, 311, 374, 315, OIL)
 	# A little eroded rubble, a submerged seep and warm fuel make the room feel
-	# inhabited, while leaving the player-sized route free of forced jumps.
+	# inhabited; keep the short timber ledge west of the traversable connector.
 	world.fill_rect(235, 255, 250, 257, SAND)
 	world.fill_rect(298, 244, 308, 247, WATER)
-	world.fill_rect(401, 305, 417, 307, WOOD)
+	world.fill_rect(395, 305, 408, 307, WOOD)
 	# Preserve the deterministic settle-tick contract for existing render and
 	# presentation checks. Stage fresh fire only after settling the liquid.
 	for i in 60:
@@ -646,7 +649,7 @@ func _respawn_player() -> void:
 func _create_finish_overlay() -> void:
 	var shade := ColorRect.new()
 	shade.name = "FinishOverlay"
-	shade.color = Color(0.025, 0.02, 0.035, 0.82)
+	shade.color = Color(0.025, 0.02, 0.035, 0.52)
 	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	shade.z_index = 100
