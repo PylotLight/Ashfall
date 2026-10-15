@@ -6,7 +6,7 @@ Ashfall is a **Noita-inspired, systemic falling-sand action prototype**: a Godot
 
 - **P0–P2 foundations are implemented:** portable C++20 simulation, Godot GDExtension bridge, data-driven materials/reactions, heat, fire, save/load, deterministic tests, and benchmarks.
 - **P3 presentation is implemented but not fully signed off:** the default `cave_benchmark.tscn` has procedural cave generation, material profiles, local fire lighting, camera framing, animation, and a debug panel. Rendered visual approval and target-Mac GPU capture remain separate gates.
-- **P4A first playable prototype is implemented; the full loop remains open:** the default cave now has an original surface entrance, asymmetric rooms, grounded side-view movement/jump, and a Spring Wand water/fire/wood interaction. An exit/finish state, tick-indexed replay ownership, transient entity save state, and rendered sign-off remain to do.
+- **P4A playable prototype is implemented; final gates remain open:** the default cave has an original surface entrance, asymmetric rooms, grounded side-view movement/jump, a Spring Wand water/fire/wood interaction, and an eastern route-cleared finish state. Tick-indexed replay, transient entity save state, and rendered 1280×720 sign-off remain to do.
 - `main.tscn` remains the small material-demo/reference scene; the cave is the default boot scene.
 
 See [the roadmap](docs/ROADMAP.md), [architecture](ARCHITECTURE.md), and [the scoped playable-slice task](docs/tasks/P4_NOITA_LIKE_SLICE.md) for current priorities and exit criteria.

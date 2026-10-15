@@ -32,7 +32,7 @@ The default scene now boots to an authored surface entrance and asymmetric cave 
 - A small health/hazard rule only if it is needed to make the route meaningful; no sprawling combat system.
 - Input and world changes are testable and repeatable. Decide the authoritative ownership of player/projectile state before persistence expands.
 
-**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, and timber-grille breach. **Still open:** explicit exit/finish state, recovery/persistence semantics for player/projectiles, tick-indexed replay, and rendered human sign-off at 1280×720.
+**Verified in this pass:** scripted spawn-to-grille traversal, jump/fall, solid-wall blocking, spring-cap breach, native water/fire steam, timber-grille breach, and the eastern exit/route-cleared state. **Still open:** recovery/persistence semantics for player/projectiles, tick-indexed replay, and rendered human sign-off at 1280×720.
 
 Detailed acceptance and non-goals: [P4 Noita-like playable slice](tasks/P4_NOITA_LIKE_SLICE.md).
 
@@ -55,6 +55,6 @@ Build inspectors, scenario/replay tooling, and content authoring only to remove 
 ## Near-term order
 
 1. Review the new surface-to-cave route and interaction in a rendered 1280×720 pass; keep the target-Mac GPU measurement explicitly open.
-2. Add an explicit exit/finish state and recovery path; tune the route and hazard if playtesting exposes soft locks.
-3. Define tick-indexed command/entity ownership and extend tests before broadening persistence or adding more tools.
+2. Define tick-indexed command/entity ownership and extend tests before broadening persistence or adding more tools.
+3. Add transient player/projectile state to save/load and close rendered sign-off at 1280×720.
 4. Close the remaining P3 visual evidence that can be captured here.

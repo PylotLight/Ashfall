@@ -102,6 +102,17 @@ func _run() -> void:
 	check(main.get_node_or_null("MainLayout/ViewportContainer/WorldStack/GameplayFX") != null, "P4A projectile and impact FX layer is wired")
 	check(main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/ToolReadout") != null, "P4A visible HUD explains the Spring Wand")
 	check(main.palette_box.get_parent().name == "DebugBox", "P4A material-paint tools stay behind the debug opener")
+	check(main.EXIT_TRIGGER.size.x > 0.0 and main.EXIT_MARKER.x > 450.0, "P4A route ends at an authored eastern exit")
+	check(main._finish_overlay != null and not main._finish_overlay.visible, "P4A finish overlay is present but hidden during play")
+	main.player_pos = Vector2(470.0, 360.0)
+	main._check_finish_trigger()
+	check(not main._run_finished, "P4A finish trigger does not fire before the exit threshold")
+	main.player_pos = Vector2(488.0, 361.0)
+	main._check_finish_trigger()
+	check(main._run_finished and main._finish_overlay.visible, "P4A entering the exit shows the explicit route-cleared state")
+	var finished_tick: int = main.world.get_tick()
+	main._check_finish_trigger()
+	check(main.world.get_tick() == finished_tick, "P4A finished state remains frozen until a rebuild")
 
 	main.queue_free()
 	if _failures > 0:

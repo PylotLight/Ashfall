@@ -1,6 +1,6 @@
 # P4A — Noita-like Playable Cave Slice
 
-**Status:** first playable prototype implemented; the full P4A exit gate remains open.
+**Status:** playable prototype and explicit route-cleared exit implemented; replay, transient save state, and rendered sign-off remain open.
 
 ## First-prototype implementation (2026-10-15)
 
@@ -10,7 +10,9 @@
 - Moved the material palette, telemetry, and material-demo button into the F1 debug panel; normal play shows the entry note and tool controls.
 - Added `tests/godot_p4a_playable_verify.gd` for the surface-to-grille walk, jump/fall, wall collision, spring release, steam reaction, and grille breach.
 
-**Still open:** there is no explicit exit trigger/finish state yet; player and projectile input is not a tick-indexed replay stream; save/reload does not yet own transient velocity/projectile state; and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains a human check. This is a playable first-room foundation, not a claim that the complete P4A acceptance gate has closed.
+**Exit phase (2026-10-15):** added a visible eastern portal, an exit trigger, a route-cleared overlay, and a restart prompt. The exit is presentation-only and does not alter the native cell world.
+
+**Still open:** player/projectile input is not yet a tick-indexed replay stream; save/reload does not yet own transient velocity/projectile state; and rendered sign-off at 1280×720 (including bloom-off and a full interaction pass) remains open. This remains a playable first-room slice, not a claim that the complete P4A acceptance gate has closed.
 
 **Purpose:** prove that Ashfall is a game about readable movement and causal material interaction, not only a simulation benchmark.
 

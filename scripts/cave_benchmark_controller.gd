@@ -77,6 +77,8 @@ const PLAYER_TERMINAL_SPEED: float = 150.0
 const PLAYER_STEP_HEIGHT: int = 2
 const CAVE_SPAWN: Vector2 = Vector2(44.0, 80.0)
 const SURFACE_LEVEL: float = 80.0
+const EXIT_TRIGGER: Rect2 = Rect2(477.0, 332.0, 23.0, 30.0)
+const EXIT_MARKER: Vector2 = Vector2(488.0, 351.0)
 const WAND_SPEED: float = 150.0
 const WAND_COOLDOWN: float = 0.28
 const WAND_MAX_AGE: float = 1.6
@@ -96,6 +98,8 @@ var _transient_msg: String = ""
 var _transient_ttl: float = 0.0
 const TRANSIENT_SECS: float = 3.0
 var _marker_mat: int = -1
+var _run_finished: bool = false
+var _finish_overlay: Control
 
 # P3A A2 wiring (integrator): shared follow-camera + debug-panel helpers.
 # Mirrors main_controller.gd; the helpers are scene-agnostic (NodePath-guarded).
@@ -115,6 +119,7 @@ var _debug_panel: PopupPanel
 
 func _ready() -> void:
 	get_window().focus_exited.connect(_on_focus_lost)
+	_create_finish_overlay()
 	var data_file := FileAccess.open("res://data/materials.json", FileAccess.READ)
 	if data_file != null:
 		if not world.load_materials(data_file.get_as_text()):
@@ -436,11 +441,14 @@ func _build_structures(stone_mat: int, wood_mat: int, oil_mat: int, sand_mat: in
 func _process(delta: float) -> void:
 	if delta > 0.0:
 		_frame_ms_ema = lerpf(_frame_ms_ema, delta * 1000.0, 0.08)
-	_move_player(delta)
-	if not _gameplay_awake and not _simulation_manually_paused and player_pos.x >= 340.0:
-		_wake_gameplay_world()
+	if not _run_finished:
+		_move_player(delta)
+		if not _gameplay_awake and not _simulation_manually_paused and player_pos.x >= 340.0:
+			_wake_gameplay_world()
+		_check_finish_trigger()
 	_aim_from_cursor()
-	_advance_projectiles(delta)
+	if not _run_finished:
+		_advance_projectiles(delta)
 	_update_camera(delta)
 	_update_marker()
 	_update_light(delta)
@@ -485,8 +493,62 @@ func _respawn_player() -> void:
 	_impact_effects.clear()
 	_gameplay_awake = false
 	_simulation_manually_paused = false
+	_run_finished = false
+	if _finish_overlay != null:
+		_finish_overlay.visible = false
 	world.auto_step = false
 	_snap_camera()
+
+
+func _create_finish_overlay() -> void:
+	var shade := ColorRect.new()
+	shade.name = "FinishOverlay"
+	shade.color = Color(0.025, 0.02, 0.035, 0.82)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shade.z_index = 100
+	shade.visible = false
+	add_child(shade)
+	_finish_overlay = shade
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shade.add_child(center)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(420.0, 150.0)
+	center.add_child(panel)
+	var stack := VBoxContainer.new()
+	stack.alignment = BoxContainer.ALIGNMENT_CENTER
+	stack.add_theme_constant_override("separation", 10)
+	panel.add_child(stack)
+	var title := Label.new()
+	title.text = "THE GROTTO FALLS QUIET"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_color_override("font_color", Color("#ffc869"))
+	title.add_theme_font_size_override("font_size", 24)
+	stack.add_child(title)
+	var detail := Label.new()
+	detail.text = "ROUTE CLEARED  ·  THE SPRING FOUND ITS WAY HOME"
+	detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	detail.add_theme_color_override("font_color", Color("#d5e8df"))
+	stack.add_child(detail)
+	var restart := Label.new()
+	restart.text = "Press R to begin another run"
+	restart.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	restart.add_theme_color_override("font_color", Color("#b6aba0"))
+	stack.add_child(restart)
+
+
+func _check_finish_trigger() -> void:
+	if _run_finished:
+		return
+	var body_center := Vector2(player_pos.x, player_pos.y - PLAYER_H * 0.5)
+	if EXIT_TRIGGER.has_point(body_center):
+		_run_finished = true
+		world.auto_step = false
+		_finish_overlay.visible = true
+		_set_transient("ROUTE CLEARED")
+		_update_hud()
 
 func _box_passable(px: float, py: float) -> bool:
 	var x1: int = floori(px - PLAYER_HALF_W)
@@ -689,7 +751,7 @@ func _update_gameplay_fx() -> void:
 	for effect in _impact_effects:
 		impacts.append({"pos": _world_to_display(effect["pos"] as Vector2), "age": float(effect["age"])})
 	var cursor := _world_to_display(_aim_target)
-	gameplay_fx.call("set_frame", shots, impacts, cursor)
+	gameplay_fx.call("set_frame", shots, impacts, cursor, _world_to_display(EXIT_MARKER))
 
 func _player_center_cell() -> Vector2i:
 	return Vector2i(roundi(player_pos.x), roundi(player_pos.y - PLAYER_H * 0.5))
