@@ -17,6 +17,14 @@ constexpr MaterialId kWood = 6;
 constexpr MaterialId kLava = 7;
 constexpr MaterialId kRock = 8;
 constexpr MaterialId kOil = 9;
+constexpr MaterialId kGrass = 10;
+constexpr MaterialId kDirt = 11;
+constexpr MaterialId kClay = 12;
+constexpr MaterialId kCoal = 13;
+constexpr MaterialId kGold = 14;
+constexpr MaterialId kMoss = 15;
+constexpr MaterialId kFungus = 16;
+constexpr MaterialId kGunpowder = 17;
 
 enum class Movement : std::uint8_t { Static, Powder, Liquid, Gas };
 

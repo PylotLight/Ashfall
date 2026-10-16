@@ -94,8 +94,8 @@ func _run_exit_checks() -> void:
 	var debug_button := main.get_node_or_null("MainLayout/SidebarScroll/Sidebar/DebugToggleBtn") as Button
 	var demo_button := main.get_node_or_null("DebugPanel/DebugBox/DemoBtn") as Button
 	check(debug_button != null and demo_button != null and debug_button.text.begins_with("[F1]") and demo_button.text.begins_with("[F2]"), "E3/C1 debug and material-demo shortcuts are distinct")
-	check(is_equal_approx(main._camera.view_h_cells, 120.0), "E3/C1 default camera uses player-scale framing")
-	check(main._view_region.size.y == 120 and main._view_region.size.x < 512, "E3/C1 actual view region is cropped to player scale")
+	check(is_equal_approx(main._camera.view_h_cells, 176.0), "E3/C1 default camera uses player-scale framing")
+	check(main._view_region.size.y == 176 and main._view_region.size.x < 512, "E3/C1 actual view region is cropped to player scale")
 	check(main._camera.center_cells.y < main.player_pos.y, "E3/C1 opening camera leaves room above the avatar")
 	var backdrop_material: ShaderMaterial = main.cave_backdrop.material as ShaderMaterial
 	check(backdrop_material != null and backdrop_material.shader.resource_path.ends_with("cave_backdrop.gdshader"), "E3/C1 atmospheric cave backdrop shader is attached")

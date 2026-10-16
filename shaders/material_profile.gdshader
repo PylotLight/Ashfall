@@ -67,6 +67,11 @@ uniform sampler2D depth_tex : filter_nearest, repeat_disable;
 uniform float edge_darkness = 0.35;
 uniform float depth_boost = 1.0;
 uniform float depth_floor = 0.30;
+// Lit-top-edge + crevice AO (R9): surfaces facing open air catch light while
+// tucked cells sink. Driven purely by neighbor-id DIFFERENCE counts — the
+// zero-material-branch contract holds (no id is ever named).
+uniform float top_light = 0.22;
+uniform float crevice_ao = 0.14;
 // Profile LUTs from the glue: 4 wide x 256 tall (row = material id).
 uniform sampler2D profile_palette : filter_nearest, repeat_disable; // RGBA8: 4 palette colors (unused slots repeat last)
 uniform sampler2D profile_params : filter_nearest, repeat_disable; // RGBAF: tex0=(pattern_mode,pattern_scale,detail,edge) tex1=(opacity,opacity_mode,emission_strength,anim) tex2=(emission rgb,-) tex3=(palette_count,depth_rate,-,-)
@@ -204,34 +209,43 @@ void fragment() {
 	}
 	vec3 outc = mix(bg_color, col, rendered);
 
-	// 8. Material-boundary darkening (R7): count 4-neighbors whose id differs
-	// from the center id, darken by profile edge_response. Reads ride the
+	// 8. Material-boundary darkening (R7) + lit top edge / crevice AO (R9):
+	// count 4-neighbors whose id differs from the center id, split into the
+	// cell ABOVE vs the other three sides. A differing cell above means this
+	// fragment sits on an exposed surface, so it catches light; differences
+	// on the remaining sides keep the R7 contact darkening, and 3+ differing
+	// neighbors means a tucked crevice that sinks further. Reads ride the
 	// FULL identity texture at sim-space texel centers (see crop note) with
 	// coordinate guards at world borders; the equality test names no
 	// material, so the zero-material-branch contract holds.
 	float edge_response = clamp(P0.w, 0.0, 1.0);
-	float ebn = 0.0;
+	float ebn_top = 0.0;
+	float ebn_side = 0.0;
 	if (rendered > 0.5) {
 		float nid = 0.0;
 		if (cell.x > 0.0) {
 			nid = floor(texture(identity_tex, cuv - vec2(ftexel.x, 0.0)).r * 255.0 + 0.5);
-			ebn += step(0.5, abs(nid - idf));
+			ebn_side += step(0.5, abs(nid - idf));
 		}
 		if (cell.x < world_size.x - 1.0) {
 			nid = floor(texture(identity_tex, cuv + vec2(ftexel.x, 0.0)).r * 255.0 + 0.5);
-			ebn += step(0.5, abs(nid - idf));
+			ebn_side += step(0.5, abs(nid - idf));
 		}
 		if (cell.y > 0.0) {
 			nid = floor(texture(identity_tex, cuv - vec2(0.0, ftexel.y)).r * 255.0 + 0.5);
-			ebn += step(0.5, abs(nid - idf));
+			ebn_top += step(0.5, abs(nid - idf));
 		}
 		if (cell.y < world_size.y - 1.0) {
 			nid = floor(texture(identity_tex, cuv + vec2(0.0, ftexel.y)).r * 255.0 + 0.5);
-			ebn += step(0.5, abs(nid - idf));
+			ebn_side += step(0.5, abs(nid - idf));
 		}
 	}
-	float edge_f = 1.0 - edge_response * edge_darkness * clamp(ebn * 0.75, 0.0, 1.0);
+	float edge_f = 1.0 - edge_response * edge_darkness * clamp(ebn_side * 0.75, 0.0, 1.0);
 	outc *= mix(1.0, edge_f, rendered);
+	// Exposed-surface lift, then crevice sink for fully tucked fragments.
+	float surface_f = 1.0 + top_light * clamp(ebn_top, 0.0, 1.0);
+	float crevice_f = 1.0 - crevice_ao * step(2.5, ebn_top + ebn_side);
+	outc *= mix(1.0, surface_f * crevice_f, rendered);
 
 	// 9. Overburden depth shading (R7): exponential falloff with the rate
 	// from LUT tex3.g (loader default; no JSON field by design), plus an ambient
