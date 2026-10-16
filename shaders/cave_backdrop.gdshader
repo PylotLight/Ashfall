@@ -27,21 +27,15 @@ float value_noise(vec2 p) {
 
 void fragment() {
 	vec2 world_cell = view_origin + UV * view_size;
-	// Structured distant wall (R9): horizontal strata bands carry the large
-	// masses, a ridged crack field cuts them, fine grain stays restrained.
+	// Distant wall (R9-fix): broad faint tonal masses only. No contours, no
+	// regular courses — those read as drawn outlines at play scale. Amplitudes
+	// stay small so the backdrop sits behind the lit terrain, not over it.
 	// World-locked so panning never swims the geology.
-	float strata = value_noise(vec2(world_cell.x / 90.0, world_cell.y / 26.0));
-	float strata_band = smoothstep(0.35, 0.65, strata);
-	float crack_n = value_noise((world_cell + vec2(21.7, 8.3)) / 17.0);
-	float crack = 1.0 - abs(crack_n * 2.0 - 1.0);
-	crack = smoothstep(0.92, 1.0, crack);
-	float grain = value_noise((world_cell + vec2(4.1, 37.9)) / 9.0);
-	float wall_tint = mix(0.80, 1.12, strata_band);
-	wall_tint *= mix(1.0, 0.62, crack);
-	wall_tint *= mix(0.96, 1.04, grain);
-	// Dark mortar seams every ~14 cells break the fog into courses.
-	float course = smoothstep(0.0, 1.2, abs(fract(world_cell.y / 14.0) - 0.5) * 14.0);
-	wall_tint *= mix(0.72, 1.0, course);
+	float strata = value_noise(vec2(world_cell.x / 110.0, world_cell.y / 34.0));
+	float mass = value_noise((world_cell + vec2(21.7, 8.3)) / 71.0);
+	float grain = value_noise((world_cell + vec2(4.1, 37.9)) / 13.0);
+	float wall_tint = mix(0.86, 1.08, strata * 0.6 + mass * 0.4);
+	wall_tint *= mix(0.97, 1.03, grain);
 	vec3 cave_color = base_tint * wall_tint;
 	// Above the authored soil line, the same world-locked field becomes a dim
 	// blue-violet evening sky. A soft horizon avoids a hard backdrop seam.

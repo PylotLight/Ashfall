@@ -203,10 +203,15 @@ func _build_cave() -> void:
 	world.fill_rect(0, 0, 511, 511, ROCK)
 	for x in range(512):
 		var surface: int = _surface_height(x)
+		# Ragged horizons (R9-fix): band thickness wanders per column so the
+		# topsoil never reads as ruled layer cake. Deterministic hash only.
+		var sand_d: int = 3 + int(_hash2(x, 11, 501) * 4.0)
+		var stone_d: int = 4 + int(_hash2(x, 12, 502) * 6.0)
+		var jog: int = int((_hash2(x, 13, 503) - 0.5) * 3.0)
 		world.fill_rect(x, 0, x, surface - 1, AIR)
-		world.fill_rect(x, surface, x, surface + 4, SAND)
-		world.fill_rect(x, surface + 5, x, surface + 10, STONE)
-		world.fill_rect(x, surface + 11, x, 511, ROCK)
+		world.fill_rect(x, surface + jog, x, surface + jog + sand_d, SAND)
+		world.fill_rect(x, surface + jog + sand_d + 1, x, surface + jog + sand_d + stone_d, STONE)
+		world.fill_rect(x, surface + jog + sand_d + stone_d + 1, x, 511, ROCK)
 	# A thin exposed bedrock lip gives the spawn stable footing while the
 	# surrounding ridge keeps its loose soil and irregular silhouette.
 	world.fill_rect(36, int(SURFACE_LEVEL), 52, int(SURFACE_LEVEL), STONE)
