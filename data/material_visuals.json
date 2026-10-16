@@ -101,7 +101,7 @@
       "material": "rock",
       "palette": ["#2c2530", "#57505a", "#80777a", "#b5a894"],
       "pattern": "clusters",
-      "pattern_scale": 5,
+      "pattern_scale": 3,
       "detail_strength": 0.3,
       "edge_response": 0.5,
       "opacity": 1.0,
