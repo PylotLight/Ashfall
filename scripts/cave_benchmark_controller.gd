@@ -233,6 +233,7 @@ func _build_cave() -> void:
 	_carve_chamber(465.0, 334.0, 34.0, 27.0, 381, 0.20)
 	_carve_chamber(351.0, 226.0, 25.0, 18.0, 391, 0.18)
 	_build_stone_rind(STONE, ROCK, AIR)
+	_build_geology(ROCK, STONE, SAND)
 	_build_veins(SAND, AshfallWorld.MATERIAL_LAVA, ROCK)
 	# A narrow timber grille marks the route; a water pocket is held just above
 	# a weak timber sill. The Spring Wand can cut sand/wood and release it.
@@ -370,6 +371,25 @@ func _build_stone_rind(stone_mat: int, rock_mat: int, air_mat: int) -> void:
 				continue
 			if _hash2(x, y, 5) < 0.85:
 				world.set_cell(x, y, stone_mat)
+
+
+## Geology pass: break the monolithic ROCK mass into large two-tone patches
+## (ROCK/STONE) with sparse enclosed SAND speckle. Rock-only writes, so carved
+## chambers, the route, structures and puzzle cells are never touched.
+## Deterministic hash/noise only, same contract as the other build passes.
+func _build_geology(rock_mat: int, stone_mat: int, sand_mat: int) -> void:
+	for y in range(1, 511):
+		for x in range(1, 511):
+			if world.get_cell(x, y) != rock_mat:
+				continue
+			var mass: float = _noise1d(float(x) / 43.0, 601) * 0.6 + _noise1d(float(y) / 37.0, 602) * 0.4
+			if mass > 0.55 and _hash2(x / 4, y / 4, 603) < 0.75:
+				world.set_cell(x, y, stone_mat)
+			elif _hash2(x, y, 604) < 0.004:
+				# Enclosed speckle only: never breach air.
+				if world.get_cell(x - 1, y) == rock_mat and world.get_cell(x + 1, y) == rock_mat \
+						and world.get_cell(x, y - 1) == rock_mat and world.get_cell(x, y + 1) == rock_mat:
+					world.set_cell(x, y, sand_mat)
 
 
 ## Stalactites (ceilings) + stalagmites (floors) inside the big chambers.
