@@ -402,17 +402,24 @@ func _place_tooth(x: int, b: Rect2i, stone_mat: int, air_mat: int, down: bool) -
 				return
 
 
-## Ore-style veins sealed in rock: sand lenses (gold-ish) + lava lenses.
-## Writes land on ROCK only (lenses never breach air: per-cell enclosure).
+## Ore-style veins sealed in rock: thin horizontal lenses that follow the
+## strata instead of round coin stamps. Writes land on ROCK only (lenses never
+## breach air: per-cell enclosure). Deterministic hash only, same contract.
 func _build_veins(sand_mat: int, lava_mat: int, rock_mat: int) -> void:
 	var AIR: int = AshfallWorld.MATERIAL_AIR
 	for k in 44:
 		var cx: int = 10 + int(_hash2(k, 1, 301) * 492.0)
 		var cy: int = 90 + int(_hash2(k, 2, 302) * 351.0)
-		var r: int = 2 + int(_hash2(k, 3, 303) * 4.0)
-		for dy in range(-r, r + 1):
-			for dx in range(-r, r + 1):
-				if dx * dx + dy * dy > r * r:
+		var rx: int = 4 + int(_hash2(k, 3, 303) * 8.0)
+		var ry: int = 1 + int(_hash2(k, 7, 307) * 2.0)
+		var tilt: float = (_hash2(k, 8, 308) - 0.5) * 0.35
+		for dy in range(-ry - 1, ry + 2):
+			for dx in range(-rx - 1, rx + 2):
+				var ey: float = float(dy) - float(dx) * tilt
+				if (float(dx * dx) / float(rx * rx) + float(ey * ey) / float(maxi(ry, 1) * maxi(ry, 1))) > 1.0:
+					continue
+				# Ragged feathered edge so lenses pinch out instead of stamping.
+				if _hash2(cx + dx, cy + dy, 309) < 0.18:
 					continue
 				var x: int = cx + dx
 				var y: int = cy + dy
@@ -1241,9 +1248,10 @@ func _init_camera() -> void:
 	# views over the live bridge textures; center-sample-only water shader
 	# is crop-safe.
 	_camera = FollowCamera.new()
-	# Tighter authored play framing: enough of the room to read its route, with
-	# the player no longer disappearing into full-world benchmark scale.
-	_camera.view_h_cells = 120.0
+	# Play framing (~176 cells vertical ≈ 4 px/cell at 720p): Noita-like
+	# scale where the wizard reads against the room instead of filling it.
+	# Feedback gate: view_h_cells is asserted in godot_p3a_exit_verify.gd.
+	_camera.view_h_cells = 176.0
 	_base_atlas = AtlasTexture.new()
 	_water_atlas = AtlasTexture.new()
 	_refresh_textures()
@@ -1346,13 +1354,16 @@ func _display_to_world(local_pos: Vector2) -> Vector2i:
 	return FollowCamera.screen_to_world(local_pos, texture_display.size, _view_region, _world_size())
 
 func _update_marker() -> void:
-	# The collider is deliberately small, but a game character cannot be a
-	# sub-cell red sliver. Keep the crisp wizard glyph readable at play scale.
+	# Marker matches the collider exactly (2.9 x 5.2 cells) so the glyph never
+	# disagrees with physics, snapped to integer screen pixels so vector edges
+	# stay crisp instead of blurring across the terrain grid.
 	var feet := _world_to_display(Vector2(player_pos.x, player_pos.y))
 	var cell_px: float = maxf(_display_scale().x, 1.0)
-	var sprite_size := Vector2(maxf(26.0, cell_px * 4.0), maxf(36.0, cell_px * 5.8))
+	var sprite_size := Vector2(
+		maxf(26.0, snappedf(cell_px * (PLAYER_HALF_W * 2.0), 1.0)),
+		maxf(36.0, snappedf(cell_px * PLAYER_H, 1.0)))
 	player_marker.size = sprite_size
-	player_marker.position = feet - Vector2(sprite_size.x * 0.5, sprite_size.y * 0.94)
+	player_marker.position = (feet - Vector2(sprite_size.x * 0.5, sprite_size.y * 0.94)).round()
 	player_marker.call("set_aim_direction", _aim_direction)
 	if current_material == _marker_mat:
 		return
