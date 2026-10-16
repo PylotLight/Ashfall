@@ -199,19 +199,25 @@ func _build_cave() -> void:
 	var WOOD: int = AshfallWorld.MATERIAL_WOOD
 	var ROCK: int = AshfallWorld.MATERIAL_ROCK
 	var OIL: int = _mat_id("oil", 9)
+	var GRASS: int = _mat_id("grass", 10)
+	var DIRT: int = _mat_id("dirt", 11)
+	var COAL: int = _mat_id("coal", 13)
+	var GOLD: int = _mat_id("gold", 14)
+	var MOSS: int = _mat_id("moss", 15)
+	var FUNGUS: int = _mat_id("fungus", 16)
 	world.init_world(512, 512)
 	world.fill_rect(0, 0, 511, 511, ROCK)
 	for x in range(512):
 		var surface: int = _surface_height(x)
-		# Ragged horizons (R9-fix): band thickness wanders per column so the
-		# topsoil never reads as ruled layer cake. Deterministic hash only.
-		var sand_d: int = 3 + int(_hash2(x, 11, 501) * 4.0)
-		var stone_d: int = 4 + int(_hash2(x, 12, 502) * 6.0)
-		var jog: int = int((_hash2(x, 13, 503) - 0.5) * 3.0)
+		# Mines-like topsoil: grass skin over ragged dirt, then worked stone.
+		# The spawn lane stays exactly level (jog 0) so footing never changes.
+		var jog: int = 0 if abs(x - int(CAVE_SPAWN.x)) <= 7 else int((_hash2(x, 13, 503) - 0.5) * 3.0)
+		var dirt_d: int = 2 + int(_hash2(x, 11, 501) * 3.0)
 		world.fill_rect(x, 0, x, surface - 1, AIR)
-		world.fill_rect(x, surface + jog, x, surface + jog + sand_d, SAND)
-		world.fill_rect(x, surface + jog + sand_d + 1, x, surface + jog + sand_d + stone_d, STONE)
-		world.fill_rect(x, surface + jog + sand_d + stone_d + 1, x, 511, ROCK)
+		world.fill_rect(x, surface + jog, x, surface + jog, GRASS)
+		world.fill_rect(x, surface + jog + 1, x, surface + jog + dirt_d, DIRT)
+		world.fill_rect(x, surface + jog + dirt_d + 1, x, surface + jog + dirt_d + 6, STONE)
+		world.fill_rect(x, surface + jog + dirt_d + 7, x, 511, ROCK)
 	# A thin exposed bedrock lip gives the spawn stable footing while the
 	# surrounding ridge keeps its loose soil and irregular silhouette.
 	world.fill_rect(36, int(SURFACE_LEVEL), 52, int(SURFACE_LEVEL), STONE)
@@ -235,6 +241,9 @@ func _build_cave() -> void:
 	_build_stone_rind(STONE, ROCK, AIR)
 	_build_geology(ROCK, STONE, SAND)
 	_build_veins(SAND, AshfallWorld.MATERIAL_LAVA, ROCK)
+	_build_ores(COAL, GOLD, ROCK)
+	_build_moss(MOSS, STONE, AIR)
+	_build_fungus(FUNGUS, AIR)
 	# A narrow timber grille marks the route; a water pocket is held just above
 	# a weak timber sill. The Spring Wand can cut sand/wood and release it.
 	world.fill_rect(376, 273, 379, 322, WOOD)
@@ -471,7 +480,74 @@ func _build_veins(sand_mat: int, lava_mat: int, rock_mat: int) -> void:
 				world.set_cell(x2, y2, lava_mat)
 
 
-## Preserved structures: lower floor/fuel, plus a compact broken spawn bridge.
+## Ore seams: coal lenses mid-depth, rare small gold teeth deep down.
+## Rock-only writes (lenses never breach air: per-cell enclosure), same
+## deterministic-hash contract as _build_veins.
+func _build_ores(coal_mat: int, gold_mat: int, rock_mat: int) -> void:
+	var AIR: int = AshfallWorld.MATERIAL_AIR
+	for k in 14:
+		var cx: int = 20 + int(_hash2(k, 21, 311) * 472.0)
+		var cy: int = 150 + int(_hash2(k, 22, 312) * 200.0)
+		_stamp_lens(cx, cy, 3 + int(_hash2(k, 23, 313) * 5.0), 1 + int(_hash2(k, 24, 314) * 2.0), 321 + k, rock_mat, coal_mat, AIR)
+	for k in 6:
+		var gx: int = 60 + int(_hash2(k, 25, 315) * 392.0)
+		var gy: int = 380 + int(_hash2(k, 26, 316) * 62.0)
+		_stamp_lens(gx, gy, 1 + int(_hash2(k, 27, 317) * 2.0), 1, 331 + k, rock_mat, gold_mat, AIR)
+
+
+## One thin tilted enclosed lens of `fill_mat` replacing `rock_mat` only.
+func _stamp_lens(cx: int, cy: int, rx: int, ry: int, salt: int, rock_mat: int, fill_mat: int, air_mat: int) -> void:
+	var tilt: float = (_hash2(cx, cy, salt) - 0.5) * 0.4
+	for dy in range(-ry - 1, ry + 2):
+		for dx in range(-rx - 1, rx + 2):
+			var ey: float = float(dy) - float(dx) * tilt
+			if (float(dx * dx) / float(rx * rx) + float(ey * ey) / float(maxi(ry, 1) * maxi(ry, 1))) > 1.0:
+				continue
+			if _hash2(cx + dx, cy + dy, salt + 1) < 0.15:
+				continue
+			var x: int = cx + dx
+			var y: int = cy + dy
+			if x < 1 or x > 510 or y < 1 or y > 510:
+				continue
+			if world.get_cell(x, y) != rock_mat:
+				continue
+			if world.get_cell(x - 1, y) == air_mat or world.get_cell(x + 1, y) == air_mat \
+					or world.get_cell(x, y - 1) == air_mat or world.get_cell(x, y + 1) == air_mat:
+				continue
+			world.set_cell(x, y, fill_mat)
+
+
+## Moss creeps over near-surface worked stone. Stone-to-moss swaps are
+## collision-neutral (both static solids), so the route cannot change.
+func _build_moss(moss_mat: int, stone_mat: int, air_mat: int) -> void:
+	for x in range(1, 511):
+		var sh: int = _surface_height(x)
+		for y in range(maxi(1, sh - 2), mini(511, sh + 45)):
+			if world.get_cell(x, y) != stone_mat:
+				continue
+			if world.get_cell(x, y - 1) != air_mat:
+				continue
+			if _hash2(x, y, 701) < 0.35:
+				world.set_cell(x, y, moss_mat)
+
+
+## Fungus tufts colonize the optional high pocket only (never the route).
+## Air-only writes onto solid floors; anything unexpected is skipped.
+func _build_fungus(fungus_mat: int, air_mat: int) -> void:
+	var spots := [Vector2i(283, 158), Vector2i(299, 160), Vector2i(291, 162)]
+	for s in spots:
+		for dy in range(-1, 1):
+			for dx in range(-2, 3):
+				var x: int = s.x + dx
+				var y: int = s.y + dy
+				if x < 1 or x > 510 or y < 1 or y > 510:
+					continue
+				if world.get_cell(x, y) != air_mat:
+					continue
+				if world.get_cell(x, y + 1) == air_mat:
+					continue
+				if _hash2(x, y, 702) < 0.6:
+					world.set_cell(x, y, fungus_mat)
 func _build_structures(stone_mat: int, wood_mat: int, oil_mat: int, sand_mat: int, _air: int) -> void:
 	world.fill_rect(56, 448, 456, 470, stone_mat)
 	world.fill_rect(194, 330, 222, 331, wood_mat)

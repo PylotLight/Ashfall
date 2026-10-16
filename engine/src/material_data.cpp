@@ -169,6 +169,14 @@ MaterialTable default_material_table() {
         {kLava, "lava", Movement::Liquid, false, 140, {255, 80, 10}, {"liquid"}, 0},
         {kRock, "rock", Movement::Static, true, 2000, {120, 115, 110}, {"static"}, 3},
         {kOil, "oil", Movement::Liquid, false, 40, {122, 72, 18}, {"liquid", "burnable"}, 0},
+        {kGrass, "grass", Movement::Static, true, 2000, {96, 150, 66}, {"burnable", "static"}, 1},
+        {kDirt, "dirt", Movement::Static, true, 2000, {121, 85, 58}, {"static"}, 1},
+        {kClay, "clay", Movement::Static, true, 2000, {158, 116, 88}, {"static"}, 2},
+        {kCoal, "coal", Movement::Static, true, 2000, {38, 36, 42}, {"burnable", "static"}, 2},
+        {kGold, "gold", Movement::Static, true, 2000, {232, 192, 82}, {"static"}, 3},
+        {kMoss, "moss", Movement::Static, true, 2000, {88, 158, 72}, {"burnable", "static"}, 0},
+        {kFungus, "fungus", Movement::Static, true, 2000, {158, 116, 148}, {"burnable", "static"}, 0},
+        {kGunpowder, "gunpowder", Movement::Powder, false, 150, {206, 196, 176}, {"powder", "burnable"}, 0},
     };
     return table;
 }

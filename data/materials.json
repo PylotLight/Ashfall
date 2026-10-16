@@ -10,6 +10,14 @@
     {"id": 6, "name": "wood", "movement": "static", "solid": true, "density": 2000, "color": [146, 104, 58], "tags": ["burnable", "static"], "hardness": 2},
     {"id": 7, "name": "lava", "movement": "liquid", "solid": false, "density": 140, "color": [255, 80, 10], "tags": ["liquid"]},
     {"id": 8, "name": "rock", "movement": "static", "solid": true, "density": 2000, "color": [120, 115, 110], "tags": ["static"], "hardness": 3},
-    {"id": 9, "name": "oil", "movement": "liquid", "solid": false, "density": 40, "color": [122, 72, 18], "tags": ["liquid", "burnable"]}
+    {"id": 9, "name": "oil", "movement": "liquid", "solid": false, "density": 40, "color": [122, 72, 18], "tags": ["liquid", "burnable"]},
+    {"id": 10, "name": "grass", "movement": "static", "solid": true, "density": 2000, "color": [96, 150, 66], "tags": ["burnable", "static"], "hardness": 1},
+    {"id": 11, "name": "dirt", "movement": "static", "solid": true, "density": 2000, "color": [121, 85, 58], "tags": ["static"], "hardness": 1},
+    {"id": 12, "name": "clay", "movement": "static", "solid": true, "density": 2000, "color": [158, 116, 88], "tags": ["static"], "hardness": 2},
+    {"id": 13, "name": "coal", "movement": "static", "solid": true, "density": 2000, "color": [38, 36, 42], "tags": ["burnable", "static"], "hardness": 2},
+    {"id": 14, "name": "gold", "movement": "static", "solid": true, "density": 2000, "color": [232, 192, 82], "tags": ["static"], "hardness": 3},
+    {"id": 15, "name": "moss", "movement": "static", "solid": true, "density": 2000, "color": [88, 158, 72], "tags": ["burnable", "static"], "hardness": 0},
+    {"id": 16, "name": "fungus", "movement": "static", "solid": true, "density": 2000, "color": [158, 116, 148], "tags": ["burnable", "static"], "hardness": 0},
+    {"id": 17, "name": "gunpowder", "movement": "powder", "solid": false, "density": 150, "color": [206, 196, 176], "tags": ["powder", "burnable"]}
   ]
 }

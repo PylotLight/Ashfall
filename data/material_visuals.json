@@ -120,6 +120,102 @@
       "opacity_mode": "translucent",
       "emission": {"color": "#000000", "strength": 0.0},
       "animation": "flow"
+    },
+    {
+      "material": "grass",
+      "palette": ["#3a6a30", "#5a9c40", "#8cc863"],
+      "pattern": "plume",
+      "pattern_scale": 3,
+      "detail_strength": 0.3,
+      "edge_response": 0.5,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "dirt",
+      "palette": ["#4e3520", "#79553a", "#9c7350"],
+      "pattern": "clusters",
+      "pattern_scale": 3,
+      "detail_strength": 0.3,
+      "edge_response": 0.5,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "clay",
+      "palette": ["#7a5240", "#9e7457", "#bd926f"],
+      "pattern": "clusters",
+      "pattern_scale": 4,
+      "detail_strength": 0.2,
+      "edge_response": 0.45,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "coal",
+      "palette": ["#141318", "#24232c", "#403d4d"],
+      "pattern": "clusters",
+      "pattern_scale": 3,
+      "detail_strength": 0.35,
+      "edge_response": 0.6,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "gold",
+      "palette": ["#8a6a20", "#e8c052", "#fff0a8"],
+      "pattern": "clusters",
+      "pattern_scale": 2,
+      "detail_strength": 0.3,
+      "edge_response": 0.6,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "moss",
+      "palette": ["#2a5225", "#56a047", "#8ccf60"],
+      "pattern": "clusters",
+      "pattern_scale": 2,
+      "detail_strength": 0.35,
+      "edge_response": 0.5,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "fungus",
+      "palette": ["#5e3d5a", "#9e7494", "#d0a2c0"],
+      "pattern": "clusters",
+      "pattern_scale": 2,
+      "detail_strength": 0.3,
+      "edge_response": 0.5,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
+    },
+    {
+      "material": "gunpowder",
+      "palette": ["#7a7264", "#cec4b0", "#f2ebdb"],
+      "pattern": "clusters",
+      "pattern_scale": 2,
+      "detail_strength": 0.25,
+      "edge_response": 0.5,
+      "opacity": 1.0,
+      "opacity_mode": "opaque",
+      "emission": {"color": "#000000", "strength": 0.0},
+      "animation": "static"
     }
   ]
 }

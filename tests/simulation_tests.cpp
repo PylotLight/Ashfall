@@ -1106,7 +1106,7 @@ void test_material_ids_preserve_table_order() {
     expect(!world.material_info(42, spec), "unknown id lookup fails");
     expect(world.load_material_table(ashfall::default_material_table()), "defaults reload");
     const std::vector<ashfall::MaterialId> canonical = world.material_ids();
-    expect(canonical.size() == 10 && canonical[0] == 0 && canonical[9] == 9,
+    expect(canonical.size() == 18 && canonical[0] == 0 && canonical[17] == 17,
         "canonical order restored");
 }
 
